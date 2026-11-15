@@ -34,18 +34,25 @@ typedef struct {
     char config[512];
     char data_dir[512];
     char log_dir[512];
+    char temp_dir[512];
 } svcd_context;
 
+/* kind: 0 = text result, 1 = error result, 2 = blob result (`$blobPath`). */
 typedef struct {
-    int is_error;
-    char *text; /* malloc'd; freed by the runtime after the reply is written */
+    int kind;
+    char *text;
+    char *path;
+    char *name;
+    char *mime;
 } svcd_outcome;
 
 typedef svcd_outcome (*svcd_handler)(const char *name, const char *args_json, void *user);
 
-/* Allocate an outcome. The runtime frees `text`. */
+/* Allocate an outcome. The runtime frees the strings. */
 static svcd_outcome svcd_text(const char *text);
 static svcd_outcome svcd_error(const char *text);
+/* Hand the host a file written under `$SVCD_TEMP_DIR/incoming/`. */
+static svcd_outcome svcd_blob(const char *path, const char *name, const char *mime);
 
 /* Read the SVCD_* environment the host injects. Never fails. */
 static void svcd_context_init(svcd_context *context);
@@ -74,16 +81,43 @@ static char *svcd_strdup(const char *text) {
 
 static svcd_outcome svcd_text(const char *text) {
     svcd_outcome outcome;
-    outcome.is_error = 0;
+    outcome.kind = 0;
     outcome.text = svcd_strdup(text == NULL ? "" : text);
+    outcome.path = NULL;
+    outcome.name = NULL;
+    outcome.mime = NULL;
     return outcome;
 }
 
 static svcd_outcome svcd_error(const char *text) {
     svcd_outcome outcome;
-    outcome.is_error = 1;
+    outcome.kind = 1;
     outcome.text = svcd_strdup(text == NULL ? "" : text);
+    outcome.path = NULL;
+    outcome.name = NULL;
+    outcome.mime = NULL;
     return outcome;
+}
+
+static svcd_outcome svcd_blob(const char *path, const char *name, const char *mime) {
+    svcd_outcome outcome;
+    outcome.kind = 2;
+    outcome.text = NULL;
+    outcome.path = svcd_strdup(path == NULL ? "" : path);
+    outcome.name = svcd_strdup(name == NULL ? "blob" : name);
+    outcome.mime = svcd_strdup(mime == NULL ? "application/octet-stream" : mime);
+    return outcome;
+}
+
+static void svcd_outcome_free(svcd_outcome *outcome) {
+    free(outcome->text);
+    free(outcome->path);
+    free(outcome->name);
+    free(outcome->mime);
+    outcome->text = NULL;
+    outcome->path = NULL;
+    outcome->name = NULL;
+    outcome->mime = NULL;
 }
 
 static void svcd_copy_env(char *slot, size_t size, const char *name, const char *fallback) {
@@ -100,6 +134,7 @@ static void svcd_context_init(svcd_context *context) {
     svcd_copy_env(context->config, sizeof context->config, "SVCD_CONFIG", "");
     svcd_copy_env(context->data_dir, sizeof context->data_dir, "SVCD_DATA_DIR", ".");
     svcd_copy_env(context->log_dir, sizeof context->log_dir, "SVCD_LOG_DIR", "");
+    svcd_copy_env(context->temp_dir, sizeof context->temp_dir, "SVCD_TEMP_DIR", "");
 }
 
 static void svcd_log(const char *level, const char *fmt, ...) {
@@ -306,12 +341,26 @@ static void svcd_reply_error(const char *id, int code, const char *message) {
 }
 
 static void svcd_reply_outcome(const char *id, svcd_outcome outcome) {
+    if (outcome.kind == 2) {
+        printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"$blobPath\":",
+               id == NULL ? "null" : id);
+        svcd_write_string(stdout, outcome.path == NULL ? "" : outcome.path);
+        fputs(",\"name\":", stdout);
+        svcd_write_string(stdout, outcome.name == NULL ? "blob" : outcome.name);
+        fputs(",\"mimeType\":", stdout);
+        svcd_write_string(stdout, outcome.mime == NULL ? "application/octet-stream" : outcome.mime);
+        fputs("}}\n", stdout);
+        fflush(stdout);
+        svcd_outcome_free(&outcome);
+        return;
+    }
+
     printf("{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"content\":[{\"type\":\"text\",\"text\":",
            id == NULL ? "null" : id);
     svcd_write_string(stdout, outcome.text == NULL ? "" : outcome.text);
-    printf("}],\"isError\":%s}}\n", outcome.is_error ? "true" : "false");
+    printf("}],\"isError\":%s}}\n", outcome.kind == 1 ? "true" : "false");
     fflush(stdout);
-    free(outcome.text);
+    svcd_outcome_free(&outcome);
 }
 
 static int svcd_known(const char *const *capabilities, const char *name) {

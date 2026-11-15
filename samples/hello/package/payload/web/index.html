@@ -15,7 +15,8 @@
 </style>
 
 <h1>hello</h1>
-<p class="muted">参考插件：能力调用、事件推送、分块上传下载。所有请求都走 <code>./rpc</code>，推送走 <code>./events</code>。</p>
+<p class="muted">参考插件：能力调用、事件推送、大对象输入输出。请求走 <code>./rpc</code>，
+推送走 <code>./events</code>，大文件走 <code>/api/v1/blobs</code>。</p>
 
 <section>
   <h2>方法调用</h2>
@@ -28,17 +29,15 @@
 </section>
 
 <section>
-  <h2>文件</h2>
+  <h2>大对象</h2>
+  <p class="muted">上传走 <code>POST /api/v1/blobs</code>，插件只看到 <code>{path,size}</code>；
+  插件产出的报告写到 <code>SVCD_TEMP_DIR/incoming/</code> 并返回 <code>$blobPath</code>。</p>
   <div class="row">
     <input id="file" type="file">
-    <button id="upload">上传</button>
-    <button id="list">列表</button>
+    <button id="summarize">上传并总结</button>
+    <button id="report">生成报告并下载</button>
   </div>
-  <div class="row">
-    <input id="download" type="text" placeholder="文件名" size="24">
-    <button id="download-button">下载</button>
-  </div>
-  <pre id="files">（空）</pre>
+  <pre id="blob">（等待操作）</pre>
 </section>
 
 <section>
@@ -55,7 +54,7 @@
 
   const ui = pluginUI();
   const out = document.getElementById('out');
-  const files = document.getElementById('files');
+  const blobOut = document.getElementById('blob');
   const feed = document.getElementById('feed');
 
   const show = (promise, into = out) =>
@@ -68,25 +67,33 @@
     show(ui.invoke('echo', { message: document.getElementById('message').value }));
   document.getElementById('stats').onclick = () => show(ui.invoke('stats'));
 
-  const renderList = async () => {
-    const text = await ui.invoke('file_list');
-    const parsed = JSON.parse(text);
-    files.textContent = parsed.files.length
-      ? parsed.files.map((entry) => `${entry.name}  ${entry.size} B`).join('\n')
-      : '（空）';
+  document.getElementById('summarize').onclick = () => {
+    const file = document.getElementById('file').files[0];
+    if (!file) { blobOut.textContent = '先选一个文本文件'; return; }
+    show(
+      (async () => {
+        blobOut.textContent = `上传中 ${file.size} B…`;
+        const meta = await ui.uploadBlob(file);
+        blobOut.textContent = `已上传 ${meta.id}（${meta.size} B），正在总结…`;
+        return ui.invoke('summarize', { input: ui.blobArg(meta.id) });
+      })(),
+      blobOut,
+    );
   };
 
-  document.getElementById('upload').onclick = () => {
-    const file = document.getElementById('file').files[0];
-    if (!file) { out.textContent = '先选一个文件'; return; }
-    const progress = (p) => { files.textContent = `上传中 ${p.sent}/${p.total} B`; };
-    show(ui.uploadFile(file, { onProgress: progress }).then(renderList), files);
-  };
-  document.getElementById('list').onclick = () => show(renderList(), files);
-  document.getElementById('download-button').onclick = () => {
-    const name = document.getElementById('download').value.trim();
-    if (!name) { out.textContent = '填一个文件名'; return; }
-    show(ui.downloadFile(name).then((blob) => `已下载 ${name}（${blob.size} B）`));
+  document.getElementById('report').onclick = () => {
+    show(
+      (async () => {
+        const result = await ui.invokeResult('report');
+        const id = result.structuredContent?.$blob;
+        if (!id) {
+          return `插件已产出 blob，但宿主没有物化它（无 structuredContent）。原始结果：${JSON.stringify(result.raw)}`;
+        }
+        const blob = await ui.downloadBlob(id, { filename: 'report.txt' });
+        return `报告已下载：${id}（${blob.size} B）`;
+      })(),
+      blobOut,
+    );
   };
 
   const onMessage = (method, params) => {
@@ -105,6 +112,5 @@
   };
 
   show(ui.invoke('stats'));
-  renderList().catch(() => {});
 </script>
 </html>

@@ -19,6 +19,7 @@ function Get-SvcdContext {
         Config  = $env:SVCD_CONFIG
         DataDir = $env:SVCD_DATA_DIR
         LogDir  = $env:SVCD_LOG_DIR
+        TempDir = $env:SVCD_TEMP_DIR
     }
 }
 
@@ -118,7 +119,19 @@ function Invoke-SvcdPlugin {
                 if ($null -eq $arguments) { $arguments = @{} }
 
                 $outcome = & $Handler $name $arguments
-                if ($outcome -is [hashtable] -and $outcome.ContainsKey('Error')) {
+                if ($outcome -is [hashtable] -and $outcome.ContainsKey('BlobPath')) {
+                    # Large result: the host imports the file and returns a
+                    # resource_link. See plugin-manager/docs/plugin-blob.md.
+                    Send-SvcdMessage @{
+                        jsonrpc = '2.0'
+                        id      = $id
+                        result  = @{
+                            '$blobPath' = [string]$outcome.BlobPath
+                            name        = if ($outcome.Name) { [string]$outcome.Name } else { 'blob' }
+                            mimeType    = if ($outcome.MimeType) { [string]$outcome.MimeType } else { 'application/octet-stream' }
+                        }
+                    }
+                } elseif ($outcome -is [hashtable] -and $outcome.ContainsKey('Error')) {
                     Send-SvcdResult $id ([string]$outcome.Text) ([bool]$outcome.Error)
                 } else {
                     Send-SvcdResult $id ([string]$outcome) $false

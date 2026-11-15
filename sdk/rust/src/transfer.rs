@@ -219,6 +219,7 @@ mod tests {
         match outcome {
             ToolOutcome::Text(text) => text,
             ToolOutcome::Error(error) => panic!("unexpected error: {error}"),
+            ToolOutcome::Blob { .. } => panic!("unexpected blob result"),
         }
     }
 
@@ -246,7 +247,7 @@ mod tests {
         for name in ["../etc/passwd", "/etc/passwd", ".hidden", "a/b", ""] {
             match store.put(&json!({ "path": name, "offset": 0, "total": 0, "data": "" })) {
                 ToolOutcome::Error(_) => {}
-                ToolOutcome::Text(_) => panic!("{name} should have been rejected"),
+                _ => panic!("{name} should have been rejected"),
             }
         }
         let _ = fs::remove_dir_all(root);
@@ -259,7 +260,7 @@ mod tests {
             "path": "b.txt", "offset": 5, "total": 10, "data": BASE64.encode(b"x"), "final": false
         })) {
             ToolOutcome::Error(error) => assert!(error.contains("offset mismatch"), "{error}"),
-            ToolOutcome::Text(_) => panic!("offset mismatch should fail"),
+            _ => panic!("offset mismatch should fail"),
         }
         let _ = fs::remove_dir_all(root);
     }

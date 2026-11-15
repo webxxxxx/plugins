@@ -99,11 +99,14 @@ plugin start <name>
 | `Plugin::call(&mut self, name, args)` | 你的能力实现 |
 | `Plugin::status(&self)` | `svc status` 的一行摘要 |
 | `ToolOutcome::text / error` | 结果；`error` 对应 `isError: true` |
-| `Context::config_path / config_json / data_dir / log_dir / id / version` | 宿主给你的环境 |
+| `Context::config_path / config_json / data_dir / log_dir / temp_dir / id / version` | 宿主给你的环境 |
 | `Context::cancel()` → `Cancel::{is_cancelled, sleep, ticker}` | 后台循环必须观察的取消令牌 |
 | `svcd_plugin::emit(method, params)` | 推送给 UI |
 | `log_info! / log_warn! / log_error!` | 写 stderr（宿主捕获并轮转） |
 | `declared_capabilities(path)` | 读 manifest 的能力清单，用于 drift test |
+| `blob::blob_argument(args, "input")` | 取宿主解析好的 `$blob` 参数（`{path,size}`） |
+| `BlobWriter::create(&ctx, name, mime)` | 把大结果写进 `incoming/`，`finish()` 返回 `ToolOutcome::Blob` |
+| `FileStore` | 插件**自己的**持久文件（`data_dir` 下），不是传输通道 |
 
 ### Shell（`sdk/shell`，随包拷贝）
 
@@ -126,6 +129,7 @@ plugin start <name>
 | `svcd_raw_value(args_json, "key")` | 取一个嵌套对象/数组的原始 JSON |
 | `svcd_log("info", "…")` | 写 stderr |
 | `svcd_notify(method, params_json)` | 推送 |
+| `svcd_blob(path, name, mime)` | 返回大结果（`$blobPath`）；`ctx.temp_dir` 是写入点 |
 
 头文件里是**扁平 JSON 扫描器**，不是通用解析器。需要真解析 JSON 就换 Rust。
 
@@ -137,7 +141,8 @@ plugin start <name>
 | handler `param($Name, $Arguments)` | 你的能力实现；返回字符串或 `@{Text=…;Error=$true}` |
 | `Write-SvcdLog 'info' '…'` | 写 stderr |
 | `Send-SvcdNotification -Method … -Params …` | 推送 |
-| `Get-SvcdContext` | `SVCD_*` 环境 |
+| 返回 `@{BlobPath=…;Name=…;MimeType=…}` | 大结果（`$blobPath`） |
+| `Get-SvcdContext` | `SVCD_*` 环境（含 `TempDir`） |
 
 `interpreter.name` 在 Windows 写 `powershell`，Linux/macOS 写 `pwsh`；**不要写 `version`**
 （`powershell --version` 不是合法参数，探测会失败）。
@@ -149,10 +154,12 @@ import { pluginUI } from './plugin-ui.mjs';
 const ui = pluginUI();
 
 await ui.invoke('echo', { message: 'hi' });          // POST ./rpc
+const r = await ui.invokeResult('report');           // 保留 structuredContent
 ui.subscribe({ onMessage(method, params) {} });      // SSE ./events
 ui.subscribeWebSocket({ onMessage() {} });           // WebSocket ./ws（同样是推送）
-await ui.uploadFile(file, { onProgress });           // 分块 file_put
-await ui.downloadFile('a.txt');                      // 分块 file_get，返回 Blob
+const meta = await ui.uploadBlob(file);              // POST /api/v1/blobs → {id,size}
+await ui.invoke('summarize', { input: ui.blobArg(meta.id) });
+await ui.downloadBlob(meta.id, { filename: 'x.bin' });  // GET /api/v1/blobs/<id>
 ```
 
 | 通道 | 路径 | 用途 |
@@ -161,15 +168,16 @@ await ui.downloadFile('a.txt');                      // 分块 file_get，返回
 | SSE | `./events` | 服务端推送，带 `id: <seq>`，另有 `event: reset` |
 | WebSocket | `./ws` | 同一路推送的另一种承载 |
 
-**文件传输**走 `tools/call` 分块，因为宿主只给一条请求通道且单帧上限 1 MiB：
+**大对象**永远不要塞进 JSON 帧（单帧上限 1 MiB）。宿主有内容寻址的 blob 通道：
 
-```
-file_put  {path, offset, total, data(base64), final}  → {"ok":true,"size":…,"complete":true}
-file_get  {path, offset, length}                      → {"data":…,"size":…,"eof":…}
-```
+| 方向 | 做法 |
+|---|---|
+| 输入 | UI 先 `POST /api/v1/blobs` 拿到 `sha256:…`，参数里传 `{"$blob": id}`；宿主把它换成 `{$blob, path, size}`，插件按文件读（流式，别整个进内存） |
+| 输出 | 插件写 `SVCD_TEMP_DIR/incoming/<唯一名>`，返回 `ToolOutcome::Blob`（或 `svcd_blob()` / `@{BlobPath=…}`）；宿主物化成 `resource_link` |
 
-服务端用 `svcd_plugin::FileStore`（Rust）；浏览器用 `uploadFile` / `downloadFile`。
-两边是一份协议，改一边就要改另一边。文件名只允许单层 `[A-Za-z0-9._-]`。
+限制：单 blob 512 MiB；上传必须带 `Content-Length`，**不支持** chunked / 断点续传 / Range 下载；临时文件默认 2 小时 TTL。完整语义见 `plugin-manager/docs/plugin-blob.md`。
+
+`FileStore` 是另一回事：那是插件**自己**要长期保存的文件（`data_dir` 下），不用于和调用方传大对象。
 
 ## 边界
 
@@ -186,6 +194,8 @@ file_get  {path, offset, length}                      → {"data":…,"size":…
 **插件是常驻进程。** 没有 oneshot 语义；要"跑一次"，写成常驻 + 一个触发能力，或用 core 服务。
 
 **依赖保持最小。** Rust 只用 `serde` / `serde_json`；shell 只用 POSIX。SDK 不提供 HTTP 客户端、数据库或调度器——需要就自己加，但先确认体积可接受。
+
+**大对象走 blob，不走 JSON。** 参数传 `{"$blob": id}`，结果返回 `$blobPath`；1 MiB 帧只装小 JSON。
 
 **vendored 副本别手改。** `package/payload/lib/svcd-plugin.sh` 和 `payload/web/plugin-ui.mjs` 是 `sdk/` 的副本；改完 `sdk/` 后跑 `node tools/plugin.mjs sync`。
 

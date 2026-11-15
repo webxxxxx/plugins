@@ -29,38 +29,25 @@
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     },
     {
-      "name": "file_put",
-      "desc": "Append one base64 chunk of a file (chunked upload)",
+      "name": "summarize",
+      "desc": "Summarize a large text blob (streams it instead of loading it)",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "path": { "type": "string" },
-          "offset": { "type": "number" },
-          "total": { "type": "number" },
-          "data": { "type": "string" },
-          "final": { "type": "boolean" }
+          "input": {
+            "type": "object",
+            "properties": { "$blob": { "type": "string" } },
+            "required": ["$blob"],
+            "additionalProperties": false
+          }
         },
-        "required": ["path", "offset", "total", "data"],
+        "required": ["input"],
         "additionalProperties": false
       }
     },
     {
-      "name": "file_get",
-      "desc": "Read one base64 chunk of a stored file (chunked download)",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "path": { "type": "string" },
-          "offset": { "type": "number" },
-          "length": { "type": "number" }
-        },
-        "required": ["path", "offset"],
-        "additionalProperties": false
-      }
-    },
-    {
-      "name": "file_list",
-      "desc": "List stored files with their sizes",
+      "name": "report",
+      "desc": "Produce a report as a blob; the host stores it and returns a resource_link",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     }
   ]

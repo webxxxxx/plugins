@@ -19,8 +19,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod blob;
 pub mod transfer;
 
+pub use blob::{BlobArg, BlobWriter};
 pub use transfer::FileStore;
 
 /// One JSON-RPC frame may not exceed this many bytes, excluding the newline.
@@ -103,6 +105,7 @@ pub struct Context {
     config: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     log_dir: Option<PathBuf>,
+    temp_dir: Option<PathBuf>,
     cancel: Cancel,
 }
 
@@ -121,6 +124,7 @@ impl Context {
             config: env("SVCD_CONFIG").map(PathBuf::from),
             data_dir: env("SVCD_DATA_DIR").map(PathBuf::from),
             log_dir: env("SVCD_LOG_DIR").map(PathBuf::from),
+            temp_dir: env("SVCD_TEMP_DIR").map(PathBuf::from),
             cancel: Cancel::default(),
         }
     }
@@ -148,6 +152,12 @@ impl Context {
         self.log_dir.as_deref()
     }
 
+    /// The host's transient root (`SVCD_TEMP_DIR`). Blob results must be written
+    /// under `incoming/` here; absent outside a host.
+    pub fn temp_dir(&self) -> Option<&Path> {
+        self.temp_dir.as_deref()
+    }
+
     pub fn cancel(&self) -> Cancel {
         self.cancel.clone()
     }
@@ -168,10 +178,19 @@ impl Context {
     }
 }
 
-/// A capability's answer, in the shape the host forwards to MCP clients.
+/// A capability's answer.
+///
+/// `Text` / `Error` become MCP content blocks; `Blob` becomes a `$blobPath`
+/// result the host materializes into the content-addressed store.
 pub enum ToolOutcome {
     Text(String),
     Error(String),
+    /// A file the plugin wrote under `$SVCD_TEMP_DIR/incoming/`.
+    Blob {
+        path: PathBuf,
+        name: String,
+        mime_type: String,
+    },
 }
 
 impl ToolOutcome {
@@ -192,6 +211,15 @@ impl ToolOutcome {
             ToolOutcome::Error(text) => json!({
                 "content": [{ "type": "text", "text": text }],
                 "isError": true
+            }),
+            ToolOutcome::Blob {
+                path,
+                name,
+                mime_type,
+            } => json!({
+                "$blobPath": path.to_string_lossy(),
+                "name": name,
+                "mimeType": mime_type
             }),
         }
     }

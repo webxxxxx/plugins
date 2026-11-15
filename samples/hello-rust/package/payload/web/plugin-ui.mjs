@@ -14,27 +14,10 @@
 const RPC = 'rpc';
 const EVENTS = 'events';
 const WS = 'ws';
+const BLOBS = '/api/v1/blobs';
 
-/** Files move as base64 chunks through `tools/call`, because the host gives the
- * plugin exactly one request channel (`POST ./rpc`) and caps a frame at 1 MiB. */
-const CHUNK = 512 * 1024;
-
-function bytesToBase64(bytes) {
-  let binary = '';
-  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
-  }
-  return btoa(binary);
-}
-
-function base64ToBytes(text) {
-  const binary = atob(text);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
+/** Blob ids are content addresses; reject anything else before it reaches a URL. */
+const BLOB_ID = /^sha256:[0-9a-f]{64}$/;
 
 export class PluginRpcError extends Error {
   constructor(code, message, data) {
@@ -69,7 +52,14 @@ export function pluginUI(options = {}) {
 
   const url = (path) => new URL(path, base).toString();
 
-  async function invoke(name, args = {}, { timeoutMs = 30000 } = {}) {
+  /**
+   * Call a capability and return the whole result, not just its text.
+   *
+   * A blob-producing capability answers with `structuredContent.$blob` plus a
+   * `resource_link`, and the text alone would drop that; use this form when the
+   * result shape matters (`invoke` is the text-only convenience).
+   */
+  async function invokeResult(name, args = {}, { timeoutMs = 30000 } = {}) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -93,16 +83,29 @@ export function pluginUI(options = {}) {
         throw new PluginRpcError(message.error.code, message.error.message, message.error.data);
       }
       const result = message.result ?? {};
-      const text = (result.content ?? [])
+      const content = result.content ?? [];
+      const text = content
         .map((part) => (part && typeof part.text === 'string' ? part.text : ''))
         .join('\n');
-      if (result.isError) {
-        throw new PluginRpcError(-32001, text || 'capability failed');
-      }
-      return text;
+      return {
+        text,
+        isError: Boolean(result.isError),
+        content,
+        structuredContent: result.structuredContent ?? null,
+        raw: result,
+      };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /** Text-only call. Throws a `PluginRpcError` when the capability fails. */
+  async function invoke(name, args = {}, options = {}) {
+    const result = await invokeResult(name, args, options);
+    if (result.isError) {
+      throw new PluginRpcError(-32001, result.text || 'capability failed');
+    }
+    return result.text;
   }
 
   const http = {
@@ -185,54 +188,36 @@ export function pluginUI(options = {}) {
   }
 
   /**
-   * Upload a File to the plugin, chunk by chunk.
+   * Upload a file to the host's blob store and get back its id.
    *
-   * The plugin must declare the `file_put` capability; `sdk/rust`'s
-   * `FileStore` implements the server half. Each chunk is one `tools/call`, so
-   * a slow link degrades into more round trips rather than a stalled frame.
+   * Blobs are how large payloads cross the boundary: the control channel caps a
+   * frame at 1 MiB, and `POST /api/v1/blobs` takes the raw bytes instead. Pass
+   * the id to a capability as `{ $blob: id }`; the host resolves it to a file
+   * path before the plugin sees it.
    */
-  async function uploadFile(file, { name = file.name, onProgress } = {}) {
-    const total = file.size;
-    let offset = 0;
-    let last = null;
-    do {
-      const slice = file.slice(offset, offset + CHUNK);
-      const data = bytesToBase64(new Uint8Array(await slice.arrayBuffer()));
-      const final = offset + slice.size >= total;
-      const reply = await invoke(
-        'file_put',
-        { path: name, offset, total, data, final },
-        { timeoutMs: 120000 },
-      );
-      last = reply ? JSON.parse(reply) : {};
-      offset += slice.size;
-      onProgress?.({ sent: offset, total });
-    } while (offset < total);
-
-    return last;
+  async function uploadBlob(file) {
+    const response = await fetch(BLOBS, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      credentials: 'same-origin',
+      body: file,
+    });
+    if (!response.ok) {
+      throw new PluginRpcError(-32000, `blob upload failed: HTTP ${response.status}`);
+    }
+    return response.json();
   }
 
-  /**
-   * Download a file the plugin stored, and hand it to the browser.
-   *
-   * The plugin must declare the `file_get` capability. Returns the assembled
-   * Blob so a caller can show a preview instead of saving.
-   */
-  async function downloadFile(path, { filename = path, onProgress } = {}) {
-    const chunks = [];
-    let offset = 0;
-    for (;;) {
-      const reply = JSON.parse(
-        await invoke('file_get', { path, offset, length: CHUNK }, { timeoutMs: 120000 }),
-      );
-      const bytes = base64ToBytes(reply.data ?? '');
-      chunks.push(bytes);
-      offset += bytes.length;
-      onProgress?.({ received: offset, total: reply.size ?? offset });
-      if (reply.eof || bytes.length === 0) break;
+  /** Fetch a blob by id and hand it to the browser (or return the Blob). */
+  async function downloadBlob(id, { filename = 'blob' } = {}) {
+    if (!BLOB_ID.test(id)) {
+      throw new PluginRpcError(-32602, `not a blob id: ${id}`);
     }
-
-    const blob = new Blob(chunks, { type: 'application/octet-stream' });
+    const response = await fetch(`${BLOBS}/${id}`, { credentials: 'same-origin' });
+    if (!response.ok) {
+      throw new PluginRpcError(-32000, `blob download failed: HTTP ${response.status}`);
+    }
+    const blob = await response.blob();
     if (typeof document !== 'undefined') {
       const href = URL.createObjectURL(blob);
       const anchor = document.createElement('a');
@@ -244,5 +229,10 @@ export function pluginUI(options = {}) {
     return blob;
   }
 
-  return { url, invoke, http, subscribe, subscribeWebSocket, uploadFile, downloadFile };
+  /** Build the argument object a capability expects for a blob input. */
+  function blobArg(id) {
+    return { $blob: id };
+  }
+
+  return { url, invoke, invokeResult, http, subscribe, subscribeWebSocket, uploadBlob, downloadBlob, blobArg };
 }
