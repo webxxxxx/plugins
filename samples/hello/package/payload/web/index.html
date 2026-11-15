@@ -23,7 +23,7 @@
   <div class="row">
     <input id="message" type="text" value="world" size="24">
     <button id="echo">echo</button>
-    <button id="stats">stats</button>
+    <button id="get_stats">stats</button>
   </div>
   <pre id="out">（等待调用）</pre>
 </section>
@@ -34,8 +34,8 @@
   插件产出的报告写到 <code>SVCD_TEMP_DIR/incoming/</code> 并返回 <code>$blobPath</code>。</p>
   <div class="row">
     <input id="file" type="file">
-    <button id="summarize">上传并总结</button>
-    <button id="report">生成报告并下载</button>
+    <button id="count_text">上传并总结</button>
+    <button id="create_report">生成报告并下载</button>
   </div>
   <div class="row">
     <input id="package" type="file">
@@ -69,9 +69,9 @@
 
   document.getElementById('echo').onclick = () =>
     show(ui.invoke('echo', { message: document.getElementById('message').value }));
-  document.getElementById('stats').onclick = () => show(ui.invoke('stats'));
+  document.getElementById('get_stats').onclick = () => show(ui.invoke('get_stats'));
 
-  document.getElementById('summarize').onclick = () => {
+  document.getElementById('count_text').onclick = () => {
     const file = document.getElementById('file').files[0];
     if (!file) { blobOut.textContent = '先选一个文本文件'; return; }
     show(
@@ -79,16 +79,16 @@
         blobOut.textContent = `上传中 ${file.size} B…`;
         const meta = await ui.uploadBlob(file);
         blobOut.textContent = `已上传 ${meta.id}（${meta.size} B），正在总结…`;
-        return ui.invoke('summarize', { input: ui.blobArg(meta.id) });
+        return ui.invoke('count_text', { input: ui.blobArg(meta.id) });
       })(),
       blobOut,
     );
   };
 
-  document.getElementById('report').onclick = () => {
+  document.getElementById('create_report').onclick = () => {
     show(
       (async () => {
-        const result = await ui.invokeResult('report');
+        const result = await ui.invokeResult('create_report');
         const id = result.structuredContent?.$blob;
         if (!id) {
           return `插件已产出 blob，但宿主没有物化它（无 structuredContent）。原始结果：${JSON.stringify(result.raw)}`;
@@ -109,7 +109,7 @@
           onProgress: (p) => { blobOut.textContent = `上传 ${p.sent}/${p.total} B`; },
         });
         blobOut.textContent = `已上传 ${meta.id}（${meta.size} B），正在检查…`;
-        return ui.invoke('inspect_file', { input: ui.fileArg(meta.id) });
+        return ui.invoke('get_file_info', { input: ui.fileArg(meta.id) });
       })(),
       blobOut,
     );
@@ -130,6 +130,6 @@
     feed.textContent = 'WebSocket 已连接';
   };
 
-  show(ui.invoke('stats'));
+  show(ui.invoke('get_stats'));
 </script>
 </html>

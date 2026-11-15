@@ -1,0 +1,75 @@
+name: test
+
+# Everything in this repo is Rust now (the toolchain, the SDK, the samples), so
+# the test job is the same on both operating systems. The scaffold smoke step
+# proves both templates still lay down a project on the platform in question.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            sdk/rust -> target
+            tools/cli -> target
+            samples/hello -> target
+          key: test-${{ matrix.os }}
+
+      - name: SDK tests
+        working-directory: sdk/rust
+        run: cargo test --locked
+
+      - name: Toolchain tests
+        working-directory: tools/cli
+        run: cargo test --locked
+
+      - name: Reference sample tests
+        working-directory: samples/hello
+        run: cargo test --locked
+
+      - name: Build plugin-tools
+        run: cargo build --locked --manifest-path tools/cli/Cargo.toml
+
+      - name: Scaffold every template
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools="tools/cli/target/debug/plugin-tools"
+          if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi
+          for language in rust c shell powershell; do
+            "$tools" template "smoke-$language" --lang "$language" \
+              --platforms x86_64-pc-windows-msvc --dir .scaffold --force
+            test -f ".scaffold/smoke-$language/package/manifest.json"
+            test -f ".scaffold/smoke-$language/build.json"
+            test -f ".scaffold/smoke-$language/.plugin.json"
+          done
+          # The web toolkit must have been vendored, not referenced.
+          test -f .scaffold/smoke-rust/package/payload/web/plugin-ui.mjs
+          # The shell SDK is vendored into the package; the PowerShell module is not.
+          test -f .scaffold/smoke-shell/package/payload/lib/svcd-plugin.sh
+          if [ -f .scaffold/smoke-shell/package/payload/lib/SvcdPlugin.ps1 ]; then
+            echo '::error::shell plugin must not ship the PowerShell module'
+            exit 1
+          fi

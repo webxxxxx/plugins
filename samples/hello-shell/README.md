@@ -6,10 +6,10 @@ POSIX sh 里没有 JSON 解析器，所以这里演示的是「用 SDK 的扁平
 | 能力 | 演示什么 |
 |---|---|
 | `echo` | 文本入 / 文本出 |
-| `stats` | JSON 文本出（调用数、uptime、pid） |
-| `summarize` | `$blob` 输入：`awk` 流式统计行数与词数 |
-| `inspect_file` | `$file` 文件包：`svcd_json_numbers` 取 part 列表，逐 part 读大小 |
-| `report` | `$blobPath` 输出：写 `incoming/` 并设 `SVCD_BLOB_PATH` |
+| `get_stats` | JSON 文本出（调用数、uptime、pid） |
+| `count_text` | `$blob` 输入：`awk` 流式统计行数与词数 |
+| `get_file_info` | `$file` 文件包：`svcd_json_numbers` 取 part 列表，逐 part 读大小 |
+| `create_report` | `$blobPath` 输出：写 `incoming/` 并设 `SVCD_BLOB_PATH` |
 | 日志 | `echo … >&2` |
 | 配置 | `svcd_config_get <key>` 读 `SVCD_CONFIG` |
 

@@ -1,0 +1,108 @@
+name: build
+
+# Builds the host's `plugin` CLI, then packages every reference sample with it
+# and verifies the result. The samples are the gate: if a template or an SDK
+# stops producing a valid .spk, this is where it shows up.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The host repository provides `plugin bundle` / `plugin verify`.
+  HOST_REPO: webxxxxx/plugin-manager
+
+jobs:
+  host:
+    name: host / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ env.HOST_REPO }}
+          path: host
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: host -> target
+          key: host-${{ matrix.os }}
+      - name: Build the host CLI
+        working-directory: host
+        run: cargo build --locked
+      - name: Stage it as the `plugin` entry
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bin
+          if [ -f host/target/debug/svcd.exe ]; then
+            cp host/target/debug/svcd.exe bin/plugin.exe
+          else
+            cp host/target/debug/svcd bin/plugin
+            chmod +x bin/plugin
+          fi
+          ls -l bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-${{ matrix.os }}
+          path: bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: package / ${{ matrix.sample }} / ${{ matrix.os }}
+    needs: host
+    strategy:
+      fail-fast: false
+      # Native builds on the runner's own triple; cross-compiling would need a
+      # toolchain the templates deliberately do not assume. The C sample stays on
+      # Linux because a Windows runner has no supported C toolchain of its own.
+      matrix:
+        include:
+          - { os: ubuntu-24.04, sample: hello, platform: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, sample: hello-c, platform: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, sample: hello-shell, platform: x86_64-unknown-linux-gnu }
+          - { os: windows-2025, sample: hello, platform: x86_64-pc-windows-msvc }
+          - { os: windows-2025, sample: hello-shell, platform: x86_64-pc-windows-msvc }
+          - { os: windows-2025, sample: hello-powershell, platform: x86_64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v5
+        with:
+          name: plugin-${{ matrix.os }}
+          path: bin
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/cli -> target
+          key: tools-${{ matrix.os }}
+      - name: Build plugin-tools
+        run: cargo build --locked --release --manifest-path tools/cli/Cargo.toml
+      - name: Package the sample
+        shell: bash
+        env:
+          SVCD_PLUGIN_BIN: ${{ github.workspace }}/bin/plugin${{ runner.os == 'Windows' && '.exe' || '' }}        run: |
+          set -euo pipefail
+          tools="tools/cli/target/release/plugin-tools"
+          if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi
+          cd "samples/${{ matrix.sample }}"
+          "../../$tools" build --platform "${{ matrix.platform }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spk-${{ matrix.sample }}-${{ matrix.os }}
+          path: samples/${{ matrix.sample }}/dist/*.spk
+          if-no-files-found: error
+          retention-days: 7

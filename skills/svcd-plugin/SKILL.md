@@ -24,12 +24,12 @@ Rust：
 
 ```rust
 impl Plugin for MyPlugin {
-    const CAPABILITIES: &'static [&'static str] = &["echo", "stats"];
+    const CAPABILITIES: &'static [&'static str] = &["echo", "get_stats"];
 
     fn call(&mut self, name: &str, arguments: &Value) -> ToolOutcome {
         match name {
             "echo" => ToolOutcome::text(arguments["message"].as_str().unwrap_or("")),
-            "stats" => ToolOutcome::text(format!("ticks={}", self.ticks)),
+            "get_stats" => ToolOutcome::text(format!("ticks={}", self.ticks)),
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -71,8 +71,8 @@ plugin start <name>
 | `shell` | `templates/shell` | 目标机有 `sh` | `samples/hello-shell` |
 | `powershell` | `templates/powershell` | Windows 的 `powershell` 或 Linux/macOS 的 `pwsh` | `samples/hello-powershell` |
 
-四个示例实现**同一组能力**（`echo` / `stats` / `summarize` / `inspect_file` /
-`report`），可以逐行对照。SDK 提供的能力面也是对等的：
+四个示例实现**同一组能力**（`echo` / `get_stats` / `count_text` / `get_file_info` /
+`create_report`），可以逐行对照。SDK 提供的能力面也是对等的：
 
 | 能力 | Rust | C | Shell | PowerShell |
 |---|---|---|---|---|
@@ -169,14 +169,14 @@ import { pluginUI } from './plugin-ui.mjs';
 const ui = pluginUI();
 
 await ui.invoke('echo', { message: 'hi' });          // POST ./rpc
-const r = await ui.invokeResult('report');           // 保留 structuredContent
+const r = await ui.invokeResult('create_report');           // 保留 structuredContent
 ui.subscribe({ onMessage(method, params, msg, seq) {} });  // SSE，自动续传
 const socket = ui.subscribeWebSocket({ onMessage() {} });
-await socket.invoke('stats');                        // 同一条 WS 上发 tools/call
+await socket.invoke('get_stats');                        // 同一条 WS 上发 tools/call
 const meta = await ui.uploadBlob(file);              // 整体上传（≤512 MiB）
 const big = await ui.uploadFilePackage(file);        // part 会话（≤16 GiB）
-await ui.invoke('summarize', { input: ui.blobArg(meta.id) });
-await ui.invoke('inspect_file', { input: ui.fileArg(big.id) });
+await ui.invoke('count_text', { input: ui.blobArg(meta.id) });
+await ui.invoke('get_file_info', { input: ui.fileArg(big.id) });
 await ui.downloadBlob(meta.id, { filename: 'x.bin' });   // Range/流式
 await ui.downloadFile(big.id, { filename: 'x.iso' });
 ```

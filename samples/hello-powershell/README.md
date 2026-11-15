@@ -5,10 +5,10 @@
 | 能力 | 演示什么 |
 |---|---|
 | `echo` | 文本入 / 文本出（前缀取自配置里的 `greeting`） |
-| `stats` | JSON 文本出（调用数、uptime、pid） |
-| `summarize` | `$blob` 输入：按行流式读宿主给的文件 |
-| `inspect_file` | `$file` 文件包：`Get-SvcdFileParts` 按 manifest 顺序读 part |
-| `report` | `$blobPath` 输出：`New-SvcdIncomingPath` + 返回 `@{BlobPath=…}` |
+| `get_stats` | JSON 文本出（调用数、uptime、pid） |
+| `count_text` | `$blob` 输入：按行流式读宿主给的文件 |
+| `get_file_info` | `$file` 文件包：`Get-SvcdFileParts` 按 manifest 顺序读 part |
+| `create_report` | `$blobPath` 输出：`New-SvcdIncomingPath` + 返回 `@{BlobPath=…}` |
 | 日志 | `Write-SvcdLog` → stderr |
 | 配置 | `Get-SvcdConfig` 读 `SVCD_CONFIG` |
 

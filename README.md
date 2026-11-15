@@ -33,6 +33,10 @@ cd tools/cli && cargo build --release
 
 它只做编排：模板是数据（`build.json` + 目录树），打包仍调宿主的 `plugin bundle`。
 
+## CI
+
+`.github/workflows/test.yml` 在两个操作系统上跑 SDK、工具链与 Rust 样例的测试，并给四种语言各脚手架一次；`.github/workflows/build.yml` 先构建宿主的 `plugin` CLI，再用它打包每份样例并 `verify`，产物作为 artifact 上传。没有 Node、没有 daemon，跑的全是 `plugin bundle` 的本地路径。
+
 ## 两条命令
 
 ```bash

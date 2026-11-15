@@ -18,7 +18,7 @@
 
 #include "svcd_plugin.h"
 
-static const char *const CAPABILITIES[] = {"echo", "stats", "summarize", "inspect_file", "report",
+static const char *const CAPABILITIES[] = {"echo", "get_stats", "count_text", "get_file_info", "create_report",
                                            NULL};
 
 static long calls = 0;
@@ -28,12 +28,12 @@ static long started = 0;
 static svcd_outcome summarize(const char *args_json) {
     char *path = svcd_string(args_json, "path");
     if (path == NULL) {
-        return svcd_error("summarize: \"input\" must be a blob argument ({$blob: …})");
+        return svcd_error("count_text: \"input\" must be a blob argument ({$blob: …})");
     }
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
         free(path);
-        return svcd_error("summarize: cannot open the blob");
+        return svcd_error("count_text: cannot open the blob");
     }
 
     long bytes = 0, lines = 0, words = 0;
@@ -75,7 +75,7 @@ static svcd_outcome inspect_file(const char *args_json) {
         free(manifest);
         free(dir);
         free(name);
-        return svcd_error("inspect_file: \"input\" must be a file argument ({$file: …})");
+        return svcd_error("get_file_info: \"input\" must be a file argument ({$file: …})");
     }
 
     size_t length = 0;
@@ -84,7 +84,7 @@ static svcd_outcome inspect_file(const char *args_json) {
         free(manifest);
         free(dir);
         free(name);
-        return svcd_error("inspect_file: cannot read manifest.json");
+        return svcd_error("get_file_info: cannot read manifest.json");
     }
 
     long parts[1000];
@@ -94,7 +94,7 @@ static svcd_outcome inspect_file(const char *args_json) {
         free(manifest);
         free(dir);
         free(name);
-        return svcd_error("inspect_file: the manifest lists no parts");
+        return svcd_error("get_file_info: the manifest lists no parts");
     }
 
     long total = 0;
@@ -106,7 +106,7 @@ static svcd_outcome inspect_file(const char *args_json) {
             free(manifest);
             free(dir);
             free(name);
-            return svcd_error("inspect_file: a part listed by the manifest is missing");
+            return svcd_error("get_file_info: a part listed by the manifest is missing");
         }
         fseek(part, 0, SEEK_END);
         total += ftell(part);
@@ -126,11 +126,11 @@ static svcd_outcome inspect_file(const char *args_json) {
 static svcd_outcome report(const svcd_context *context) {
     char path[1024];
     if (svcd_incoming_path(context, "report.txt", path, sizeof path) != 0) {
-        return svcd_error("report: SVCD_TEMP_DIR is not set");
+        return svcd_error("create_report: SVCD_TEMP_DIR is not set");
     }
     FILE *file = fopen(path, "wb");
     if (file == NULL) {
-        return svcd_error("report: cannot create the result file");
+        return svcd_error("create_report: cannot create the result file");
     }
     fprintf(file, "hello-c report\ncalls: %ld\nuptime_secs: %ld\npid: %ld\n", calls,
             svcd_now() - started, (long)svcd_pid());
@@ -152,19 +152,19 @@ static svcd_outcome handle(const char *name, const char *args_json, void *user) 
         free(message);
         return outcome;
     }
-    if (strcmp(name, "stats") == 0) {
+    if (strcmp(name, "get_stats") == 0) {
         char buffer[256];
         snprintf(buffer, sizeof buffer, "{\"calls\":%ld,\"uptime_secs\":%ld,\"pid\":%ld}", calls,
                  svcd_now() - started, (long)svcd_pid());
         return svcd_text(buffer);
     }
-    if (strcmp(name, "summarize") == 0) {
+    if (strcmp(name, "count_text") == 0) {
         return summarize(args_json);
     }
-    if (strcmp(name, "inspect_file") == 0) {
+    if (strcmp(name, "get_file_info") == 0) {
         return inspect_file(args_json);
     }
-    if (strcmp(name, "report") == 0) {
+    if (strcmp(name, "create_report") == 0) {
         return report(context);
     }
     return svcd_error("unknown tool");

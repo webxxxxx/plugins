@@ -75,13 +75,13 @@ impl Hello {
         let blob = match blob_argument(arguments, "input") {
             Ok(Some(blob)) => blob,
             Ok(None) => {
-                return ToolOutcome::error("summarize: \"input\" must be a blob argument ({$blob: …})")
+                return ToolOutcome::error("count_text: \"input\" must be a blob argument ({$blob: …})")
             }
             Err(error) => return ToolOutcome::error(error),
         };
         if blob.size > MAX_SUMMARY_BYTES {
             return ToolOutcome::error(format!(
-                "summarize: blob is {} bytes, above the {} byte summary limit",
+                "count_text: blob is {} bytes, above the {} byte summary limit",
                 blob.size, MAX_SUMMARY_BYTES
             ));
         }
@@ -120,7 +120,7 @@ impl Hello {
         let file = match file_argument(arguments, "input") {
             Ok(Some(file)) => file,
             Ok(None) => {
-                return ToolOutcome::error("inspect_file: \"input\" must be a file argument ({$file: …})")
+                return ToolOutcome::error("get_file_info: \"input\" must be a file argument ({$file: …})")
             }
             Err(error) => return ToolOutcome::error(error),
         };
@@ -157,7 +157,7 @@ impl Hello {
     /// Produce a small report as a blob the host stores and links.
     fn report(&self) -> ToolOutcome {
         let Some(temp) = self.temp.as_deref() else {
-            return ToolOutcome::error("report: SVCD_TEMP_DIR is not set");
+            return ToolOutcome::error("create_report: SVCD_TEMP_DIR is not set");
         };
         let mut writer = match BlobWriter::create_in(temp, "report.txt", "text/plain; charset=utf-8") {
             Ok(writer) => writer,
@@ -179,7 +179,7 @@ impl Hello {
 
 impl Plugin for Hello {
     const CAPABILITIES: &'static [&'static str] =
-        &["echo", "stats", "summarize", "inspect_file", "report"];
+        &["echo", "get_stats", "count_text", "get_file_info", "create_report"];
 
     fn call(&mut self, name: &str, arguments: &Value) -> ToolOutcome {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -188,10 +188,10 @@ impl Plugin for Hello {
                 Some(message) => ToolOutcome::text(format!("{} {}", self.greeting, message)),
                 None => ToolOutcome::error("echo: \"message\" is required"),
             },
-            "stats" => ToolOutcome::text(self.stats().to_string()),
-            "summarize" => self.summarize(arguments),
-            "inspect_file" => self.inspect_file(arguments),
-            "report" => self.report(),
+            "get_stats" => ToolOutcome::text(self.stats().to_string()),
+            "count_text" => self.summarize(arguments),
+            "get_file_info" => self.inspect_file(arguments),
+            "create_report" => self.report(),
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -274,7 +274,7 @@ mod tests {
     fn a_plain_argument_is_not_a_blob() {
         let context = Context::from_env();
         let mut plugin = Hello::new(&context);
-        match plugin.call("summarize", &json!({ "input": "not a blob" })) {
+        match plugin.call("count_text", &json!({ "input": "not a blob" })) {
             ToolOutcome::Error(error) => assert!(error.contains("blob argument"), "{error}"),
             _ => panic!("a plain string must be rejected"),
         }

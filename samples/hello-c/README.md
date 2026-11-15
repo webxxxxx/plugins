@@ -5,10 +5,10 @@
 | 能力 | 演示什么 |
 |---|---|
 | `echo` | 文本入 / 文本出 |
-| `stats` | JSON 文本出（调用数、uptime、pid） |
-| `summarize` | `$blob` 输入：打开宿主给的文件路径，流式统计 |
-| `inspect_file` | `$file` 文件包：读 manifest 的 part 列表，逐 part 读大小 |
-| `report` | `$blobPath` 输出：写 `SVCD_TEMP_DIR/incoming/` 并返回 |
+| `get_stats` | JSON 文本出（调用数、uptime、pid） |
+| `count_text` | `$blob` 输入：打开宿主给的文件路径，流式统计 |
+| `get_file_info` | `$file` 文件包：读 manifest 的 part 列表，逐 part 读大小 |
+| `create_report` | `$blobPath` 输出：写 `SVCD_TEMP_DIR/incoming/` 并返回 |
 | 日志 | `svcd_log()` → stderr |
 
 ## 跑起来

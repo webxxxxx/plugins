@@ -5,7 +5,7 @@
 # The protocol shell lives in ../lib/SvcdPlugin.ps1.
 . "$PSScriptRoot/../lib/SvcdPlugin.ps1"
 
-$Capabilities = @('echo', 'stats', 'summarize', 'inspect_file', 'report')
+$Capabilities = @('echo', 'get_stats', 'count_text', 'get_file_info', 'create_report')
 $Context = Get-SvcdContext
 $Config = Get-SvcdConfig -Context $Context
 $Greeting = if ($Config -and $Config.greeting) { [string]$Config.greeting } else { 'hello' }
@@ -28,7 +28,7 @@ function Invoke-SvcdCapability {
             return @{ Text = "$Greeting $message"; Error = $false }
         }
 
-        'stats' {
+        'get_stats' {
             $body = [ordered]@{
                 greeting    = $Greeting
                 calls       = $Calls
@@ -38,11 +38,11 @@ function Invoke-SvcdCapability {
             return @{ Text = ($body | ConvertTo-Json -Compress); Error = $false }
         }
 
-        'summarize' {
+        'count_text' {
             # The host replaced {"$blob": id} with {path, size, …}.
             $input_ = $Arguments.input
             if (-not $input_ -or -not $input_.path) {
-                return @{ Text = 'summarize: "input" must be a blob argument ({$blob: …})'; Error = $true }
+                return @{ Text = 'count_text: "input" must be a blob argument ({$blob: …})'; Error = $true }
             }
             $bytes = (Get-Item -LiteralPath $input_.path).Length
             $lines = 0
@@ -59,10 +59,10 @@ function Invoke-SvcdCapability {
             return @{ Text = "$bytes bytes, $lines lines, $words words"; Error = $false }
         }
 
-        'inspect_file' {
+        'get_file_info' {
             $file = $Arguments.input
             if (-not $file -or -not $file.manifest) {
-                return @{ Text = 'inspect_file: "input" must be a file argument ({$file: …})'; Error = $true }
+                return @{ Text = 'get_file_info: "input" must be a file argument ({$file: …})'; Error = $true }
             }
             $total = 0
             $count = 0
@@ -74,7 +74,7 @@ function Invoke-SvcdCapability {
             return @{ Text = "${label}: $total bytes in $count part(s)"; Error = $false }
         }
 
-        'report' {
+        'create_report' {
             $path = New-SvcdIncomingPath -Name 'report.txt'
             $body = @(
                 'hello-powershell report'

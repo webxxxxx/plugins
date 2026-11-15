@@ -28,12 +28,12 @@
       }
     },
     {
-      "name": "stats",
+      "name": "get_stats",
       "desc": "Counters and uptime as a JSON object",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     },
     {
-      "name": "summarize",
+      "name": "count_text",
       "desc": "Summarize a large text blob (streams it instead of loading it)",
       "inputSchema": {
         "type": "object",
@@ -50,7 +50,7 @@
       }
     },
     {
-      "name": "inspect_file",
+      "name": "get_file_info",
       "desc": "Stream a file package (parts + manifest) and verify its declared size",
       "inputSchema": {
         "type": "object",
@@ -67,7 +67,7 @@
       }
     },
     {
-      "name": "report",
+      "name": "create_report",
       "desc": "Produce a report as a blob; the host stores it and returns a resource_link",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
     }

@@ -13,9 +13,9 @@
 | 五种能力 + 错误处理 | `impl Plugin for Hello` |
 | 后台任务 + 取消令牌 | `cancel.ticker(...)` |
 | 推送事件给 UI | `svcd_plugin::emit` |
-| **blob 输入**（≤512 MiB，流式） | `summarize` + `blob_argument` |
-| **file 包输入**（≤16 GiB，按 part 流式） | `inspect_file` + `file_argument` / `FileArg::open` |
-| **blob 输出** | `report` + `BlobWriter` |
+| **blob 输入**（≤512 MiB，流式） | `count_text` + `blob_argument` |
+| **file 包输入**（≤16 GiB，按 part 流式） | `get_file_info` + `file_argument` / `FileArg::open` |
+| **blob 输出** | `create_report` + `BlobWriter` |
 | 能力清单与 manifest 一致 | `declared_capabilities_match_the_manifest` |
 
 ## 跑起来
@@ -45,8 +45,8 @@ plugin start hello
 ```js
 const meta = await ui.uploadBlob(file);                  // 整体流式，≤512 MiB
 const big  = await ui.uploadFilePackage(file);           // part 会话，≤16 GiB
-await ui.invoke('summarize',    { input: ui.blobArg(meta.id) });
-await ui.invoke('inspect_file', { input: ui.fileArg(big.id) });
+await ui.invoke('count_text',    { input: ui.blobArg(meta.id) });
+await ui.invoke('get_file_info', { input: ui.fileArg(big.id) });
 ```
 
 需要断点续传时给 `uploadId`：`uploadBlobResumable(file, { uploadId })` 或
@@ -65,7 +65,7 @@ writer.finish()          // → {"$blobPath": "…/incoming/…", "name": …, "
 `resource_link` + `structuredContent.$blob`。所以 UI 要用 `invokeResult` 才能拿到 id：
 
 ```js
-const r = await ui.invokeResult('report');
+const r = await ui.invokeResult('create_report');
 await ui.downloadBlob(r.structuredContent.$blob, { filename: 'report.txt' });
 ```
 
