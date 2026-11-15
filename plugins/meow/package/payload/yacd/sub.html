@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>meow-rs 订阅管理</title>
+<style>
+  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #eee; padding: 20px; max-width: 600px; margin: 0 auto; }
+  .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  h2 { margin: 0; }
+  .back { background: #444; color: #eee; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-size: 13px; transition: background .2s; }
+  .back:hover { background: #555; }
+  input, button { width: 100%; padding: 10px; margin: 6px 0; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #eee; box-sizing: border-box; font-size: 14px; }
+  button { background: #e8734a; border: none; font-weight: bold; cursor: pointer; transition: background .2s; }
+  button:hover:not(:disabled) { background: #d0603a; }
+  button:disabled { background: #555 !important; cursor: not-allowed; opacity: .6; }
+  .sub { background: #2a2a2a; padding: 12px; border-radius: 6px; margin: 8px 0; display: flex; justify-content: space-between; align-items: center; }
+  .del { background: #c0392b; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; width: auto; margin: 0; color: #fff; border: none; }
+  .del:hover:not(:disabled) { background: #a93226; }
+  .refresh { background: #2980b9; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; width: auto; margin: 0 6px 0 0; color: #fff; border: none; }
+  .refresh:hover:not(:disabled) { background: #2471a3; }
+  .status { margin-top: 16px; font-size: 13px; color: #888; white-space: pre-wrap; background: #222; padding: 10px; border-radius: 6px; min-height: 20px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h2>订阅管理</h2>
+  <a class="back" href="./">返回</a>
+</div>
+
+<input id="name" placeholder="订阅名称（随便写，如 myairport）">
+<input id="url" placeholder="订阅链接 URL">
+<button id="addBtn" onclick="add()">添加订阅</button>
+
+<h3 style="margin-top:30px">已有订阅</h3>
+<div id="list"></div>
+
+<div class="status" id="status">就绪</div>
+
+<script>
+const rawData = localStorage.getItem('yacd.metacubex.one');
+API = null;
+SECRET = null;
+if (rawData) {
+    try {
+        // 2. 将字符串解析为 JavaScript 对象
+        const data = JSON.parse(rawData);
+
+        // 3. 根据截图，选中项的索引是 1 (selectedClashAPIConfigIndex)
+        const activeIndex = data.selectedClashAPIConfigIndex;
+
+        // 4. 获取对应的配置对象
+        const activeConfig = data.clashAPIConfigs[activeIndex];
+
+        if (activeConfig) {
+            const baseURL = activeConfig.baseURL;
+            const secret = activeConfig.secret;
+
+            console.log("BaseURL:", baseURL);
+            console.log("Secret:", secret);
+            API = baseURL;
+            SECRET = secret;
+
+            // 你可以在这里把这两个变量赋给你的全局变量或发送给请求
+        } else {
+            console.error("未找到对应的配置项");
+        }
+    } catch (error) {
+        console.error("解析 JSON 数据失败:", error);
+    }
+} else {
+    console.log("Local Storage 中不存在键名为 'yacd.metacubex.one' 的数据");
+}
+
+function headers() {
+  const h = { "Content-Type": "application/json" };
+  if (SECRET) h["Authorization"] = "Bearer " + SECRET;
+  return h;
+}
+
+function log(msg) {
+  document.getElementById("status").textContent = msg;
+}
+
+// ===== 添加订阅（防重复点击）=====
+let adding = false;
+async function add() {
+  if (adding) return;
+  const nameInput = document.getElementById("name");
+  const urlInput = document.getElementById("url");
+  const btn = document.getElementById("addBtn");
+  const url = urlInput.value.trim();
+  if (!url) { alert("请填写订阅 URL"); return; }
+
+  adding = true;
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "添加中...";
+  log("正在下载订阅...");
+
+  try {
+    const body = { name: nameInput.value.trim() || "sub" + Date.now(), url };
+    const r = await fetch(API + "/api/subscriptions", {
+      method: "POST", headers: headers(), body: JSON.stringify(body)
+    });
+    const t = await r.text();
+    log("HTTP " + r.status + "\n" + t);
+    if (r.ok) {
+      urlInput.value = "";
+      await load();
+    }
+  } catch(e) {
+    log("请求失败: " + e);
+  } finally {
+    adding = false;
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+async function del(name) {
+  if (!confirm("删除订阅 " + name + " ?")) return;
+  const r = await fetch(API + "/api/subscriptions/" + encodeURIComponent(name), {
+    method: "DELETE", headers: headers()
+  });
+  log("HTTP " + r.status + " 已删除 " + name);
+  load();
+}
+
+async function refresh(name) {
+  const r = await fetch(API + "/api/subscriptions/" + encodeURIComponent(name) + "/refresh", {
+    method: "POST", headers: headers()
+  });
+  const t = await r.text();
+  log("HTTP " + r.status + " 刷新 " + name + "\n" + t);
+}
+
+async function load() {
+  const r = await fetch(API + "/api/subscriptions", { headers: headers() });
+  if (!r.ok) { log("获取订阅列表失败: HTTP " + r.status); return; }
+  const data = await r.json();
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  const subs = Array.isArray(data) ? data : (data.subscriptions || data.data || []);
+  if (!subs.length) {
+    list.innerHTML = '<div style="color:#666">暂无订阅</div>';
+    return;
+  }
+  subs.forEach(s => {
+    const name = s.name || s.tag || JSON.stringify(s);
+    const div = document.createElement("div");
+    div.className = "sub";
+    div.innerHTML = '<span>' + name + '</span><span>' +
+      '<button class="refresh" onclick="refresh(\'' + name + '\')">刷新</button>' +
+      '<button class="del" onclick="del(\'' + name + '\')">删除</button></span>';
+    list.appendChild(div);
+  });
+}
+
+load();
+</script>
+</body>
+</html>

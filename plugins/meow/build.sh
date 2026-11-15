@@ -5,6 +5,7 @@ NAME=$1; VERSION=$2; PLATFORM=$3
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CROSS=${CROSS_PREFIX:-/usr/soft/arm-linux-musleabihf-cross}
 mkdir -p "$HERE/out"
+command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"   # WSL 的非登录 shell 常缺这个
 case "$PLATFORM" in
   armv7-unknown-linux-musleabihf)
     export PATH="$CROSS/bin:$PATH"
@@ -34,6 +35,9 @@ case "$PLATFORM" in
   *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
 esac
 cd "$HERE/vendor/meow-rs"
+# 在 /mnt/d 上直接编译会因 drvfs 压力 OOM，target 放到 WSL 本地盘
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/svcd-meow-target}
 [ -f rust-toolchain.toml ] && mv rust-toolchain.toml rust-toolchain.toml.bak
-cargo build --release --target "$PLATFORM"
-cp "target/$PLATFORM/release/meow" "$HERE/out/$NAME"
+JOBS=${JOBS:-4}
+cargo build --release -j "$JOBS" --target "$PLATFORM"
+cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow" "$HERE/out/$NAME"

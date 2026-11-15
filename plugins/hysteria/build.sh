@@ -4,6 +4,7 @@ set -eu
 PLATFORM=$3
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 mkdir -p "$HERE/out"
+command -v go >/dev/null 2>&1 || PATH="$HOME/go/bin:/usr/local/go/bin:$PATH"
 case "$PLATFORM" in
   armv7-unknown-linux-musleabihf) GOOS=linux GOARCH=arm GOARM=7 ;;
   aarch64-unknown-linux-musl)     GOOS=linux GOARCH=arm64 ;;
@@ -15,5 +16,6 @@ case "$PLATFORM" in
 esac
 cd "$HERE/vendor/mini-sb-agent"
 CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH GOARM=${GOARM:-} \
-  go build -trimpath -tags with_gvisor -ldflags "-s -w" \
+  JOBS=${JOBS:-4}
+go build -p "$JOBS" -trimpath -tags with_gvisor -ldflags "-s -w" \
   -o "$HERE/out/mini-sb-agent" ./cmd/mini-sb-agent

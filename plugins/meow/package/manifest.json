@@ -1,34 +1,27 @@
 {
-  "capabilities": [
-    {
-      "desc": "Kernel and machine identity",
-      "inputSchema": {
-        "additionalProperties": false,
-        "properties": {},
-        "type": "object"
-      },
-      "name": "uname"
-    },
-    {
-      "desc": "Current UTC time",
-      "inputSchema": {
-        "additionalProperties": false,
-        "properties": {},
-        "type": "object"
-      },
-      "name": "date"
-    }
-  ],
-  "desc": "meow plugin",
-  "exec": {
-    "path": "payload/bin/meow.sh",
-    "ready": "notify"
-  },
+  "name": "meow",
+  "version": "1.0.0",
+  "desc": "meow 代理：mihomo 内核，带 yacd 面板",
+  "protocol": 1,
   "interpreter": {
     "name": "sh"
   },
-  "name": "meow",
-  "protocol": 1,
-  "schema": 2,
-  "version": "0.1.0"
+  "exec": {
+    "path": "payload/bin/meow.sh"
+  },
+  "lifecycle": {
+    "start": {
+      "path": "payload/bin/meow.sh",
+      "args": ["start"]
+    },
+    "stop": {
+      "path": "payload/bin/meow.sh",
+      "args": ["stop"]
+    },
+    "status": {
+      "path": "payload/bin/meow.sh",
+      "args": ["status"]
+    }
+  },
+  "capabilities": []
 }
