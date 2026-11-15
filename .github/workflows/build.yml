@@ -16,8 +16,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # The host repository provides `plugin bundle` / `plugin verify`.
-  HOST_REPO: webxxxxx/plugin-manager
 
 jobs:
   host:
@@ -31,7 +29,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          repository: ${{ env.HOST_REPO }}
+          # The host repository provides `plugin bundle` / `plugin verify`.
+          # Literal on purpose: the `env` context is not available in `with:`.
+          repository: webxxxxx/plugin-manager
           path: host
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -94,7 +94,8 @@ jobs:
       - name: Package the sample
         shell: bash
         env:
-          SVCD_PLUGIN_BIN: ${{ github.workspace }}/bin/plugin${{ runner.os == 'Windows' && '.exe' || '' }}        run: |
+          SVCD_PLUGIN_BIN: ${{ github.workspace }}/bin/plugin${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
           set -euo pipefail
           tools="tools/cli/target/release/plugin-tools"
           if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi

@@ -59,7 +59,7 @@ jobs:
           tools="tools/cli/target/debug/plugin-tools"
           if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi
           for language in rust c shell powershell; do
-            "$tools" template "smoke-$language" --lang "$language" \
+            "$tools" template "smoke-$language" --lang "$language" --webui \
               --platforms x86_64-pc-windows-msvc --dir .scaffold --force
             test -f ".scaffold/smoke-$language/package/manifest.json"
             test -f ".scaffold/smoke-$language/build.json"
