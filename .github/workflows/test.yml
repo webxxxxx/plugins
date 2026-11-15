@@ -34,7 +34,7 @@ jobs:
           workspaces: |
             sdk/rust -> target
             tools/cli -> target
-            samples/hello -> target
+            samples/hello-rust -> target
           key: test-${{ matrix.os }}
 
       - name: SDK tests
@@ -46,7 +46,7 @@ jobs:
         run: cargo test --locked
 
       - name: Reference sample tests
-        working-directory: samples/hello
+        working-directory: samples/hello-rust
         run: cargo test --locked
 
       - name: Build plugin-tools

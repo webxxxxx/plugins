@@ -12,7 +12,7 @@ sdk/shell/        POSIX sh 协议壳（随插件拷进包里）
 sdk/powershell/   PowerShell 协议壳（随插件拷进包里）
 sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）：invoke / SSE / WS / 上传下载
 templates/        rust / c / shell / powershell 四种模板源
-samples/hello             Rust 参考实现：五能力 + 配置 + 通知 + UI
+samples/hello-rust             Rust 参考实现：五能力 + 配置 + 通知 + UI
 samples/hello-c           C 同款（单头文件 SDK）
 samples/hello-shell       Shell 同款（POSIX sh + awk）
 samples/hello-powershell  PowerShell 同款
@@ -20,7 +20,7 @@ skills/           给 AI 的插件开发手册（语言、toolkit、边界）
 tools/cli/        Rust 工具链：单二进制 plugin-tools（template / build / dev / devkey / sync / check）
 ```
 
-模板是唯一真源；由模板生成的样例用 `--force` 重新生成，别手改。`samples/hello` 是手写的参考实现，不受模板约束。
+模板是唯一真源；由模板生成的样例用 `--force` 重新生成，别手改。`samples/hello-rust` 是手写的参考实现，不受模板约束。
 
 ## 装工具链（一次性）
 
@@ -53,7 +53,9 @@ plugin-tools template wireguard --lang c --platforms x86_64-unknown-linux-musl,x
 `plugin-tools build` 不给 `--key` 时产出未签名包，宿主需要 `allow_insecure_install = on`；
 发布路径是 CI 用发布钥调 `plugin bundle --key`。
 
-`plugin-tools build --platform <triple>` 单独打包；`check <file.spk>` 走 `plugin verify`。
+`build` 不给 `--platform` 时按 `.plugin.json` 的 `platforms` 逐个打；没写 `platforms` 的插件视为 7 个平台通用。本地开发用 `--platform <本机三元组>` 只打一个。`check <file.spk>` 走 `plugin verify`。
+
+每个插件（含四份样例和四份模板）都带自己的 `.github/workflows/build.yml`：平台列表从 `.plugin.json` 读，没写就 7 个全build，每个平台在自己的 runner 上构建并上传 `.spk`。插件独立成仓库后直接就是它的 CI。
 
 ## 插件只写核心逻辑
 

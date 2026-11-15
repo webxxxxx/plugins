@@ -1,6 +1,6 @@
 # hello-c —— C 参考插件
 
-和 `samples/hello` 能力一致，用来对照两套 SDK 的写法。
+和 `samples/hello-rust` 能力一致，用来对照两套 SDK 的写法。
 
 | 能力 | 演示什么 |
 |---|---|

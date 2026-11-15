@@ -21,7 +21,7 @@
 ## 跑起来
 
 ```bash
-cd samples/hello
+cd samples/hello-rust
 node ../../tools/plugin-build.mjs      # 构建 + 打包（未签名）
 plugin install dist/hello-1.0.0-<triple>.spk
 plugin start hello

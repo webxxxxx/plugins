@@ -1,11 +1,11 @@
 {
   "schema": 2,
-  "name": "hello",
+  "name": "hello-rust",
   "version": "1.0.0",
   "desc": "Reference plugin: capabilities, notifications, chunked file transfer",
   "protocol": 1,
   "exec": {
-    "path": "payload/bin/hello",
+    "path": "payload/bin/hello-rust",
     "ready": "notify"
   },
   "ui": {

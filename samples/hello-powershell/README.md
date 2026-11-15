@@ -1,6 +1,6 @@
 # hello-powershell —— PowerShell 参考插件
 
-和 `samples/hello`、`samples/hello-c`、`samples/hello-shell` 能力一致。
+和 `samples/hello-rust`、`samples/hello-c`、`samples/hello-shell` 能力一致。
 
 | 能力 | 演示什么 |
 |---|---|

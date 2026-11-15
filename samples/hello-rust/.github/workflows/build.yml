@@ -1,0 +1,52 @@
+name: build
+
+# 这个文件属于插件项目本身：插件独立成仓库后，它就是该插件的 CI。
+# 平台列表来自 .plugin.json；没写 platforms 的插件视为 7 个平台通用，全部构建。
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  platforms:
+    runs-on: ubuntu-24.04
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: read
+        name: Read the declared platforms
+        run: |
+          set -euo pipefail
+          list=$(jq -c '.platforms // []' .plugin.json 2>/dev/null || echo '[]')
+          if [ -z "$list" ] || [ "$list" = "[]" ]; then
+            list='["x86_64-unknown-linux-musl","aarch64-unknown-linux-musl","armv7-unknown-linux-musleabihf","x86_64-unknown-linux-gnu","x86_64-pc-windows-msvc","aarch64-apple-darwin","x86_64-apple-darwin"]'
+          fi
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build / ${{ matrix.platform }}
+    needs: platforms
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(needs.platforms.outputs.list) }}
+    runs-on: ${{ contains(matrix.platform, 'windows') && 'windows-2025' || contains(matrix.platform, 'darwin') && 'macos-15' || 'ubuntu-24.04' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install plugin-tools
+        run: cargo install --locked --git https://github.com/webxxxxx/plugins plugin-tools
+      - name: Build and verify
+        run: plugin-tools build --platform ${{ matrix.platform }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spk-${{ matrix.platform }}
+          path: dist/*.spk
+          if-no-files-found: error
+          retention-days: 7

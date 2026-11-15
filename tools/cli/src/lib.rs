@@ -485,6 +485,33 @@ pub fn write_project(project: &Path, meta: &Project) -> Result<(), String> {
     fs::write(&path, format!("{text}\n")).map_err(|error| format!("write {}: {}", path.display(), error))
 }
 
+/// Read `.plugin.json` when it exists; a plugin without one declares nothing.
+pub fn read_project(project: &Path) -> Result<Project, String> {
+    let path = project.join(".plugin.json");
+    if !path.exists() {
+        return Ok(Project {
+            name: String::new(),
+            language: String::new(),
+            platforms: Vec::new(),
+        });
+    }
+    let bytes = fs::read(&path).map_err(|error| format!("read {}: {}", path.display(), error))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {}", path.display(), error))
+}
+
+/// Target triples to build: `--platform` wins, then the plugin's own declaration,
+/// then "all seven" — a plugin that does not name platforms is portable.
+pub fn resolve_platforms(project: &Path, explicit: Option<&str>) -> Result<Vec<String>, String> {
+    if let Some(platform) = explicit {
+        return Ok(vec![platform.to_string()]);
+    }
+    let declared = read_project(project)?.platforms;
+    if declared.is_empty() {
+        return Ok(PLATFORMS.iter().map(|value| value.to_string()).collect());
+    }
+    Ok(declared)
+}
+
 /// Generate the machine-local Ed25519 signing key as PKCS#8 / SPKI PEM.
 pub fn devkey() -> Result<PathBuf, String> {
     let home = std::env::var_os("USERPROFILE")
@@ -573,6 +600,31 @@ mod tests {
         assert_eq!(PLATFORMS.len(), 7);
         assert!(PLATFORMS.contains(&"x86_64-pc-windows-msvc"));
         assert!(PLATFORMS.contains(&"x86_64-unknown-linux-musl"));
+    }
+
+    #[test]
+    fn platforms_come_from_the_project_and_default_to_all_seven() {
+        let root = std::env::temp_dir().join(format!("plugin-tools-plat-{}", std::process::id()));
+        let _ = fs::create_dir_all(&root);
+
+        // No .plugin.json at all: portable, so every platform.
+        assert_eq!(resolve_platforms(&root, None).unwrap().len(), 7);
+        // An explicit --platform wins over everything.
+        assert_eq!(
+            resolve_platforms(&root, Some("x86_64-pc-windows-msvc")).unwrap(),
+            vec!["x86_64-pc-windows-msvc".to_string()]
+        );
+
+        fs::write(
+            root.join(".plugin.json"),
+            r#"{"name":"x","language":"shell","platforms":["aarch64-apple-darwin"]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_platforms(&root, None).unwrap(),
+            vec!["aarch64-apple-darwin".to_string()]
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

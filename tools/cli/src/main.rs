@@ -67,10 +67,12 @@ fn usage() {
 
   build [options]   运行 build.json，然后 plugin bundle
       --dir <path>        插件目录（默认从 cwd 向上找）
-      --platform <t>      目标三元组（默认本机）
+      --platform <t>      只打这一个三元组（本地开发用这个）
       --key <pem>         用这把钥签名；不给则产出未签名包
-      --out <file>        产物路径
+      --out <file>        产物路径（仅在只打一个平台时生效）
       --no-verify         跳过 plugin verify
+
+  不给 --platform 时按插件声明的 platforms 打；.plugin.json 没写 platforms 就打全部 7 个。
 
   dev [options]     打包 + 安装 + 启动（首装不自启，这里代做）
   devkey            生成机器级开发钥（~/.svcd-dev）
@@ -323,26 +325,39 @@ fn find_plugin_root(dir: Option<&str>) -> Result<PathBuf, String> {
 }
 
 fn build(args: &[String]) -> Result<(), String> {
-    let (spk, manifest, signed) = pack_plugin(args)?;
-    println!(
-        "\npacked {}{}",
-        spk.display(),
-        if signed { "" } else { "  (unsigned)" }
-    );
+    let (spks, _manifest, signed) = pack_plugin(args)?;
+    for spk in &spks {
+        println!(
+            "\npacked {}{}",
+            spk.display(),
+            if signed { "" } else { "  (unsigned)" }
+        );
+    }
     if !signed {
         println!("host needs: allow_insecure_install = on   (restart svcd after changing it)");
     }
     println!(
         "next: plugin install \"{}\" && plugin start {}",
-        spk.display(),
-        manifest.name
+        spks[0].display(),
+        _manifest.name
     );
     Ok(())
 }
 
 /// Pack the plugin and install + start it: the local development loop.
 fn dev(args: &[String]) -> Result<(), String> {
-    let (spk, manifest, _signed) = pack_plugin(args)?;
+    let (spks, manifest, _signed) = pack_plugin(args)?;
+    let host = host_triple().ok();
+    let spk = host
+        .and_then(|triple| {
+            spks.iter().find(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.contains(triple))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(&spks[0]);
     let bin = std::env::var("SVCD_PLUGIN_BIN").unwrap_or_else(|_| "plugin".to_string());
     for verb in ["install", "start"] {
         let target = if verb == "install" {
@@ -362,29 +377,49 @@ fn dev(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn pack_plugin(args: &[String]) -> Result<(PathBuf, plugin_tools::Manifest, bool), String> {
+fn pack_plugin(args: &[String]) -> Result<(Vec<PathBuf>, plugin_tools::Manifest, bool), String> {
     let root = find_plugin_root(flag(args, "--dir"))?;
     let manifest = read_manifest(&root)?;
     let recipe = read_recipe(&root)?;
-    let platform = match flag(args, "--platform") {
-        Some(platform) => platform.to_string(),
-        None => std::env::var("SVCD_TARGET").unwrap_or(host_triple()?.to_string()),
-    };
-
-    let exec = build_from_recipe(&root, &manifest, recipe.as_ref(), &platform)?;
-    plugin_tools::assert_payload(&root)?;
-
+    let platforms = plugin_tools::resolve_platforms(&root, flag(args, "--platform"))?;
     let key = flag(args, "--key").map(PathBuf::from);
     let out = flag(args, "--out").map(PathBuf::from);
-    let spk = pack(&root, &manifest, &platform, key.as_deref(), out.as_deref(), exec.as_deref())?;
 
-    if !has(args, "--no-verify") {
-        let bin = std::env::var("SVCD_PLUGIN_BIN").unwrap_or_else(|_| "plugin".to_string());
-        let _ = std::process::Command::new(&bin)
-            .args(["verify", spk.to_str().unwrap_or_default(), "--json"])
-            .status();
+    let mut spks = Vec::new();
+    if platforms.len() > 1 {
+        if let Some(spec) = recipe.as_ref().and_then(|recipe| recipe.build.as_ref()) {
+            let mentions = spec.artifact.contains("{platform}")
+                || spec.command.iter().any(|part| part.contains("{platform}"));
+            if !mentions {
+                eprintln!(
+                    "warn: build.json never mentions {{platform}}; the same artifact will be packaged for {} platforms (pass --platform <本机三元组> for a local build)",
+                    platforms.len()
+                );
+            }
+        }
     }
-    Ok((spk, manifest, key.is_some()))
+    for platform in &platforms {
+        // The recipe decides how to reach a platform; `{platform}` is available to
+        // it, so `cargo build --target {platform}` is a one-line change.
+        let exec = build_from_recipe(&root, &manifest, recipe.as_ref(), platform)?;
+        plugin_tools::assert_payload(&root)?;
+        let spk = pack(
+            &root,
+            &manifest,
+            platform,
+            key.as_deref(),
+            if platforms.len() == 1 { out.as_deref() } else { None },
+            exec.as_deref(),
+        )?;
+        if !has(args, "--no-verify") {
+            let bin = std::env::var("SVCD_PLUGIN_BIN").unwrap_or_else(|_| "plugin".to_string());
+            let _ = std::process::Command::new(&bin)
+                .args(["verify", spk.to_str().unwrap_or_default(), "--json"])
+                .status();
+        }
+        spks.push(spk);
+    }
+    Ok((spks, manifest, key.is_some()))
 }
 
 fn check(args: &[String]) -> Result<(), String> {

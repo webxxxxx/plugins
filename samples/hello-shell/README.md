@@ -1,6 +1,6 @@
 # hello-shell —— Shell 参考插件
 
-和 `samples/hello`、`samples/hello-c`、`samples/hello-powershell` 能力一致。
+和 `samples/hello-rust`、`samples/hello-c`、`samples/hello-powershell` 能力一致。
 POSIX sh 里没有 JSON 解析器，所以这里演示的是「用 SDK 的扁平扫描 + awk」能做到什么。
 
 | 能力 | 演示什么 |

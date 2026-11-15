@@ -66,7 +66,7 @@ plugin start <name>
 
 | 语言 | 模板 | 目标机需要什么 | 完整示例 |
 |---|---|---|---|
-| `rust` | `templates/rust` | 无（编译成静态二进制） | `samples/hello` |
+| `rust` | `templates/rust` | 无（编译成静态二进制） | `samples/hello-rust` |
 | `c` | `templates/c` | 无（编译成静态二进制） | `samples/hello-c` |
 | `shell` | `templates/shell` | 目标机有 `sh` | `samples/hello-shell` |
 | `powershell` | `templates/powershell` | Windows 的 `powershell` 或 Linux/macOS 的 `pwsh` | `samples/hello-powershell` |
