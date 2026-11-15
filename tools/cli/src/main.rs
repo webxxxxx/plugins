@@ -131,24 +131,23 @@ fn ask(prompt: &str) -> Result<String, String> {
     Ok(line.trim().to_string())
 }
 
-fn menu(title: &str, items: &[(&str, &str)], multi: bool) {
+fn menu(title: &str, items: &[&str], multi: bool) {
     println!("\n{title}");
-    for (index, (id, label)) in items.iter().enumerate() {
-        println!("  {:>2}) {label}", index + 1);
-        println!("      {id}");
+    for (index, item) in items.iter().enumerate() {
+        println!("  {:>2}) {item}", index + 1);
     }
     if multi {
         println!("  可多选，用逗号分隔；直接回车表示全选");
     }
 }
 
-fn parse_selection(text: &str, items: &[(&str, &str)], multi: bool) -> Option<Vec<String>> {
+fn parse_selection(text: &str, items: &[&str], multi: bool) -> Option<Vec<String>> {
     let text = text.trim();
     if text.is_empty() {
-        return multi.then(|| items.iter().map(|(id, _)| id.to_string()).collect());
+        return multi.then(|| items.iter().map(|item| item.to_string()).collect());
     }
     if text.eq_ignore_ascii_case("all") {
-        return Some(items.iter().map(|(id, _)| id.to_string()).collect());
+        return Some(items.iter().map(|item| item.to_string()).collect());
     }
     let mut ids = Vec::new();
     for part in text.split([',', '，', ' ']).filter(|part| !part.is_empty()) {
@@ -156,7 +155,7 @@ fn parse_selection(text: &str, items: &[(&str, &str)], multi: bool) -> Option<Ve
         if number < 1 || number > items.len() {
             return None;
         }
-        let id = items[number - 1].0.to_string();
+        let id = items[number - 1].to_string();
         if !ids.contains(&id) {
             ids.push(id);
         }
@@ -192,10 +191,10 @@ fn template(args: &[String]) -> Result<(), String> {
         }
         None => return Err("--lang is required when stdin is not a terminal".into()),
     };
-    if !LANGUAGES.iter().any(|(id, _)| *id == language) {
+    if !LANGUAGES.iter().any(|id| *id == language) {
         return Err(format!(
             "unknown language \"{language}\" ({})",
-            LANGUAGES.iter().map(|(id, _)| *id).collect::<Vec<_>>().join(", ")
+            LANGUAGES.join(", ")
         ));
     }
 
@@ -209,14 +208,14 @@ fn template(args: &[String]) -> Result<(), String> {
         None if interactive => {
             menu("选择目标平台：", PLATFORMS, true);
             let prompt = match host {
-                Some(triple) if PLATFORMS.iter().any(|(id, _)| *id == triple) => {
+                Some(triple) if PLATFORMS.iter().any(|id| *id == triple) => {
                     format!("平台编号（默认 {triple}） > ")
                 }
                 _ => "平台编号 > ".to_string(),
             };
             let text = ask(&prompt)?;
             if text.is_empty() {
-                match host.filter(|triple| PLATFORMS.iter().any(|(id, _)| id == triple)) {
+                match host.filter(|triple| PLATFORMS.iter().any(|id| id == triple)) {
                     Some(triple) => vec![triple.to_string()],
                     None => return Err("select at least one platform".into()),
                 }
@@ -233,7 +232,7 @@ fn template(args: &[String]) -> Result<(), String> {
         }
     };
     for platform in &platforms {
-        if !PLATFORMS.iter().any(|(id, _)| id == platform) {
+        if !PLATFORMS.iter().any(|id| *id == platform) {
             return Err(format!("unknown platform \"{platform}\" (see --help for the list)"));
         }
     }

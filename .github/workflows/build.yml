@@ -84,6 +84,13 @@ jobs:
         with:
           name: plugin-${{ matrix.os }}
           path: bin
+      - name: Restore the exec bit
+        shell: bash
+        # Artifacts do not preserve file modes; without this the Linux jobs fail
+        # with "bin/plugin: Permission denied".
+        run: |
+          if [ -f bin/plugin ]; then chmod +x bin/plugin; fi
+          ls -l bin
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

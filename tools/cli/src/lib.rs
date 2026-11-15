@@ -23,22 +23,17 @@ const SKIP_DIRS: &[&str] = &[
     "target", "dist", "out", "node_modules", ".git", ".idea", ".vscode",
 ];
 
-pub const LANGUAGES: &[(&str, &str)] = &[
-    ("rust", "编译型，crate SDK，静态二进制"),
-    ("c", "编译型，单头文件 SDK"),
-    ("shell", "POSIX sh，无编译，适合包装命令"),
-    ("powershell", "PowerShell 脚本，无编译，适合 Windows 运维"),
-];
+pub const LANGUAGES: &[&str] = &["rust", "c", "shell", "powershell"];
 
 // 目标三元组取自 plugin-manager 的 docs/core-selection-spec.md §7。
-pub const PLATFORMS: &[(&str, &str)] = &[
-    ("x86_64-unknown-linux-musl", "嵌入式 x86_64（musl 静态）"),
-    ("aarch64-unknown-linux-musl", "嵌入式 aarch64（musl 静态）"),
-    ("armv7-unknown-linux-musleabihf", "嵌入式 armv7（musl 静态）"),
-    ("x86_64-unknown-linux-gnu", "Linux 桌面 x86_64（glibc）"),
-    ("x86_64-pc-windows-msvc", "Windows x86_64（MSVC）"),
-    ("aarch64-apple-darwin", "macOS arm64"),
-    ("x86_64-apple-darwin", "macOS x86_64"),
+pub const PLATFORMS: &[&str] = &[
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "armv7-unknown-linux-musleabihf",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
 ];
 
 /// The repository checkout that holds `templates/` and `sdk/`.
@@ -570,6 +565,14 @@ mod tests {
     #[test]
     fn pascal_case_handles_both_separators() {
         assert_eq!(pascal("hello-world_2"), "HelloWorld2");
+    }
+
+    #[test]
+    fn the_menus_list_values_only() {
+        assert_eq!(LANGUAGES, ["rust", "c", "shell", "powershell"]);
+        assert_eq!(PLATFORMS.len(), 7);
+        assert!(PLATFORMS.contains(&"x86_64-pc-windows-msvc"));
+        assert!(PLATFORMS.contains(&"x86_64-unknown-linux-musl"));
     }
 
     #[test]
