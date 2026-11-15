@@ -1,0 +1,34 @@
+{
+  "capabilities": [
+    {
+      "desc": "Kernel and machine identity",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "uname"
+    },
+    {
+      "desc": "Current UTC time",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "date"
+    }
+  ],
+  "desc": "sshd plugin",
+  "exec": {
+    "path": "payload/bin/sshd.sh",
+    "ready": "notify"
+  },
+  "interpreter": {
+    "name": "sh"
+  },
+  "name": "sshd",
+  "protocol": 1,
+  "schema": 2,
+  "version": "0.1.0"
+}

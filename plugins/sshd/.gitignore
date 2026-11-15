@@ -1,0 +1,3 @@
+# No build step: the payload is committed source.
+# Packages produced locally by `node tools/plugin.mjs pack`.
+/dist

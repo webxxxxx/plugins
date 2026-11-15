@@ -200,7 +200,14 @@ pub fn build_from_recipe(
     }
     fs::copy(&built, &target)
         .map_err(|error| format!("copy {}: {}", built.display(), error))?;
-    Ok(Some(format!("payload/bin/{final_name}")))
+    // Only rewrite `exec.path` when the file name had to change (the `.exe`
+    // case). A plugin that ships an extra binary — a daemon its wrapper runs —
+    // keeps its manifest exec pointing at the wrapper.
+    if keep_suffix {
+        Ok(Some(format!("payload/bin/{final_name}")))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Fail early when a package would ship nothing.

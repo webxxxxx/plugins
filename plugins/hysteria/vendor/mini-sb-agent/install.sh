@@ -1,0 +1,750 @@
+#!/bin/sh
+set -eu
+
+APP="mini-sb-agent"
+REPO="ashvvvvv/mini-sb-agent"
+VERSION="v0.2.0"
+INSTALL_DIR="/opt/mini-sb-agent"
+RUN_DIR="/run/mini-sb-agent"
+SERVICE_NAME="mini-sb-agent"
+NODE_MODE="vless"
+PANEL_NODE_TYPE="vless"
+VLESS_NODE_ID=""
+HY2_NODE_ID=""
+TOPOLOGY_FILE=""
+TOPOLOGY_URL=""
+PANEL_EVERY="60s"
+NODE_RATE_MBPS="0"
+HY2_UP_MBPS="0"
+HY2_DOWN_MBPS="0"
+HY2_IGNORE_CLIENT_BANDWIDTH="0"
+GOMEMLIMIT="40MiB"
+GOGC="70"
+GOMAXPROCS="1"
+GODEBUG="madvdontneed=1"
+SCAVENGE_EVERY="30s"
+PROTOCOL="vless"
+LISTEN_ADDR="::"
+VLESS_PORT=""
+HY2_PORT=""
+REALITY_PRIVATE_KEY=""
+REALITY_SERVER_NAME="www.microsoft.com"
+REALITY_SHORT_ID=""
+HY2_SERVER_NAME="bing.com"
+CONFIG_URL=""
+CONFIG_FILE=""
+PANEL_URL=""
+PANEL_TOKEN=""
+PANEL_NODE_ID=""
+START_SERVICE="1"
+FORCE="0"
+ASSUME_YES="0"
+INTERACTIVE="auto"
+
+usage() {
+  cat <<'EOF'
+mini-sb-agent one-click installer
+
+用法示例：
+
+  # 交互式一键安装：选单个/多个节点，协议自动探测；多节点问答生成 topology.json
+  curl -fsSL https://raw.githubusercontent.com/ashvvvvv/mini-sb-agent/master/install.sh | sh
+
+  # 如果 curl | sh 所在终端不能交互，就先下载再运行
+  curl -fsSL https://raw.githubusercontent.com/ashvvvvv/mini-sb-agent/master/install.sh -o install.sh && sh install.sh
+
+  # 非交互安装：只装 VLESS Reality
+  sh install.sh \
+    --panel-url https://board.example.com \
+    --panel-token '节点密钥' \
+    --node-mode vless \
+    --vless-node-id 1 \
+    --yes
+
+  # 非交互安装：只装 HY2
+  sh install.sh \
+    --panel-url https://board.example.com \
+    --panel-token '节点密钥' \
+    --node-mode hy2 \
+    --hy2-node-id 2 \
+    --yes
+
+  # 非交互安装：VLESS Reality + HY2 都装
+  sh install.sh \
+    --panel-url https://board.example.com \
+    --panel-token '节点密钥' \
+    --node-mode both \
+    --vless-node-id 1 \
+    --hy2-node-id 2 \
+    --yes
+
+  # 非交互安装：多节点拓扑模式（单进程任意数量 vless/hy2 节点，每节点独立出站）
+  # topology.json 格式见仓库 topology.example.json；安装器按拓扑内容自动选择
+  # 六构建矩阵中最小的可用构建，不可用时回退全量构建
+  sh install.sh \
+    --panel-url https://board.example.com \
+    --panel-token '节点密钥' \
+    --topology-file ./topology.json \
+    --yes
+
+参数：
+  --panel-url URL                  Xboard/面板地址，例如 https://board.example.com
+  --panel-token TOKEN              面板节点 token
+  --node-mode MODE                 节点模式：vless、hy2、both
+  --panel-node-id ID               兼容旧参数；单节点模式下等同对应节点 ID
+  --vless-node-id ID               VLESS Reality 节点 ID
+  --hy2-node-id ID                 HY2 节点 ID
+  --topology-file PATH            多节点拓扑模式：本地 topology.json
+  --topology-url URL              多节点拓扑模式：下载 topology.json
+  --panel-every DURATION           默认 60s
+
+  --config-file PATH               可选：使用本地 config.json，跳过面板节点配置生成
+  --config-url URL                 可选：下载 config.json，跳过面板节点配置生成
+
+  --node-rate-mbps N               整节点共享限速；0 关闭
+  --gomemlimit VALUE               默认 40MiB；极小内存可用 36MiB
+  --gogc N                         默认 70；极小内存可用 60
+  --gomaxprocs N                   默认 1
+  --godebug VALUE                  默认 madvdontneed=1（内存归还后立即退出 RSS）
+  --scavenge-every DURATION        默认 30s；周期强制 GC 归还内存；0 关闭
+  --version TAG                    GitHub Release tag，默认 v0.1.2
+  环境变量 MINI_SB_BASE_URL         可覆盖下载地址，测试/内网安装用
+  --force                          覆盖旧安装
+  --yes                            非交互确认，配合命令行参数使用
+  --interactive                    强制进入问答式安装
+  --non-interactive                禁止问答；缺参数直接报错
+  --no-start                       只安装不启动
+  -h, --help                       显示帮助
+
+安装后只保留：
+  /opt/mini-sb-agent/              程序、env、自动生成的 config.json、证书、卸载脚本、安装记录
+  /etc/systemd/system/mini-sb-agent.service 或 /etc/init.d/mini-sb-agent
+  /run/mini-sb-agent/              运行时 pid/socket，停止或卸载后清理
+EOF
+}
+err() { echo "ERROR: $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+need_root() { [ "$(id -u)" = "0" ] || err "请用 root 运行"; }
+
+json_escape() {
+  # POSIX shell safe enough for JSON strings used by generated config.json.
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+shell_quote() {
+  # Quote one value for a POSIX sh assignment file.
+  printf '%s' "$1" | sed "s/'/'\\''/g; 1s/^/'/; \$s/\$/'/"
+}
+
+is_tty() { [ -t 1 ] && [ -r /dev/tty ]; }
+
+read_from_tty() {
+  # Important for: curl .../install.sh | sh
+  # In that mode stdin is the script itself, so prompts must read from /dev/tty.
+  # Only use /dev/tty when stdout is actually a TTY; non-TTY test/automation
+  # environments can have a /dev/tty node that cannot be opened.
+  if [ -t 1 ]; then
+    IFS= read -r ans </dev/tty || ans=""
+  else
+    IFS= read -r ans || ans=""
+  fi
+}
+
+prompt() {
+  var="$1"
+  label="$2"
+  default="$3"
+  secret="${4:-0}"
+  eval cur="\${$var:-}"
+  [ -n "$cur" ] && default="$cur"
+  if [ "$secret" = "1" ]; then
+    printf '%s' "$label"
+    [ -n "$default" ] && printf ' [默认：%s]' "$default"
+    printf ': '
+    if [ -t 1 ]; then
+      stty -echo </dev/tty 2>/dev/null || true
+    fi
+    read_from_tty
+    if [ -t 1 ]; then
+      stty echo </dev/tty 2>/dev/null || true
+    fi
+    printf '\n'
+  else
+    printf '%s' "$label"
+    [ -n "$default" ] && printf ' [默认：%s]' "$default"
+    printf ': '
+    read_from_tty
+  fi
+  [ -n "$ans" ] || ans="$default"
+  # Keep the assignment safe even when values contain spaces, $, &, quotes, etc.
+  eval "$var=\"\$ans\""
+}
+
+prompt_yes_no() {
+  label="$1"
+  default="$2"
+  if [ "$ASSUME_YES" = "1" ]; then
+    return 0
+  fi
+  printf '%s' "$label"
+  case "$default" in
+    y|Y) printf ' [Y/n]: ' ;;
+    *) printf ' [y/N]: ' ;;
+  esac
+  read_from_tty
+  [ -n "$ans" ] || ans="$default"
+  case "$ans" in y|Y|yes|YES|Yes|是) return 0 ;; *) return 1 ;; esac
+}
+
+interactive_collect() {
+  info "进入交互式安装。协议自动探测，只需填面板节点 ID。"
+  prompt PANEL_URL "面板地址，例如 https://board.example.com" "$PANEL_URL" 0
+  prompt PANEL_TOKEN "面板节点 token/通讯密钥" "$PANEL_TOKEN" 1
+  printf '选择安装类型：1=单个节点，2=多个节点（单进程拓扑） [1]: '
+  read_from_tty
+  case "${ans:-1}" in
+    1|single|单) PROBE_MODE="single" ;;
+    2|multi|topo|topology|多) PROBE_MODE="multi" ;;
+    *) err "安装类型只能选 1（单个节点）或 2（多个节点）" ;;
+  esac
+  if [ "$PROBE_MODE" = "single" ]; then
+    prompt PANEL_NODE_ID "面板节点 ID" "${PANEL_NODE_ID:-}" 0
+    [ -n "$PANEL_NODE_ID" ] || err "节点 ID 不能为空"
+    PROBE_IDS="$PANEL_NODE_ID"
+  else
+    prompt NODE_COUNT "几个节点" "2" 0
+    case "$NODE_COUNT" in ''|*[!0-9]*) err "节点数必须是数字" ;; esac
+    [ "$NODE_COUNT" -ge 1 ] && [ "$NODE_COUNT" -le 99 ] || err "节点数范围 1-99"
+    PROBE_IDS=""
+    i=1
+    while [ "$i" -le "$NODE_COUNT" ]; do
+      NODE_ID_INPUT=""
+      prompt NODE_ID_INPUT "第 $i 个节点的面板 node ID" "" 0
+      [ -n "$NODE_ID_INPUT" ] || err "节点 ID 不能为空"
+      case " $PROBE_IDS " in *" $NODE_ID_INPUT "*) err "节点 ID 重复：$NODE_ID_INPUT" ;; esac
+      PROBE_IDS="$PROBE_IDS $NODE_ID_INPUT"
+      i=$((i + 1))
+    done
+  fi
+
+  if [ "$FORCE" != "1" ] && [ -e "$INSTALL_DIR" ]; then
+    if prompt_yes_no "$INSTALL_DIR 已存在，是否覆盖旧安装" n; then
+      FORCE="1"
+    fi
+  fi
+  if [ "$START_SERVICE" = "1" ]; then
+    if ! prompt_yes_no "安装完成后立即启动/重启服务" y; then
+      START_SERVICE="0"
+    fi
+  fi
+}
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --panel-url) PANEL_URL="${2:-}"; shift 2 ;;
+    --panel-token) PANEL_TOKEN="${2:-}"; shift 2 ;;
+    --panel-node-id) PANEL_NODE_ID="${2:-}"; shift 2 ;;
+    --node-mode) NODE_MODE="${2:-}"; shift 2 ;;
+    --vless-node-id) VLESS_NODE_ID="${2:-}"; shift 2 ;;
+    --hy2-node-id) HY2_NODE_ID="${2:-}"; shift 2 ;;
+    --topology-file) TOPOLOGY_FILE="${2:-}"; shift 2 ;;
+    --topology-url) TOPOLOGY_URL="${2:-}"; shift 2 ;;
+    --panel-node-type) PANEL_NODE_TYPE="${2:-}"; shift 2 ;;
+    --panel-every) PANEL_EVERY="${2:-}"; shift 2 ;;
+    --config-file) CONFIG_FILE="${2:-}"; shift 2 ;;
+    --config-url) CONFIG_URL="${2:-}"; shift 2 ;;
+    --protocol) PROTOCOL="${2:-}"; shift 2 ;;
+    --listen) LISTEN_ADDR="${2:-}"; shift 2 ;;
+    --vless-port) VLESS_PORT="${2:-}"; shift 2 ;;
+    --reality-private-key) REALITY_PRIVATE_KEY="${2:-}"; shift 2 ;;
+    --reality-server-name) REALITY_SERVER_NAME="${2:-}"; shift 2 ;;
+    --reality-short-id) REALITY_SHORT_ID="${2:-}"; shift 2 ;;
+    --hy2-port) HY2_PORT="${2:-}"; shift 2 ;;
+    --hy2-server-name) HY2_SERVER_NAME="${2:-}"; shift 2 ;;
+    --hy2-up-mbps) HY2_UP_MBPS="${2:-}"; shift 2 ;;
+    --hy2-down-mbps) HY2_DOWN_MBPS="${2:-}"; shift 2 ;;
+    --hy2-ignore-client-bandwidth) HY2_IGNORE_CLIENT_BANDWIDTH="1"; shift ;;
+    --node-rate-mbps) NODE_RATE_MBPS="${2:-}"; shift 2 ;;
+    --gomemlimit) GOMEMLIMIT="${2:-}"; shift 2 ;;
+    --gogc) GOGC="${2:-}"; shift 2 ;;
+    --gomaxprocs) GOMAXPROCS="${2:-}"; shift 2 ;;
+    --godebug) GODEBUG="${2:-}"; shift 2 ;;
+    --scavenge-every) SCAVENGE_EVERY="${2:-}"; shift 2 ;;
+    --version) VERSION="${2:-}"; shift 2 ;;
+    --force) FORCE="1"; shift ;;
+    --yes) ASSUME_YES="1"; shift ;;
+    --interactive) INTERACTIVE="1"; shift ;;
+    --non-interactive) INTERACTIVE="0"; shift ;;
+    --no-start) START_SERVICE="0"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) err "未知参数：$1" ;;
+  esac
+done
+
+need_root
+
+fetch() {
+  url="$1"
+  out="$2"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 --connect-timeout 15 -o "$out" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$out" "$url"
+  else
+    err "缺少 curl/wget，无法下载"
+  fi
+}
+
+install_pkgs_if_needed() {
+  need_openssl="$1"
+  missing=""
+  command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || missing="$missing curl"
+  command -v sha256sum >/dev/null 2>&1 || missing="$missing coreutils"
+  if [ "$need_openssl" = "1" ]; then
+    command -v openssl >/dev/null 2>&1 || missing="$missing openssl"
+  fi
+  [ -z "$missing" ] && return 0
+
+  if command -v apk >/dev/null 2>&1; then
+    apk add --no-cache ca-certificates curl openssl >/dev/null
+  elif command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update >/dev/null
+    apt-get install -y ca-certificates curl openssl >/dev/null
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y ca-certificates curl openssl >/dev/null
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y ca-certificates curl openssl >/dev/null
+  else
+    err "缺少依赖$missing，且找不到 apk/apt/dnf/yum 自动安装"
+  fi
+}
+
+install_pkgs_if_needed 0
+
+if [ "$INTERACTIVE" = "1" ] || { [ "$INTERACTIVE" = "auto" ] && is_tty && { [ -z "$PANEL_URL" ] || [ -z "$PANEL_TOKEN" ] || { [ -z "$PANEL_NODE_ID" ] && [ -z "$VLESS_NODE_ID" ] && [ -z "$HY2_NODE_ID" ] && [ -z "$TOPOLOGY_FILE" ] && [ -z "$TOPOLOGY_URL" ]; }; }; }; then
+  interactive_collect
+fi
+
+# 交互模式：按 node_id 向面板探测节点协议（与 agent 的 ProbeNodeConfig 同序）
+probe_node_type() {
+  probe_id="$1"
+  probe_base="${PANEL_URL%/}"
+  for probe_t in vless hysteria2 hysteria; do
+    probe_resp="$(curl -fsS -m 20 "$probe_base/api/v1/server/UniProxy/config?token=$PANEL_TOKEN&node_id=$probe_id&node_type=$probe_t" 2>/dev/null)" || continue
+    case "$probe_resp" in
+      *'"protocol":"vless"'*|*'"protocol": "vless"'*) printf 'vless'; return 0 ;;
+      *'"protocol":"hysteria'*|*'"protocol": "hysteria'*) printf 'hysteria'; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+if [ -n "$PROBE_MODE" ]; then
+  info "正在通过面板探测节点协议..."
+  TOPO_NODES=""
+  for probe_id in $PROBE_IDS; do
+    probe_t="$(probe_node_type "$probe_id")" || err "无法探测节点 $probe_id：面板查询失败（检查面板地址 / token / node id）"
+    info "  节点 $probe_id → $probe_t"
+    TOPO_NODES="$TOPO_NODES $probe_id:$probe_t"
+  done
+  if [ "$PROBE_MODE" = "single" ]; then
+    probe_entry="${TOPO_NODES# }"
+    NODE_MODE="${probe_entry#*:}"
+    PANEL_NODE_ID="${probe_entry%%:*}"
+    PANEL_NODE_TYPE="$NODE_MODE"
+    [ "$NODE_MODE" = "hysteria" ] && NODE_MODE="hy2"
+    info "单节点模式：$PANEL_NODE_ID（$PANEL_NODE_TYPE）"
+  else
+    TOPOLOGY_FILE="${TOPOLOGY_FILE:-./topology.json}"
+    if [ -e "$TOPOLOGY_FILE" ] && [ "$FORCE" != "1" ]; then
+      prompt_yes_no "$TOPOLOGY_FILE 已存在，覆盖生成" y || err "请用 --topology-file 指定其他路径，或先备份现有文件"
+    fi
+    {
+      printf '{\n  "nodes": [\n'
+      probe_first=1
+      for probe_entry in $TOPO_NODES; do
+        [ "$probe_first" = "1" ] || printf ',\n'
+        printf '    {"node_id": "%s", "node_type": "%s", "outbound": {"type": "direct"}}' "$(json_escape "${probe_entry%%:*}")" "${probe_entry#*:}"
+        probe_first=0
+      done
+      printf '\n  ]\n}\n'
+    } > "$TOPOLOGY_FILE"
+    info "已生成 $TOPOLOGY_FILE（出站默认 direct；需要 SS 出站请编辑此文件后用 --topology-file 重装）"
+  fi
+fi
+
+[ -n "$PANEL_URL" ] || err "缺少 --panel-url；可直接运行 sh install.sh 进入交互式安装"
+[ -n "$PANEL_TOKEN" ] || err "缺少 --panel-token；可直接运行 sh install.sh 进入交互式安装"
+
+if [ -n "$TOPOLOGY_FILE" ] || [ -n "$TOPOLOGY_URL" ]; then
+  # 多节点拓扑模式
+  [ -n "$TOPOLOGY_FILE" ] && [ -n "$TOPOLOGY_URL" ] && err "--topology-file 和 --topology-url 只能二选一"
+  [ -n "$CONFIG_FILE" ] && err "拓扑模式下不能用 --config-file（config 由 agent 启动时自动生成）"
+  [ -n "$CONFIG_URL" ] && err "拓扑模式下不能用 --config-url（config 由 agent 启动时自动生成）"
+  NODE_MODE="topology"
+else
+case "$NODE_MODE" in
+  vless|VLESS|reality|Reality) NODE_MODE="vless" ;;
+  hy2|HY2|hysteria|hysteria2) NODE_MODE="hy2" ;;
+  both|BOTH|all|dual) NODE_MODE="both" ;;
+  *) err "--node-mode 只能是 vless、hy2、both" ;;
+esac
+case "$NODE_MODE" in
+  vless)
+    [ -n "$VLESS_NODE_ID" ] || VLESS_NODE_ID="$PANEL_NODE_ID"
+    PANEL_NODE_ID="$VLESS_NODE_ID"
+    PANEL_NODE_TYPE="vless"
+    [ -n "$PANEL_NODE_ID" ] || err "缺少 --vless-node-id 或 --panel-node-id"
+    ;;
+  hy2)
+    [ -n "$HY2_NODE_ID" ] || HY2_NODE_ID="$PANEL_NODE_ID"
+    PANEL_NODE_ID="$HY2_NODE_ID"
+    PANEL_NODE_TYPE="hysteria"
+    [ -n "$PANEL_NODE_ID" ] || err "缺少 --hy2-node-id 或 --panel-node-id"
+    ;;
+  both)
+    [ -n "$VLESS_NODE_ID" ] || VLESS_NODE_ID="$PANEL_NODE_ID"
+    PANEL_NODE_ID="$VLESS_NODE_ID"
+    PANEL_NODE_TYPE="vless"
+    [ -n "$VLESS_NODE_ID" ] || err "both 模式缺少 --vless-node-id"
+    [ -n "$HY2_NODE_ID" ] || err "both 模式缺少 --hy2-node-id"
+    ;;
+esac
+fi
+
+if [ -n "$CONFIG_FILE" ] && [ -n "$CONFIG_URL" ]; then
+  err "--config-file 和 --config-url 只能二选一"
+fi
+case "$PANEL_NODE_TYPE" in vless|hysteria|hysteria2) ;; *) err "--panel-node-type 只能是 vless、hysteria2、hysteria" ;; esac
+
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|amd64) ASSET_ARCH="amd64" ;;
+  aarch64|arm64) ASSET_ARCH="arm64" ;;
+  *) err "不支持的架构：$ARCH" ;;
+esac
+ASSET="mini-sb-agent-linux-$ASSET_ARCH"
+BASE_URL="${MINI_SB_BASE_URL:-https://github.com/$REPO/releases/download/$VERSION}"
+TMPDIR="$(mktemp -d /tmp/mini-sb-install.XXXXXX)"
+cleanup() { rm -rf "$TMPDIR"; }
+trap cleanup EXIT HUP INT TERM
+
+
+
+# 拓扑模式：准备 topology.json 并解析所需能力（POSIX sh，无 jq 依赖）
+TOPOLOGY_VARIANT=""
+TOPOLOGY_SRC=""
+if [ "$NODE_MODE" = "topology" ]; then
+  if [ -n "$TOPOLOGY_URL" ]; then
+    TOPOLOGY_SRC="$TMPDIR/topology.json"
+    fetch "$TOPOLOGY_URL" "$TOPOLOGY_SRC"
+  else
+    [ -f "$TOPOLOGY_FILE" ] || err "topology 文件不存在：$TOPOLOGY_FILE"
+    TOPOLOGY_SRC="$TOPOLOGY_FILE"
+  fi
+  grep -q '"node_id"' "$TOPOLOGY_SRC" || err "topology 文件里没有节点（缺少 node_id 字段）"
+  TOPO_HAS_VLESS=0; TOPO_HAS_HY2=0; TOPO_HAS_SS=0
+  grep -Eq '"node_type"[[:space:]]*:[[:space:]]*"(vless|vless-reality|reality)"' "$TOPOLOGY_SRC" && TOPO_HAS_VLESS=1
+  grep -Eq '"node_type"[[:space:]]*:[[:space:]]*"(hysteria|hy2|hysteria2)"' "$TOPOLOGY_SRC" && TOPO_HAS_HY2=1
+  grep -Eq '"type"[[:space:]]*:[[:space:]]*"(shadowsocks|ss)"' "$TOPOLOGY_SRC" && TOPO_HAS_SS=1
+  if [ "$TOPO_HAS_VLESS" = "0" ] && [ "$TOPO_HAS_HY2" = "0" ]; then
+    err "topology 里没有可识别的 node_type（只支持 vless / hysteria）"
+  fi
+  if [ "$TOPO_HAS_VLESS" = "1" ] && [ "$TOPO_HAS_HY2" = "1" ]; then
+    if [ "$TOPO_HAS_SS" = "1" ]; then TOPOLOGY_VARIANT="vless-hy2-ss"; else TOPOLOGY_VARIANT="vless-hy2-direct"; fi
+  elif [ "$TOPO_HAS_VLESS" = "1" ]; then
+    if [ "$TOPO_HAS_SS" = "1" ]; then TOPOLOGY_VARIANT="vless-ss"; else TOPOLOGY_VARIANT="vless-direct"; fi
+  else
+    if [ "$TOPO_HAS_SS" = "1" ]; then TOPOLOGY_VARIANT="hy2-ss"; else TOPOLOGY_VARIANT="hy2-direct"; fi
+  fi
+  info "拓扑能力：vless=$TOPO_HAS_VLESS hy2=$TOPO_HAS_HY2 ss出站=$TOPO_HAS_SS → 优先裁剪构建 $TOPOLOGY_VARIANT"
+fi
+
+if [ -e "$INSTALL_DIR" ] && [ "$FORCE" != "1" ]; then
+  err "$INSTALL_DIR 已存在。确认要覆盖请加 --force"
+fi
+
+if [ -n "$TOPOLOGY_VARIANT" ]; then
+  ASSET="mini-sb-agent-linux-$ASSET_ARCH-$TOPOLOGY_VARIANT"
+  info "下载裁剪构建 $ASSET $VERSION"
+  if ! fetch "$BASE_URL/$ASSET" "$TMPDIR/$ASSET" 2>/dev/null || ! fetch "$BASE_URL/$ASSET.sha256" "$TMPDIR/$ASSET.sha256" 2>/dev/null; then
+    info "裁剪构建 $ASSET 不可用，回退全量构建"
+    rm -f "$TMPDIR/$ASSET" "$TMPDIR/$ASSET.sha256"
+    ASSET="mini-sb-agent-linux-$ASSET_ARCH"
+    fetch "$BASE_URL/$ASSET" "$TMPDIR/$ASSET"
+    fetch "$BASE_URL/$ASSET.sha256" "$TMPDIR/$ASSET.sha256"
+  fi
+else
+  ASSET="mini-sb-agent-linux-$ASSET_ARCH"
+  info "下载 $ASSET $VERSION"
+  fetch "$BASE_URL/$ASSET" "$TMPDIR/$ASSET"
+  fetch "$BASE_URL/$ASSET.sha256" "$TMPDIR/$ASSET.sha256"
+fi
+(
+  cd "$TMPDIR"
+  sha256sum -c "$ASSET.sha256"
+)
+chmod 0755 "$TMPDIR/$ASSET"
+
+info "停止旧服务并清理本程序旧文件"
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+  rm -f "/etc/systemd/system/$SERVICE_NAME.service"
+  systemctl daemon-reload 2>/dev/null || true
+fi
+if command -v rc-service >/dev/null 2>&1; then
+  rc-service "$SERVICE_NAME" stop 2>/dev/null || true
+  rc-update del "$SERVICE_NAME" default 2>/dev/null || true
+  rm -f "/etc/init.d/$SERVICE_NAME" "/etc/conf.d/$SERVICE_NAME"
+fi
+if [ -x "$INSTALL_DIR/$APP" ]; then
+  pkill -f "$INSTALL_DIR/$APP" 2>/dev/null || true
+fi
+rm -rf "$INSTALL_DIR" "$RUN_DIR"
+rm -f /tmp/mini-sb-agent.sock
+
+info "安装到 $INSTALL_DIR"
+mkdir -p "$INSTALL_DIR" "$RUN_DIR"
+install -m 0755 "$TMPDIR/$ASSET" "$INSTALL_DIR/$APP"
+
+if [ "$NODE_MODE" = "topology" ]; then
+  # 二进制必须支持拓扑模式（公开稳定版 v0.1.x 不支持，给出明确报错）
+  if ! "$INSTALL_DIR/$APP" -h 2>&1 | grep -q -- '-topology'; then
+    err "下载的二进制不支持拓扑模式（缺少 -topology 参数）。请确认 MINI_SB_BASE_URL/--version 指向包含拓扑支持的构建"
+  fi
+fi
+
+if [ -n "$CONFIG_FILE" ]; then
+  [ -f "$CONFIG_FILE" ] || err "config-file 不存在：$CONFIG_FILE"
+  install -m 0600 "$CONFIG_FILE" "$INSTALL_DIR/config.json"
+elif [ -n "$CONFIG_URL" ]; then
+  fetch "$CONFIG_URL" "$INSTALL_DIR/config.json"
+  chmod 0600 "$INSTALL_DIR/config.json"
+else
+  # config.json is generated just before mini-sb-agent starts. The generator
+  # exits immediately, so it adds no runtime process or resident memory.
+  rm -f "$INSTALL_DIR/config.json"
+fi
+if [ "$NODE_MODE" = "topology" ]; then
+  # 拓扑模式下 config.json 由 agent 启动时自动生成；topology.json 落盘保存
+  install -m 0600 "$TOPOLOGY_SRC" "$INSTALL_DIR/topology.json"
+fi
+cat > "$INSTALL_DIR/env" <<EOF
+PANEL_URL=$(shell_quote "$PANEL_URL")
+PANEL_TOKEN=$(shell_quote "$PANEL_TOKEN")
+NODE_MODE=$(shell_quote "$NODE_MODE")
+PANEL_NODE_ID=$(shell_quote "$PANEL_NODE_ID")
+PANEL_NODE_TYPE=$(shell_quote "$PANEL_NODE_TYPE")
+VLESS_NODE_ID=$(shell_quote "$VLESS_NODE_ID")
+HY2_NODE_ID=$(shell_quote "$HY2_NODE_ID")
+PANEL_EVERY=$(shell_quote "$PANEL_EVERY")
+NODE_RATE_MBPS=$(shell_quote "$NODE_RATE_MBPS")
+HY2_UP_MBPS=$(shell_quote "$HY2_UP_MBPS")
+HY2_DOWN_MBPS=$(shell_quote "$HY2_DOWN_MBPS")
+HY2_IGNORE_CLIENT_BANDWIDTH=$(shell_quote "$HY2_IGNORE_CLIENT_BANDWIDTH")
+GOMAXPROCS=$(shell_quote "$GOMAXPROCS")
+GOMEMLIMIT=$(shell_quote "$GOMEMLIMIT")
+GOGC=$(shell_quote "$GOGC")
+GODEBUG=$(shell_quote "$GODEBUG")
+SCAVENGE_EVERY=$(shell_quote "$SCAVENGE_EVERY")
+TOPOLOGY_INSTALLED=$(shell_quote "$( [ "$NODE_MODE" = "topology" ] && printf '%s' "$INSTALL_DIR/topology.json" )")
+EOF
+chmod 0600 "$INSTALL_DIR/env"
+
+cat > "$INSTALL_DIR/generate-config.sh" <<'EOF'
+#!/bin/sh
+set -eu
+APP="/opt/mini-sb-agent/mini-sb-agent"
+CONFIG="/opt/mini-sb-agent/config.json"
+. /opt/mini-sb-agent/env
+[ -s "$CONFIG" ] && exit 0
+# 拓扑模式：config 由 agent 启动时根据 topology.json 自动生成，无需预生成
+[ -n "${TOPOLOGY_INSTALLED:-}" ] && exit 0
+set -- xboard-generate-config \
+  --panel-url "$PANEL_URL" \
+  --panel-token "$PANEL_TOKEN" \
+  --node-mode "$NODE_MODE" \
+  --out "$CONFIG"
+if [ "${NODE_MODE:-vless}" = "vless" ]; then
+  set -- "$@" --vless-node-id "$VLESS_NODE_ID"
+elif [ "${NODE_MODE:-vless}" = "hy2" ]; then
+  set -- "$@" --hy2-node-id "$HY2_NODE_ID"
+else
+  set -- "$@" --vless-node-id "$VLESS_NODE_ID" --hy2-node-id "$HY2_NODE_ID"
+fi
+"$APP" "$@"
+EOF
+chmod 0755 "$INSTALL_DIR/generate-config.sh"
+
+cat > "$INSTALL_DIR/run.sh" <<'EOF'
+#!/bin/sh
+set -eu
+APP="/opt/mini-sb-agent/mini-sb-agent"
+CONFIG="/opt/mini-sb-agent/config.json"
+API="unix:/run/mini-sb-agent/stats.sock"
+. /opt/mini-sb-agent/env
+export GOMAXPROCS GOMEMLIMIT GOGC GODEBUG
+if [ -n "${TOPOLOGY_INSTALLED:-}" ]; then
+  # 多节点拓扑模式：config 由 agent 启动时按 topology.json 自动生成
+  set -- \
+    -config "$CONFIG" \
+    -api "$API" \
+    -panel-url "$PANEL_URL" \
+    -panel-token "$PANEL_TOKEN" \
+    -panel-every "$PANEL_EVERY" \
+    -topology "$TOPOLOGY_INSTALLED" \
+    -node-rate-mbps "$NODE_RATE_MBPS"
+else
+  SYNC_NODE_TYPE="$PANEL_NODE_TYPE"
+  set -- \
+    -config "$CONFIG" \
+    -api "$API" \
+    -panel-url "$PANEL_URL" \
+    -panel-token "$PANEL_TOKEN" \
+    -panel-node-id "$PANEL_NODE_ID" \
+    -panel-node-type "$SYNC_NODE_TYPE" \
+    -panel-every "$PANEL_EVERY" \
+    -node-rate-mbps "$NODE_RATE_MBPS"
+  if [ "${NODE_MODE:-vless}" = "both" ]; then
+    set -- "$@" -panel-hy2-node-id "$HY2_NODE_ID" -panel-hy2-node-type hysteria
+  fi
+fi
+if [ "${SCAVENGE_EVERY:-0}" != "0" ] && [ -n "${SCAVENGE_EVERY:-}" ]; then
+  set -- "$@" -scavenge-every "$SCAVENGE_EVERY"
+fi
+if [ "${HY2_UP_MBPS:-0}" != "0" ]; then
+  set -- "$@" -hy2-up-mbps "$HY2_UP_MBPS"
+fi
+if [ "${HY2_DOWN_MBPS:-0}" != "0" ]; then
+  set -- "$@" -hy2-down-mbps "$HY2_DOWN_MBPS"
+fi
+if [ "${HY2_IGNORE_CLIENT_BANDWIDTH:-0}" = "1" ]; then
+  set -- "$@" -hy2-ignore-client-bandwidth
+fi
+exec "$APP" "$@"
+EOF
+chmod 0755 "$INSTALL_DIR/run.sh"
+
+cat > "$INSTALL_DIR/install.meta" <<EOF
+app=$APP
+version=$VERSION
+asset=$ASSET
+installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+install_dir=$INSTALL_DIR
+run_dir=$RUN_DIR
+panel_url=$PANEL_URL
+node_mode=$NODE_MODE
+panel_node_id=$PANEL_NODE_ID
+panel_node_type=$PANEL_NODE_TYPE
+vless_node_id=$VLESS_NODE_ID
+hy2_node_id=$HY2_NODE_ID
+topology_file=$( [ "$NODE_MODE" = "topology" ] && printf '%s' "$INSTALL_DIR/topology.json" )
+topology_variant=$TOPOLOGY_VARIANT
+protocol=$PROTOCOL
+EOF
+chmod 0600 "$INSTALL_DIR/install.meta"
+
+cat > "$INSTALL_DIR/uninstall.sh" <<'EOF'
+#!/bin/sh
+set -eu
+APP="mini-sb-agent"
+INSTALL_DIR="/opt/mini-sb-agent"
+RUN_DIR="/run/mini-sb-agent"
+SERVICE_NAME="mini-sb-agent"
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemctl stop "$SERVICE_NAME" 2>/dev/null || true
+  systemctl disable "$SERVICE_NAME" 2>/dev/null || true
+  rm -f "/etc/systemd/system/$SERVICE_NAME.service"
+  systemctl daemon-reload 2>/dev/null || true
+fi
+if command -v rc-service >/dev/null 2>&1; then
+  rc-service "$SERVICE_NAME" stop 2>/dev/null || true
+  rc-update del "$SERVICE_NAME" default 2>/dev/null || true
+  rm -f "/etc/init.d/$SERVICE_NAME" "/etc/conf.d/$SERVICE_NAME"
+fi
+if [ -x "$INSTALL_DIR/$APP" ]; then
+  pkill -f "$INSTALL_DIR/$APP" 2>/dev/null || true
+fi
+rm -rf "$INSTALL_DIR" "$RUN_DIR"
+rm -f /tmp/mini-sb-agent.sock
+printf '%s\n' "mini-sb-agent 已卸载，仅移除了本安装器创建的文件。"
+EOF
+chmod 0755 "$INSTALL_DIR/uninstall.sh"
+
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  info "写入 systemd 服务"
+  cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
+[Unit]
+Description=mini-sb-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=GOMAXPROCS=$GOMAXPROCS
+Environment=GOMEMLIMIT=$GOMEMLIMIT
+Environment=GOGC=$GOGC
+Environment=GODEBUG=$GODEBUG
+RuntimeDirectory=mini-sb-agent
+ExecStartPre=/opt/mini-sb-agent/generate-config.sh
+ExecStart=/opt/mini-sb-agent/run.sh
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+WorkingDirectory=$INSTALL_DIR
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable "$SERVICE_NAME" >/dev/null
+  if [ "$START_SERVICE" = "1" ]; then
+    systemctl restart "$SERVICE_NAME"
+    sleep 1
+    systemctl --no-pager --full status "$SERVICE_NAME" || true
+  fi
+elif command -v rc-service >/dev/null 2>&1; then
+  info "写入 OpenRC 服务"
+  cat > "/etc/conf.d/$SERVICE_NAME" <<EOF
+# Runtime options live in /opt/mini-sb-agent/env and are read by run.sh.
+EOF
+  chmod 0600 "/etc/conf.d/$SERVICE_NAME"
+  cat > "/etc/init.d/$SERVICE_NAME" <<'EOF'
+#!/sbin/openrc-run
+name="mini-sb-agent"
+description="mini-sb-agent"
+command="/opt/mini-sb-agent/run.sh"
+command_background="yes"
+pidfile="/run/mini-sb-agent/mini-sb-agent.pid"
+output_log="/var/log/mini-sb-agent.log"
+error_log="/var/log/mini-sb-agent.err"
+start_pre() {
+  checkpath -d -m 0755 /run/mini-sb-agent
+  /opt/mini-sb-agent/generate-config.sh
+}
+EOF
+  chmod 0755 "/etc/init.d/$SERVICE_NAME"
+  rc-update add "$SERVICE_NAME" default >/dev/null
+  if [ "$START_SERVICE" = "1" ]; then
+    rc-service "$SERVICE_NAME" restart || true
+    sleep 1
+    rc-service "$SERVICE_NAME" status || true
+  fi
+else
+  if [ "$START_SERVICE" = "0" ]; then
+    info "找不到 systemd 或 OpenRC；已按 --no-start 只安装文件，未创建服务"
+  else
+    err "找不到 systemd 或 OpenRC，已安装文件但未创建服务"
+  fi
+fi
+
+info "验证安装残留"
+leftovers="$(find /tmp -maxdepth 1 -name 'mini-sb-install.*' -print 2>/dev/null | grep -v "$TMPDIR" || true)"
+[ -z "$leftovers" ] || printf '%s\n' "$leftovers"
+
+info "完成"
+echo "安装目录：$INSTALL_DIR"
+echo "卸载命令：$INSTALL_DIR/uninstall.sh"
+echo "状态接口：curl --unix-socket $RUN_DIR/stats.sock http://x/stats"
+

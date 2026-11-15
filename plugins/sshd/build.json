@@ -1,0 +1,1 @@
+{"build":{"command":["sh","build.sh","{name}","{version}","{platform}"],"artifact":"out/{name}"}}
