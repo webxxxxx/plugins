@@ -181,17 +181,27 @@ pub fn build_from_recipe(
         .find(|path| path.exists())
         .ok_or_else(|| format!("build.json: no artifact at {artifact} (or {artifact}.exe)"))?;
 
-    let base = Path::new(&manifest.exec.path)
+    let built_name = built
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let exec_base = Path::new(&manifest.exec.path)
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| "manifest.exec.path is missing".to_string())?
         .to_string();
-    let built_name = built
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let keep_suffix = !base.to_lowercase().ends_with(".exe") && built_name.to_lowercase().ends_with(".exe");
-    let final_name = if keep_suffix { format!("{base}.exe") } else { base };
+
+    // The copy target is the artifact's own name. Only when the artifact *is*
+    // the exec binary does the `.exe` rewrite apply; an extra binary (the daemon
+    // a wrapper runs) keeps its name and must not touch `exec.path`.
+    let (final_name, renamed) = if built_name.eq_ignore_ascii_case(&exec_base) {
+        (built_name.clone(), false)
+    } else if built_name.to_lowercase() == format!("{}.exe", exec_base.to_lowercase()) {
+        (format!("{exec_base}.exe"), true)
+    } else {
+        (built_name.clone(), false)
+    };
 
     let target = root.join("package").join("payload").join("bin").join(&final_name);
     if let Some(parent) = target.parent() {
@@ -200,10 +210,9 @@ pub fn build_from_recipe(
     }
     fs::copy(&built, &target)
         .map_err(|error| format!("copy {}: {}", built.display(), error))?;
-    // Only rewrite `exec.path` when the file name had to change (the `.exe`
-    // case). A plugin that ships an extra binary — a daemon its wrapper runs —
-    // keeps its manifest exec pointing at the wrapper.
-    if keep_suffix {
+    // Only rewrite `exec.path` when the artifact was renamed to carry the
+    // manifest's name plus `.exe`.
+    if renamed {
         Ok(Some(format!("payload/bin/{final_name}")))
     } else {
         Ok(None)

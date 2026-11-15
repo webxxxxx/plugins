@@ -1,3 +1,6 @@
-# No build step: the payload is committed source.
-# Packages produced locally by `node tools/plugin.mjs pack`.
+/out
 /dist
+# 编译产物：由 build.json 在构建时放进 payload，不进仓库
+/package/payload/bin/*
+!/package/payload/bin/*.sh
+!/package/payload/bin/*.ps1

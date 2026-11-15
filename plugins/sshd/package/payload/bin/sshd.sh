@@ -75,7 +75,23 @@ handle() {
     esac
 }
 
-# 插件启动即拉起守护进程；日志走 stderr，不污染协议 stdout
+# 生命周期入口：宿主按 manifest.lifecycle 用参数调用，执行完即退出。
+case "${1:-}" in
+start)
+    do_start
+    exit $?
+    ;;
+stop)
+    do_stop
+    exit $?
+    ;;
+status)
+    do_status
+    exit $?
+    ;;
+esac
+
+# 无参数：作为插件进程常驻，先把守护进程拉起来，再进入协议循环。
 do_start >&2 || true
 
 svcd_plugin_serve handle

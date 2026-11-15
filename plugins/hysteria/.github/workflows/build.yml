@@ -42,6 +42,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install plugin-tools
         run: cargo install --locked --git https://github.com/webxxxxx/plugins plugin-tools
+      - name: Install the host plugin CLI
+        # plugin-tools 只编排，真正打包的是宿主的 `plugin bundle`。
+        run: |
+          set -euo pipefail
+          cargo install --locked --git https://github.com/webxxxxx/plugin-manager --bin svcd
+          mkdir -p "$HOME/.local/bin"
+          cp "$(command -v svcd)" "$HOME/.local/bin/plugin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build and verify
         run: plugin-tools build --platform ${{ matrix.platform }}
       - uses: actions/upload-artifact@v7

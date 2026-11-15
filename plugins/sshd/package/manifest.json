@@ -9,33 +9,19 @@
   "exec": {
     "path": "payload/bin/sshd.sh"
   },
-  "capabilities": [
-    {
-      "name": "start",
-      "desc": "启动 dropbear（并部署 sftp-server）",
-      "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
+  "lifecycle": {
+    "start": {
+      "path": "payload/bin/sshd.sh",
+      "args": ["start"]
     },
-    {
-      "name": "stop",
-      "desc": "停止 dropbear",
-      "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
+    "stop": {
+      "path": "payload/bin/sshd.sh",
+      "args": ["stop"]
     },
-    {
-      "name": "status",
-      "desc": "查询运行状态（running / pid / port）",
-      "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      }
+    "status": {
+      "path": "payload/bin/sshd.sh",
+      "args": ["status"]
     }
-  ]
+  },
+  "capabilities": []
 }
