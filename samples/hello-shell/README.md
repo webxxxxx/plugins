@@ -20,10 +20,14 @@ manifest 的 `capabilities[]` 是 MCP 面上暴露的工具；`handle()` 里的 
 ## 命令
 
 ```bash
-node tools/plugin.mjs pack                 # 打包（默认本机三元组）
-node tools/plugin.mjs pack --platform aarch64-unknown-linux-musl
+plugin-template <name> --lang shell --webui   # 只创建项目
+plugin-build                                   # 打包（默认本机三元组，未签名）
+plugin-build --platform aarch64-unknown-linux-musl
 node tools/plugin.mjs check dist/xxx.spk
 ```
+
+`--webui` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是
+`uname` / `date` 两个能力，和后端是 shell 还是 rust 无关。
 
 `pack` 的 `interpreter.name` 写的是 `sh`，且**故意不写 `version`**：`sh` 会走 `--version`
 探测，而 Debian 的 sh 是 dash，探测会报非法选项、安装直接被拒。

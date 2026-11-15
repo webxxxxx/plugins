@@ -1,58 +1,37 @@
 #!/usr/bin/env node
-// Local loop for a plugin: build, bundle, install, verify.
+// Local loop helpers that are not scaffolding:
 //
-//   node tools/plugin.mjs devkey                 # once per machine
-//   node tools/plugin.mjs dev                    # pack + install + start
-//   node tools/plugin.mjs pack [--platform <t>]  # bundle only
-//   node tools/plugin.mjs check <file.spk>       # `plugin verify`
-//   node tools/plugin.mjs sync                   # refresh vendored SDK files
+//   node tools/plugin.mjs devkey    # once per machine, ~/.svcd-dev/dev.pem
+//   node tools/plugin.mjs dev       # build + pack + install + start
+//   node tools/plugin.mjs pack      # build + pack only
+//   node tools/plugin.mjs check <file.spk>
+//   node tools/plugin.mjs sync      # refresh the vendored SDK files
 //
-// Run from a plugin directory or anywhere inside the repo with --dir.
+// Scaffolding is `plugin-template`; packing is `plugin-build`. This file keeps
+// the install loop and the SDK-sync chore, and delegates the rest.
 
-import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import {
+  PLUGIN_BIN,
+  assertPayload,
+  buildNative,
+  fail,
+  findPluginRoot,
+  hostTriple,
+  packPackage,
+  readManifest,
+  run,
+} from './lib/build.mjs';
 
-const ROOT = resolve(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
-const PLUGIN_BIN = process.env.SVCD_PLUGIN_BIN ?? 'plugin';
-
-function fail(message) {
-  console.error(`plugin: ${message}`);
-  process.exit(1);
-}
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function argValue(argv, flag) {
   const index = argv.indexOf(flag);
   return index >= 0 ? argv[index + 1] : null;
-}
-
-function pluginRoot(argv) {
-  const explicit = argValue(argv, '--dir');
-  if (explicit) return resolve(explicit);
-  let current = process.cwd();
-  for (;;) {
-    if (existsSync(join(current, 'package', 'manifest.json'))) return current;
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  fail('no package/manifest.json found; run inside a plugin directory or pass --dir');
-}
-
-function manifestOf(root) {
-  return JSON.parse(readFileSync(join(root, 'package', 'manifest.json'), 'utf8'));
-}
-
-function hostTriple() {
-  const { platform, arch } = process;
-  if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc';
-  if (platform === 'linux' && arch === 'x64') return 'x86_64-unknown-linux-musl';
-  if (platform === 'linux' && arch === 'arm64') return 'aarch64-unknown-linux-musl';
-  if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
-  if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin';
-  fail(`cannot guess a target triple for ${platform}/${arch}; pass --platform`);
 }
 
 function devKey() {
@@ -77,66 +56,26 @@ function devKey() {
   return key;
 }
 
-function run(command, args, options = {}) {
-  console.log(`$ ${command} ${args.join(' ')}`);
-  const result = spawnSync(command, args, { stdio: 'inherit', ...options });
-  if (result.error) fail(`${command}: ${result.error.message}`);
-  if (result.status !== 0) fail(`${command} exited ${result.status}`);
-}
-
-function build(root, manifest) {
-  if (!existsSync(join(root, 'Cargo.toml'))) return;
-  run('cargo', ['build', '--release'], { cwd: root });
-  const execPath = manifest.exec?.path ?? '';
-  const binary = execPath.split('/').pop();
-  if (!binary) fail('manifest.exec.path is missing');
-  const candidates = [
-    join(root, 'target', 'release', binary),
-    join(root, 'target', 'release', `${binary}.exe`),
-  ];
-  const built = candidates.find((candidate) => existsSync(candidate));
-  if (!built) fail(`cargo produced no ${binary} in target/release`);
-  const target = join(root, 'package', 'payload', 'bin', binary);
-  mkdirSync(dirname(target), { recursive: true });
-  cpSync(built, target);
-}
-
 function pack(argv) {
-  const root = pluginRoot(argv);
-  const manifest = manifestOf(root);
-  build(root, manifest);
+  const root = findPluginRoot(argValue(argv, '--dir') ?? process.cwd());
+  const manifest = readManifest(root);
+  buildNative(root, manifest);
+  assertPayload(root);
 
   const platform = argValue(argv, '--platform') ?? process.env.SVCD_TARGET ?? hostTriple();
-  const key = argValue(argv, '--key') ?? process.env.SVCD_DEV_KEY ?? devKey();
-  const out = argValue(argv, '--out') ?? join(root, 'dist', `${manifest.name}-${manifest.version}-${platform}.spk`);
-  mkdirSync(dirname(out), { recursive: true });
-
-  run(PLUGIN_BIN, [
-    'bundle',
-    join(root, 'package'),
-    '--platform',
-    platform,
-    '--key',
-    key,
-    '-o',
-    out,
-  ]);
-  console.log(`packed ${out}`);
-  return out;
+  const key = argValue(argv, '--key') ?? null;
+  const spk = packPackage(root, manifest, { platform, key });
+  console.log(`packed ${spk}${key ? '' : '  (unsigned)'}`);
+  return spk;
 }
 
 function dev(argv) {
-  const root = pluginRoot(argv);
-  const manifest = manifestOf(root);
+  const root = findPluginRoot(argValue(argv, '--dir') ?? process.cwd());
+  const manifest = readManifest(root);
   const spk = pack(argv);
-  if (!existsSync(join(root, '..', '..', 'tools'))) {
-    // fall through; the repo layout is not load-bearing here
-  }
   run(PLUGIN_BIN, ['install', spk]);
   // First install does not auto-start; dev always wants it running.
   run(PLUGIN_BIN, ['start', manifest.name]);
-  const log = join(root, '..', '..');
-  void log;
   console.log(`started ${manifest.name}`);
 }
 
@@ -168,8 +107,7 @@ function sync() {
 
 function main() {
   const argv = process.argv.slice(2);
-  const command = argv[0];
-  switch (command) {
+  switch (argv[0]) {
     case 'devkey':
       devKey();
       break;

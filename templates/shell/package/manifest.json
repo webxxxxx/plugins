@@ -11,6 +11,10 @@
   "interpreter": {
     "name": "sh"
   },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
   "capabilities": [
     {
       "name": "uname",

@@ -18,12 +18,13 @@ src/main.rs               ← 你的代码
 ## 命令（在仓库根或插件目录内都行）
 
 ```bash
-node tools/plugin-template.mjs <name> --lang rust --webui   # 新建（含 Web UI）
-node tools/plugin.mjs pack                      # 构建 + 打包（默认本机三元组）
-node tools/plugin.mjs pack --platform aarch64-unknown-linux-musl
-node tools/plugin.mjs dev                       # 打包 + 安装 + 启动
+plugin-template <name> --lang rust --webui   # 只创建项目
+plugin-build                                 # 构建 + 打包（默认本机三元组，未签名）
+plugin-build --platform aarch64-unknown-linux-musl
+plugin-build --key ~/.svcd-dev/dev.pem       # 打成签名包
+node tools/plugin.mjs dev                    # 打包 + 安装 + 启动
 node tools/plugin.mjs check dist/<name>-<version>-<triple>.spk
-cargo test                                      # 清单与代码的能力清单是否一致
+cargo test                                   # 清单与代码的能力清单是否一致
 ```
 
 `plugin bundle` 需要一把签名钥；默认用 `~/.svcd-dev/dev.pem`（`node tools/plugin.mjs devkey` 生成一次），
