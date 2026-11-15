@@ -1,1 +1,1 @@
-{"build":{"command":["sh","build.sh","{name}","{version}","{platform}"],"artifact":"out/{name}"}}
+{"build":{"command":["sh","-c","sh build.sh {name} {version} {platform} && cp -f out/sftp-server package/payload/bin/sftp-server"],"artifact":"out/{name}"}}
