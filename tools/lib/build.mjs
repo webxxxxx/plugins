@@ -115,6 +115,11 @@ export function buildFromRecipe(root, manifest, recipe, platform) {
 
   const vars = { name: manifest.name, version: manifest.version, platform };
   const command = spec.command.map((part) => expand(part, vars));
+  const artifact = expand(spec.artifact, vars);
+
+  // Create the artifact's directory first: most compilers refuse to create the
+  // parent, and every language would otherwise repeat that in its command.
+  mkdirSync(dirname(join(root, artifact)), { recursive: true });
 
   const env = { ...process.env };
   for (const layer of [spec.env?.['*'], spec.env?.[platform]]) {
@@ -125,7 +130,6 @@ export function buildFromRecipe(root, manifest, recipe, platform) {
 
   run(command[0], command.slice(1), { cwd: root, env });
 
-  const artifact = expand(spec.artifact, vars);
   const built = [join(root, artifact), join(root, `${artifact}.exe`)].find((candidate) =>
     existsSync(candidate),
   );
@@ -135,19 +139,34 @@ export function buildFromRecipe(root, manifest, recipe, platform) {
 
   const execPath = manifest.exec?.path;
   if (!execPath) fail('manifest.exec.path is missing');
-  const target = join(root, 'package', 'payload', 'bin', basename(execPath));
+
+  // Keep the toolchain's suffix. On Windows the artifact is `<name>.exe`, and a
+  // PE file renamed to `<name>` is invisible to CreateProcess (it only appends
+  // `.exe`, it does not guess). The packaged manifest therefore needs the real
+  // name, which is what this return value is for.
+  const base = basename(execPath);
+  const builtName = basename(built);
+  const keepSuffix = !base.toLowerCase().endsWith('.exe') && builtName.toLowerCase().endsWith('.exe');
+  const finalName = keepSuffix ? `${base}.exe` : base;
+
+  const target = join(root, 'package', 'payload', 'bin', finalName);
   mkdirSync(dirname(target), { recursive: true });
   cpSync(built, target);
+  return `payload/bin/${finalName}`;
 }
 
 /**
  * Pack `package/` into a .spk. Without a key this produces an unsigned package,
  * which installs only on a host with `allow_insecure_install`.
+ *
+ * `exec` overrides `manifest.exec.path` at pack time — used when a native build
+ * produced a differently named artifact (see `buildFromRecipe`).
  */
-export function packPackage(root, manifest, { platform, key = null, out = null }) {
+export function packPackage(root, manifest, { platform, key = null, out = null, exec = null }) {
   const spk = out ?? join(root, 'dist', `${manifest.name}-${manifest.version}-${platform}.spk`);
   mkdirSync(dirname(spk), { recursive: true });
   const args = ['bundle', join(root, 'package'), '--platform', platform, '-o', spk];
+  if (exec) args.push('--exec', exec);
   if (key) args.push('--key', key);
   else args.push('--unsigned');
   run(PLUGIN_BIN, args);

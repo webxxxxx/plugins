@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>__NAME__</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 2rem; max-width: 46rem; }
+  pre { background: #f4f4f4; padding: .8rem; border-radius: 6px; min-height: 2rem; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 4px; }
+  input, button { font: inherit; }
+</style>
+
+<h1>__NAME__</h1>
+<p>这是一个 <strong>PowerShell</strong> 插件的 Web UI。静态文件由 svcd 反代，
+能力调用走 <code>POST ./rpc</code>。</p>
+
+<div>
+  <input id="message" value="hello from the browser" size="28">
+  <button id="echo">echo</button>
+  <button id="info">info</button>
+</div>
+<pre id="out">（等待调用）</pre>
+
+<script type="module">
+  import { pluginUI } from './plugin-ui.mjs';
+
+  const ui = pluginUI();
+  const out = document.getElementById('out');
+  const show = (promise) =>
+    promise.then(
+      (text) => { out.textContent = text; },
+      (error) => { out.textContent = `error ${error.code ?? ''}: ${error.message}`; },
+    );
+
+  document.getElementById('echo').onclick = () =>
+    show(ui.invoke('echo', { message: document.getElementById('message').value }));
+  document.getElementById('info').onclick = () => show(ui.invoke('info'));
+
+  show(ui.invoke('info'));
+</script>
+</html>

@@ -1,0 +1,15 @@
+{
+  "build": {
+    "command": [
+      "gcc",
+      "-std=c11",
+      "-O2",
+      "-Wall",
+      "-Wextra",
+      "-o",
+      "out/{name}",
+      "src/main.c"
+    ],
+    "artifact": "out/{name}"
+  }
+}

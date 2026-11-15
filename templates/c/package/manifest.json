@@ -1,0 +1,38 @@
+{
+  "schema": 2,
+  "name": "__NAME__",
+  "version": "0.1.0",
+  "desc": "__DESC__",
+  "protocol": 1,
+  "exec": {
+    "path": "payload/bin/__NAME__",
+    "ready": "notify"
+  },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "capabilities": [
+    {
+      "name": "echo",
+      "desc": "Echo a message back to the caller",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "info",
+      "desc": "Build and toolchain identity",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ]
+}

@@ -35,6 +35,19 @@ export interface PluginUI {
     onOpen?: () => void;
     onClose?: (retryDelayMs: number) => void;
   }): SocketSubscription;
+  /** Upload a File through chunked `file_put` calls (the plugin must declare it). */
+  uploadFile(
+    file: File | Blob,
+    options?: { name?: string; onProgress?: (progress: { sent: number; total: number }) => void },
+  ): Promise<{ ok?: boolean; path?: string; size?: number; complete?: boolean }>;
+  /** Download a stored file through chunked `file_get` calls; returns the Blob. */
+  downloadFile(
+    path: string,
+    options?: {
+      filename?: string;
+      onProgress?: (progress: { received: number; total: number }) => void;
+    },
+  ): Promise<Blob>;
 }
 
 export function pluginUI(options?: { base?: string }): PluginUI;

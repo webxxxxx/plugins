@@ -62,11 +62,11 @@ function pack(argv) {
   const manifest = readManifest(root);
   const platform = argValue(argv, '--platform') ?? process.env.SVCD_TARGET ?? hostTriple();
 
-  buildFromRecipe(root, manifest, readRecipe(root), platform);
+  const exec = buildFromRecipe(root, manifest, readRecipe(root), platform);
   assertPayload(root);
 
   const key = argValue(argv, '--key') ?? null;
-  const spk = packPackage(root, manifest, { platform, key });
+  const spk = packPackage(root, manifest, { platform, key, exec });
   console.log(`packed ${spk}${key ? '' : '  (unsigned)'}`);
   return spk;
 }

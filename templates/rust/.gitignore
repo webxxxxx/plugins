@@ -2,4 +2,6 @@
 /target
 /dist
 /package/payload/bin/*
-!/package/payload/bin/.gitkeep
+
+# A template pins no lockfile; the scaffolded project generates its own.
+/Cargo.lock

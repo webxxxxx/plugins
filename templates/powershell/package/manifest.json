@@ -1,0 +1,42 @@
+{
+  "schema": 2,
+  "name": "__NAME__",
+  "version": "0.1.0",
+  "desc": "__DESC__",
+  "protocol": 1,
+  "exec": {
+    "path": "payload/bin/__NAME__.ps1",
+    "ready": "notify"
+  },
+  "interpreter": {
+    "name": "powershell",
+    "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+  },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "capabilities": [
+    {
+      "name": "echo",
+      "desc": "Echo a message back to the caller",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": { "type": "string" }
+        },
+        "required": ["message"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "info",
+      "desc": "PowerShell edition and version",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ]
+}

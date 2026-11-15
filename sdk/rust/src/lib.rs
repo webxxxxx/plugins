@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub mod transfer;
+
+pub use transfer::FileStore;
+
 /// One JSON-RPC frame may not exceed this many bytes, excluding the newline.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// How many `tools/call` frames run at once.
@@ -221,26 +225,29 @@ pub fn serve<P: Plugin>(context: Context, plugin: P) -> Exit {
     let _ = WRITER.set(Mutex::new(io::stdout()));
 
     let plugin = Arc::new(Mutex::new(plugin));
-    let in_flight = Arc::new(AtomicUsize::new(0));
+    // Queued *and* running calls. Waiting on this instead of "running" is what
+    // makes a shutdown drain the queue rather than drop the tail of it.
+    let pending = Arc::new(AtomicUsize::new(0));
     let (sender, receiver) = mpsc::sync_channel::<Job>(QUEUE_DEPTH);
     let receiver = Arc::new(Mutex::new(receiver));
 
     for index in 0..WORKER_THREADS {
         let plugin = Arc::clone(&plugin);
         let receiver = Arc::clone(&receiver);
-        let in_flight = Arc::clone(&in_flight);
+        let pending = Arc::clone(&pending);
         let _ = thread::Builder::new()
             .name(format!("{}-call-{}", context.id(), index))
-            .spawn(move || worker_loop(plugin, receiver, in_flight));
+            .spawn(move || worker_loop(plugin, receiver, pending));
     }
 
-    read_loop(&context, sender, &plugin);
+    read_loop(&context, sender, &plugin, Arc::clone(&pending));
 
     // Stop accepting work, tell the workers, and give them the stop budget to
-    // fold their loops. The host kills the process group after 10 s regardless.
+    // fold their loops and finish what was already accepted. The host kills the
+    // process group after 10 s regardless.
     context.cancel().cancel();
     let deadline = Instant::now() + STOP_BUDGET;
-    while in_flight.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+    while pending.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -248,7 +255,7 @@ pub fn serve<P: Plugin>(context: Context, plugin: P) -> Exit {
 fn worker_loop<P: Plugin>(
     plugin: Arc<Mutex<P>>,
     receiver: Arc<Mutex<Receiver<Job>>>,
-    in_flight: Arc<AtomicUsize>,
+    pending: Arc<AtomicUsize>,
 ) {
     loop {
         // The lock is held only while blocking in `recv`, so one worker waits
@@ -261,7 +268,6 @@ fn worker_loop<P: Plugin>(
             guard.recv()
         };
         let Ok(job) = job else { return };
-        in_flight.fetch_add(1, Ordering::SeqCst);
         let outcome = {
             let mut guard = match plugin.lock() {
                 Ok(guard) => guard,
@@ -270,11 +276,16 @@ fn worker_loop<P: Plugin>(
             guard.call(&job.name, &job.arguments)
         };
         reply_result(&job.id, outcome.into_result());
-        in_flight.fetch_sub(1, Ordering::SeqCst);
+        pending.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
-fn read_loop<P: Plugin>(context: &Context, sender: SyncSender<Job>, plugin: &Arc<Mutex<P>>) {
+fn read_loop<P: Plugin>(
+    context: &Context,
+    sender: SyncSender<Job>,
+    plugin: &Arc<Mutex<P>>,
+    pending: Arc<AtomicUsize>,
+) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut line = String::new();
@@ -333,6 +344,7 @@ fn read_loop<P: Plugin>(context: &Context, sender: SyncSender<Job>, plugin: &Arc
                     continue;
                 }
                 let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                pending.fetch_add(1, Ordering::SeqCst);
                 match sender.try_send(Job {
                     id,
                     name,
@@ -340,9 +352,13 @@ fn read_loop<P: Plugin>(context: &Context, sender: SyncSender<Job>, plugin: &Arc
                 }) {
                     Ok(()) => {}
                     Err(TrySendError::Full(job)) => {
+                        pending.fetch_sub(1, Ordering::SeqCst);
                         reply_error(&job.id, -32603, "too many concurrent calls");
                     }
-                    Err(TrySendError::Disconnected(_)) => return,
+                    Err(TrySendError::Disconnected(_)) => {
+                        pending.fetch_sub(1, Ordering::SeqCst);
+                        return;
+                    }
                 }
             }
             "" => {}

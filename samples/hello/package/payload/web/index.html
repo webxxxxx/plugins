@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>hello</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 2rem; max-width: 52rem; }
+  section { border: 1px solid #e3e3e3; border-radius: 8px; padding: .8rem 1rem; margin: 1rem 0; }
+  h2 { font-size: 1rem; margin: 0 0 .6rem; }
+  pre { background: #f6f6f6; padding: .6rem; border-radius: 6px; min-height: 1.5rem; margin: .4rem 0 0; white-space: pre-wrap; }
+  input, button { font: inherit; }
+  input[type="text"] { padding: .3rem .5rem; }
+  button { margin-right: .4rem; padding: .3rem .7rem; }
+  .row { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; }
+  .muted { color: #777; }
+</style>
+
+<h1>hello</h1>
+<p class="muted">参考插件：能力调用、事件推送、分块上传下载。所有请求都走 <code>./rpc</code>，推送走 <code>./events</code>。</p>
+
+<section>
+  <h2>方法调用</h2>
+  <div class="row">
+    <input id="message" type="text" value="world" size="24">
+    <button id="echo">echo</button>
+    <button id="stats">stats</button>
+  </div>
+  <pre id="out">（等待调用）</pre>
+</section>
+
+<section>
+  <h2>文件</h2>
+  <div class="row">
+    <input id="file" type="file">
+    <button id="upload">上传</button>
+    <button id="list">列表</button>
+  </div>
+  <div class="row">
+    <input id="download" type="text" placeholder="文件名" size="24">
+    <button id="download-button">下载</button>
+  </div>
+  <pre id="files">（空）</pre>
+</section>
+
+<section>
+  <h2>事件推送</h2>
+  <div class="row">
+    <button id="sse">SSE 已连接</button>
+    <button id="ws">连接 WebSocket</button>
+  </div>
+  <pre id="feed">（等待 tick）</pre>
+</section>
+
+<script type="module">
+  import { pluginUI } from './plugin-ui.mjs';
+
+  const ui = pluginUI();
+  const out = document.getElementById('out');
+  const files = document.getElementById('files');
+  const feed = document.getElementById('feed');
+
+  const show = (promise, into = out) =>
+    promise.then(
+      (text) => { into.textContent = text; },
+      (error) => { into.textContent = `error ${error.code ?? ''}: ${error.message}`; },
+    );
+
+  document.getElementById('echo').onclick = () =>
+    show(ui.invoke('echo', { message: document.getElementById('message').value }));
+  document.getElementById('stats').onclick = () => show(ui.invoke('stats'));
+
+  const renderList = async () => {
+    const text = await ui.invoke('file_list');
+    const parsed = JSON.parse(text);
+    files.textContent = parsed.files.length
+      ? parsed.files.map((entry) => `${entry.name}  ${entry.size} B`).join('\n')
+      : '（空）';
+  };
+
+  document.getElementById('upload').onclick = () => {
+    const file = document.getElementById('file').files[0];
+    if (!file) { out.textContent = '先选一个文件'; return; }
+    const progress = (p) => { files.textContent = `上传中 ${p.sent}/${p.total} B`; };
+    show(ui.uploadFile(file, { onProgress: progress }).then(renderList), files);
+  };
+  document.getElementById('list').onclick = () => show(renderList(), files);
+  document.getElementById('download-button').onclick = () => {
+    const name = document.getElementById('download').value.trim();
+    if (!name) { out.textContent = '填一个文件名'; return; }
+    show(ui.downloadFile(name).then((blob) => `已下载 ${name}（${blob.size} B）`));
+  };
+
+  const onMessage = (method, params) => {
+    if (method === 'notifications/message' && params?.type === 'tick') {
+      feed.textContent = `tick #${params.count}`;
+    }
+  };
+  const sse = ui.subscribe({ onMessage, onReset: () => { feed.textContent = '历史不可回放'; } });
+  document.getElementById('sse').onclick = () => { sse.close(); out.textContent = 'SSE 已关闭'; };
+
+  let socket = null;
+  document.getElementById('ws').onclick = () => {
+    if (socket) { socket.close(); socket = null; return; }
+    socket = ui.subscribeWebSocket({ onMessage, onClose: (ms) => { feed.textContent = `${ms} ms 后重连`; } });
+    feed.textContent = 'WebSocket 已连接';
+  };
+
+  show(ui.invoke('stats'));
+  renderList().catch(() => {});
+</script>
+</html>

@@ -2,7 +2,7 @@
   "schema": 2,
   "name": "hello-rust",
   "version": "0.1.0",
-  "desc": "Rust 最小插件：能力 + 定时通知 + Web UI",
+  "desc": "Rust 最小插件模板产物",
   "protocol": 1,
   "exec": {
     "path": "payload/bin/hello-rust",

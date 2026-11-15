@@ -1,28 +1,36 @@
 # 插件仓库
 
-一期的两种插件模板（Rust / Shell）、它们共用的协议壳，以及本地打包与校验的工具。
+四种语言的插件模板（Rust / C / Shell / PowerShell）、它们共用的协议壳，以及本地打包与校验的工具。
 插件作者只写核心逻辑，其余在 SDK 里。
 
 ## 结构
 
 ```
-sdk/rust/         crate `svcd-plugin` —— 协议循环、并发、取消、MCP 返回形状
+sdk/rust/         crate `svcd-plugin` —— 协议循环、并发、取消、MCP 返回形状、文件收发
+sdk/c/            单头文件协议壳
 sdk/shell/        POSIX sh 协议壳（随插件拷进包里）
-sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）
-templates/rust/   模板源
-templates/shell/  模板源
-samples/          脚手架空跑出来的标准示例（plugin-template ... --force 重新生成）
+sdk/powershell/   PowerShell 协议壳（随插件拷进包里）
+sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）：invoke / SSE / WS / 上传下载
+templates/        rust / c / shell / powershell 四种模板源
+samples/hello     生产级参考插件：能力、配置、日志、定时通知、分块上传下载、UI
+samples/          hello-rust / hello-shell 是模板产物（plugin-template --force 重新生成）
 skills/           给 AI 的插件开发手册（语言、toolkit、边界）
 tools/            plugin-template.mjs（只建项目）、plugin-build.mjs（构建+打包）、plugin.mjs（devkey/dev/check/sync）
 ```
 
-模板是唯一真源；`samples/` 是它的实例，改了模板就用 `--force` 重新生成，别手改。
+模板是唯一真源；由模板生成的样例用 `--force` 重新生成，别手改。`samples/hello` 是手写的参考实现，不受模板约束。
 
 ## 两条命令
 
 ```bash
-plugin-template wireguard --webui --lang rust   # 只创建项目，不编译不打包
-cd plugins/wireguard && plugin-build            # 构建 + 打包（默认未签名）
+plugin-template wireguard                 # 数字菜单：语言 1-4 → 平台 1-7
+cd plugins/wireguard && plugin-build      # 构建 + 打包（默认未签名）
+```
+
+非交互（CI 用）：
+
+```bash
+plugin-template wireguard --lang c --platforms x86_64-unknown-linux-musl,x86_64-pc-windows-msvc --webui
 ```
 
 `plugin-build` 不给 `--key` 时产出未签名包，宿主需要 `allow_insecure_install = on`；

@@ -15,6 +15,27 @@ const RPC = 'rpc';
 const EVENTS = 'events';
 const WS = 'ws';
 
+/** Files move as base64 chunks through `tools/call`, because the host gives the
+ * plugin exactly one request channel (`POST ./rpc`) and caps a frame at 1 MiB. */
+const CHUNK = 512 * 1024;
+
+function bytesToBase64(bytes) {
+  let binary = '';
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(offset, offset + 0x8000));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(text) {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
 export class PluginRpcError extends Error {
   constructor(code, message, data) {
     super(message);
@@ -163,5 +184,65 @@ export function pluginUI(options = {}) {
     };
   }
 
-  return { url, invoke, http, subscribe, subscribeWebSocket };
+  /**
+   * Upload a File to the plugin, chunk by chunk.
+   *
+   * The plugin must declare the `file_put` capability; `sdk/rust`'s
+   * `FileStore` implements the server half. Each chunk is one `tools/call`, so
+   * a slow link degrades into more round trips rather than a stalled frame.
+   */
+  async function uploadFile(file, { name = file.name, onProgress } = {}) {
+    const total = file.size;
+    let offset = 0;
+    let last = null;
+    do {
+      const slice = file.slice(offset, offset + CHUNK);
+      const data = bytesToBase64(new Uint8Array(await slice.arrayBuffer()));
+      const final = offset + slice.size >= total;
+      const reply = await invoke(
+        'file_put',
+        { path: name, offset, total, data, final },
+        { timeoutMs: 120000 },
+      );
+      last = reply ? JSON.parse(reply) : {};
+      offset += slice.size;
+      onProgress?.({ sent: offset, total });
+    } while (offset < total);
+
+    return last;
+  }
+
+  /**
+   * Download a file the plugin stored, and hand it to the browser.
+   *
+   * The plugin must declare the `file_get` capability. Returns the assembled
+   * Blob so a caller can show a preview instead of saving.
+   */
+  async function downloadFile(path, { filename = path, onProgress } = {}) {
+    const chunks = [];
+    let offset = 0;
+    for (;;) {
+      const reply = JSON.parse(
+        await invoke('file_get', { path, offset, length: CHUNK }, { timeoutMs: 120000 }),
+      );
+      const bytes = base64ToBytes(reply.data ?? '');
+      chunks.push(bytes);
+      offset += bytes.length;
+      onProgress?.({ received: offset, total: reply.size ?? offset });
+      if (reply.eof || bytes.length === 0) break;
+    }
+
+    const blob = new Blob(chunks, { type: 'application/octet-stream' });
+    if (typeof document !== 'undefined') {
+      const href = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = href;
+      anchor.download = filename;
+      anchor.click();
+      URL.revokeObjectURL(href);
+    }
+    return blob;
+  }
+
+  return { url, invoke, http, subscribe, subscribeWebSocket, uploadFile, downloadFile };
 }

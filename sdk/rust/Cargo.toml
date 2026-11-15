@@ -6,4 +6,5 @@ description = "Protocol shell for .spk plugins supervised by svcd"
 publish = false
 
 [dependencies]
+base64 = "0.22"
 serde_json = "1"

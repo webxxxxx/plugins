@@ -1,0 +1,67 @@
+{
+  "schema": 2,
+  "name": "hello",
+  "version": "1.0.0",
+  "desc": "Reference plugin: capabilities, notifications, chunked file transfer",
+  "protocol": 1,
+  "exec": {
+    "path": "payload/bin/hello",
+    "ready": "notify"
+  },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "capabilities": [
+    {
+      "name": "echo",
+      "desc": "Echo a message back, prefixed with the configured greeting",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "message": { "type": "string" } },
+        "required": ["message"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stats",
+      "desc": "Counters and uptime as a JSON object",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "file_put",
+      "desc": "Append one base64 chunk of a file (chunked upload)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "offset": { "type": "number" },
+          "total": { "type": "number" },
+          "data": { "type": "string" },
+          "final": { "type": "boolean" }
+        },
+        "required": ["path", "offset", "total", "data"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "file_get",
+      "desc": "Read one base64 chunk of a stored file (chunked download)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "offset": { "type": "number" },
+          "length": { "type": "number" }
+        },
+        "required": ["path", "offset"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "file_list",
+      "desc": "List stored files with their sizes",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    }
+  ]
+}

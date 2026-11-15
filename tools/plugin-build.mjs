@@ -73,13 +73,14 @@ function main() {
   const manifest = readManifest(root);
   const platform = options.platform ?? process.env.SVCD_TARGET ?? hostTriple();
 
-  buildFromRecipe(root, manifest, readRecipe(root), platform);
+  const exec = buildFromRecipe(root, manifest, readRecipe(root), platform);
   assertPayload(root);
 
   const spk = packPackage(root, manifest, {
     platform,
     key: options.key,
     out: options.out ? resolve(options.out) : null,
+    exec,
   });
 
   if (options.verify) {

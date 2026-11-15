@@ -12,10 +12,11 @@ description: 新增或修改 svcd 插件前读：支持哪两种语言、SDK 与
 ### 1. 起项目
 
 ```bash
-plugin-template <name> --lang rust|shell [--webui]
+plugin-template wireguard          # 数字菜单选语言（1-4）与平台（1-7）
+plugin-template wireguard --lang rust --platforms x86_64-unknown-linux-musl --webui
 ```
 
-完成判据：`package/manifest.json` 与 `build.json` 存在，且目录里**没有** `target/`、`dist/`。
+完成判据：`package/manifest.json`、`build.json`、`.plugin.json` 都存在，且目录里**没有** `target/`、`dist/`、`out/`。
 
 ### 2. 只写 handler
 
@@ -66,7 +67,9 @@ plugin start <name>
 | 语言 | 模板 | 目标机需要什么 | 适合 |
 |---|---|---|---|
 | `rust` | `templates/rust` | 无（编译成静态二进制） | 需要状态、并发、JSON 处理的插件 |
+| `c` | `templates/c` | 无（编译成静态二进制） | 体积敏感、只想依赖 libc |
 | `shell` | `templates/shell` | 目标机有 `sh` | 包装已有命令、输出是文本 |
+| `powershell` | `templates/powershell` | Windows 的 `powershell` 或 Linux/macOS 的 `pwsh` | Windows 运维脚本 |
 
 两种语言共用同一套契约和同一个 Web toolkit；**前端不认识后端语言**。
 
@@ -113,6 +116,32 @@ plugin start <name>
 
 `arguments` 在 shell 里是**原样 JSON 字符串**（没有解析器）。参数是扁平字符串时直接 `case`/`sed` 取；要真正解析 JSON 就换 Rust。
 
+### C（`sdk/c`，单头文件）
+
+| API | 作用 |
+|---|---|
+| `svcd_serve(&ctx, handler, user, capabilities)` | 协议循环；自动应答 ping/status/shutdown |
+| `handler(name, args_json, user)` | 你的能力实现；返回 `svcd_text()` / `svcd_error()` |
+| `svcd_string(args_json, "key")` | 取一个扁平字符串字段（调用方 free） |
+| `svcd_raw_value(args_json, "key")` | 取一个嵌套对象/数组的原始 JSON |
+| `svcd_log("info", "…")` | 写 stderr |
+| `svcd_notify(method, params_json)` | 推送 |
+
+头文件里是**扁平 JSON 扫描器**，不是通用解析器。需要真解析 JSON 就换 Rust。
+
+### PowerShell（`sdk/powershell`，随包拷贝）
+
+| API | 作用 |
+|---|---|
+| `Invoke-SvcdPlugin -Handler {…} -Capabilities @(…)` | 协议循环 |
+| handler `param($Name, $Arguments)` | 你的能力实现；返回字符串或 `@{Text=…;Error=$true}` |
+| `Write-SvcdLog 'info' '…'` | 写 stderr |
+| `Send-SvcdNotification -Method … -Params …` | 推送 |
+| `Get-SvcdContext` | `SVCD_*` 环境 |
+
+`interpreter.name` 在 Windows 写 `powershell`，Linux/macOS 写 `pwsh`；**不要写 `version`**
+（`powershell --version` 不是合法参数，探测会失败）。
+
 ### Web（`sdk/web`，浏览器 ESM）
 
 ```js
@@ -122,6 +151,8 @@ const ui = pluginUI();
 await ui.invoke('echo', { message: 'hi' });          // POST ./rpc
 ui.subscribe({ onMessage(method, params) {} });      // SSE ./events
 ui.subscribeWebSocket({ onMessage() {} });           // WebSocket ./ws（同样是推送）
+await ui.uploadFile(file, { onProgress });           // 分块 file_put
+await ui.downloadFile('a.txt');                      // 分块 file_get，返回 Blob
 ```
 
 | 通道 | 路径 | 用途 |
@@ -129,6 +160,16 @@ ui.subscribeWebSocket({ onMessage() {} });           // WebSocket ./ws（同样�
 | 方法调用 | `POST ./rpc` | 调能力 |
 | SSE | `./events` | 服务端推送，带 `id: <seq>`，另有 `event: reset` |
 | WebSocket | `./ws` | 同一路推送的另一种承载 |
+
+**文件传输**走 `tools/call` 分块，因为宿主只给一条请求通道且单帧上限 1 MiB：
+
+```
+file_put  {path, offset, total, data(base64), final}  → {"ok":true,"size":…,"complete":true}
+file_get  {path, offset, length}                      → {"data":…,"size":…,"eof":…}
+```
+
+服务端用 `svcd_plugin::FileStore`（Rust）；浏览器用 `uploadFile` / `downloadFile`。
+两边是一份协议，改一边就要改另一边。文件名只允许单层 `[A-Za-z0-9._-]`。
 
 ## 边界
 

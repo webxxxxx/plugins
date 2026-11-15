@@ -1,0 +1,3 @@
+# Build output never ships; the packer collects package/ only.
+/out
+/dist
