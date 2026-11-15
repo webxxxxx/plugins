@@ -20,9 +20,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 pub mod blob;
+pub mod file;
 pub mod transfer;
 
 pub use blob::{BlobArg, BlobWriter};
+pub use file::{file_argument, FileArg, PartReader};
 pub use transfer::FileStore;
 
 /// One JSON-RPC frame may not exceed this many bytes, excluding the newline.

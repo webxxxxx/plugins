@@ -8,6 +8,12 @@
 //   ./ws      WebSocket  text frames            (server push, same stream)
 //   ./        the static assets themselves
 //
+// Large payloads never travel through those frames (1 MiB cap). The host owns a
+// transfer surface instead, and this file wraps both tiers:
+//
+//   /api/v1/blobs      one object, <= 512 MiB, resumable part sessions
+//   /api/v1/file       a "file package" (parts + manifest), <= 16 GiB
+//
 // Auth is a path-scoped cookie plus an Origin check, both handled by the
 // browser: this file never touches a token.
 
@@ -15,9 +21,10 @@ const RPC = 'rpc';
 const EVENTS = 'events';
 const WS = 'ws';
 const BLOBS = '/api/v1/blobs';
+const FILES = '/api/v1/file';
 
-/** Blob ids are content addresses; reject anything else before it reaches a URL. */
-const BLOB_ID = /^sha256:[0-9a-f]{64}$/;
+/** Content addresses only; reject anything else before it reaches a URL. */
+const CONTENT_ID = /^sha256:[0-9a-f]{64}$/;
 
 export class PluginRpcError extends Error {
   constructor(code, message, data) {
@@ -38,6 +45,43 @@ function parse(raw) {
   } catch {
     return null;
   }
+}
+
+async function jsonRequest(url, init = {}) {
+  const response = await fetch(url, { credentials: 'same-origin', ...init });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new PluginRpcError(-32000, `HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
+  }
+  return response.json();
+}
+
+async function putPart(partsUrl, partNumber, slice, attempts = 3) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await jsonRequest(`${partsUrl}/${partNumber}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: slice,
+      });
+    } catch (error) {
+      lastError = error;
+      // The same part number may be re-uploaded; only the last attempt decides.
+      await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+  }
+  throw lastError;
+}
+
+function saveBlob(blob, filename) {
+  if (typeof document === 'undefined') return;
+  const href = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = href;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(href);
 }
 
 /**
@@ -188,51 +232,181 @@ export function pluginUI(options = {}) {
   }
 
   /**
-   * Upload a file to the host's blob store and get back its id.
-   *
-   * Blobs are how large payloads cross the boundary: the control channel caps a
-   * frame at 1 MiB, and `POST /api/v1/blobs` takes the raw bytes instead. Pass
-   * the id to a capability as `{ $blob: id }`; the host resolves it to a file
-   * path before the plugin sees it.
+   * One streaming request for the whole file (`POST /api/v1/blobs`). The server
+   * hashes while it writes, so daemon memory stays flat; 512 MiB is the ceiling
+   * and there is no resume. Use `uploadBlobResumable` past a few hundred MB.
    */
   async function uploadBlob(file) {
-    const response = await fetch(BLOBS, {
+    return jsonRequest(BLOBS, {
       method: 'POST',
       headers: { 'content-type': 'application/octet-stream' },
-      credentials: 'same-origin',
       body: file,
     });
-    if (!response.ok) {
-      throw new PluginRpcError(-32000, `blob upload failed: HTTP ${response.status}`);
-    }
-    return response.json();
   }
 
-  /** Fetch a blob by id and hand it to the browser (or return the Blob). */
-  async function downloadBlob(id, { filename = 'blob' } = {}) {
-    if (!BLOB_ID.test(id)) {
-      throw new PluginRpcError(-32602, `not a blob id: ${id}`);
+  /**
+   * Resumable upload of one blob (<= 512 MiB): create a part session, PUT the
+   * parts, then complete. Pass `uploadId` from a previous failure to resume —
+   * the server reports the parts it already holds and only the rest is sent.
+   */
+  async function uploadBlobResumable(file, options = {}) {
+    return uploadParts(file, {
+      base: BLOBS,
+      partSize: options.partSize ?? 32 * 1024 * 1024,
+      concurrency: options.concurrency ?? 3,
+      resumeId: options.uploadId ?? null,
+      onProgress: options.onProgress,
+      complete: (parts) => ({ parts }),
+    });
+  }
+
+  /**
+   * Resumable upload of a **file package** (`/api/v1/file`), for files above the
+   * 512 MiB blob ceiling. Parts plus a manifest; the id is the whole file's
+   * SHA-256, so re-submitting identical content reuses the package.
+   *
+   * The capability argument is `{ $file: id }`, not `{ $blob: id }`.
+   */
+  async function uploadFilePackage(file, options = {}) {
+    const name = options.name ?? file.name ?? 'file';
+    const mimeType = options.mimeType ?? file.type ?? 'application/octet-stream';
+    return uploadParts(file, {
+      base: FILES,
+      partSize: options.partSize ?? 64 * 1024 * 1024,
+      concurrency: options.concurrency ?? 3,
+      resumeId: options.uploadId ?? null,
+      onProgress: options.onProgress,
+      complete: (parts) => ({ name, mimeType, parts }),
+    });
+  }
+
+  /** Shared S3-style part session used by both tiers. */
+  async function uploadParts(
+    file,
+    { base, partSize, concurrency, resumeId, onProgress, complete },
+  ) {
+    const total = file.size;
+    const partCount = Math.max(1, Math.ceil(total / partSize));
+    if (partCount > 10000) {
+      throw new PluginRpcError(-32602, `too many parts (${partCount}); use a larger partSize`);
     }
-    const response = await fetch(`${BLOBS}/${id}`, { credentials: 'same-origin' });
+
+    let uploadId = resumeId;
+    let partsUrl;
+    try {
+      if (uploadId) {
+        partsUrl = `${base}/uploads/${uploadId}/parts`;
+      } else {
+        const created = await jsonRequest(`${base}/uploads`, { method: 'POST' });
+        uploadId = created.uploadId;
+        partsUrl = created.partsUrl ?? `${base}/uploads/${uploadId}/parts`;
+      }
+
+      const done = new Map();
+      if (resumeId) {
+        const status = await jsonRequest(`${base}/uploads/${uploadId}`);
+        for (const part of status.parts ?? []) done.set(part.partNumber, part);
+      }
+
+      const queue = [];
+      for (let index = 1; index <= partCount; index += 1) {
+        if (!done.has(index)) queue.push(index);
+      }
+
+      let sent = 0;
+      for (const part of done.values()) sent += part.size ?? 0;
+      const results = new Map(done);
+      onProgress?.({ sent, total, partCount, resumed: done.size });
+
+      const worker = async () => {
+        for (;;) {
+          const partNumber = queue.shift();
+          if (partNumber === undefined) return;
+          const start = (partNumber - 1) * partSize;
+          const slice = file.slice(start, Math.min(start + partSize, total));
+          const info = await putPart(partsUrl, partNumber, slice);
+          results.set(partNumber, info);
+          sent += slice.size;
+          onProgress?.({ sent: Math.min(sent, total), total, partCount, partNumber });
+        }
+      };
+      const workers = Math.min(Math.max(1, concurrency), Math.max(1, queue.length));
+      await Promise.all(Array.from({ length: workers }, worker));
+
+      const parts = [...results.values()]
+        .sort((left, right) => left.partNumber - right.partNumber)
+        .map((part) => ({ partNumber: part.partNumber, etag: part.etag }));
+
+      return await jsonRequest(`${base}/uploads/${uploadId}/complete`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(complete(parts)),
+      });
+    } catch (error) {
+      if (error instanceof PluginRpcError) error.uploadId = uploadId;
+      throw error;
+    }
+  }
+
+  /** Drop a part session and its temp files. `kind` is 'blob' or 'file'. */
+  async function abortUpload(kind, uploadId) {
+    const base = kind === 'file' ? FILES : BLOBS;
+    const response = await fetch(`${base}/uploads/${uploadId}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    });
+    if (!response.ok && response.status !== 404) {
+      throw new PluginRpcError(-32000, `abort failed: HTTP ${response.status}`);
+    }
+  }
+
+  /** Fetch a blob by id (streamed by the server; Range is available if needed). */
+  async function downloadBlob(id, { filename = 'blob' } = {}) {
+    return downloadFrom(BLOBS, id, filename);
+  }
+
+  /** Fetch a file package by id; the server streams it part by part. */
+  async function downloadFile(id, { filename = 'file' } = {}) {
+    return downloadFrom(FILES, id, filename);
+  }
+
+  async function downloadFrom(base, id, filename) {
+    if (!CONTENT_ID.test(id)) {
+      throw new PluginRpcError(-32602, `not a content id: ${id}`);
+    }
+    const response = await fetch(`${base}/${id}`, { credentials: 'same-origin' });
     if (!response.ok) {
-      throw new PluginRpcError(-32000, `blob download failed: HTTP ${response.status}`);
+      throw new PluginRpcError(-32000, `download failed: HTTP ${response.status}`);
     }
     const blob = await response.blob();
-    if (typeof document !== 'undefined') {
-      const href = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = href;
-      anchor.download = filename;
-      anchor.click();
-      URL.revokeObjectURL(href);
-    }
+    saveBlob(blob, filename);
     return blob;
   }
 
-  /** Build the argument object a capability expects for a blob input. */
+  /** Argument shape for a blob input. */
   function blobArg(id) {
     return { $blob: id };
   }
 
-  return { url, invoke, invokeResult, http, subscribe, subscribeWebSocket, uploadBlob, downloadBlob, blobArg };
+  /** Argument shape for a file-package input (large files; not an alias of $blob). */
+  function fileArg(id) {
+    return { $file: id };
+  }
+
+  return {
+    url,
+    invoke,
+    invokeResult,
+    http,
+    subscribe,
+    subscribeWebSocket,
+    uploadBlob,
+    uploadBlobResumable,
+    uploadFilePackage,
+    abortUpload,
+    downloadBlob,
+    downloadFile,
+    blobArg,
+    fileArg,
+  };
 }

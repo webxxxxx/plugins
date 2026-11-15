@@ -37,6 +37,10 @@
     <button id="summarize">上传并总结</button>
     <button id="report">生成报告并下载</button>
   </div>
+  <div class="row">
+    <input id="package" type="file">
+    <button id="inspect">上传文件包并检查（&gt;512 MiB 走这条）</button>
+  </div>
   <pre id="blob">（等待操作）</pre>
 </section>
 
@@ -91,6 +95,21 @@
         }
         const blob = await ui.downloadBlob(id, { filename: 'report.txt' });
         return `报告已下载：${id}（${blob.size} B）`;
+      })(),
+      blobOut,
+    );
+  };
+
+  document.getElementById('inspect').onclick = () => {
+    const file = document.getElementById('package').files[0];
+    if (!file) { blobOut.textContent = '先选一个大文件'; return; }
+    show(
+      (async () => {
+        const meta = await ui.uploadFilePackage(file, {
+          onProgress: (p) => { blobOut.textContent = `上传 ${p.sent}/${p.total} B`; },
+        });
+        blobOut.textContent = `已上传 ${meta.id}（${meta.size} B），正在检查…`;
+        return ui.invoke('inspect_file', { input: ui.fileArg(meta.id) });
       })(),
       blobOut,
     );

@@ -13,12 +13,13 @@
 //! Copy it, delete the parts you do not need, keep the shape.
 
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use svcd_plugin::blob::{blob_argument, BlobWriter};
+use svcd_plugin::file::file_argument;
 use svcd_plugin::{log_info, log_warn, Context, Exit, Plugin, ToolOutcome};
 
 /// Refuse to summarize a blob larger than this; the point is to stream, not to
@@ -113,6 +114,46 @@ impl Hello {
         ))
     }
 
+    /// Stream a file package (parts + manifest) and check it matches the size
+    /// the host declared. This is the `$file` tier: no 512 MiB ceiling.
+    fn inspect_file(&self, arguments: &Value) -> ToolOutcome {
+        let file = match file_argument(arguments, "input") {
+            Ok(Some(file)) => file,
+            Ok(None) => {
+                return ToolOutcome::error("inspect_file: \"input\" must be a file argument ({$file: …})")
+            }
+            Err(error) => return ToolOutcome::error(error),
+        };
+        let parts = match file.part_paths() {
+            Ok(parts) => parts.len(),
+            Err(error) => return ToolOutcome::error(error),
+        };
+        let mut reader = match file.open() {
+            Ok(reader) => reader,
+            Err(error) => return ToolOutcome::error(error),
+        };
+
+        let mut buffer = [0u8; 64 * 1024];
+        let mut bytes = 0u64;
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => bytes += read as u64,
+                Err(error) => return ToolOutcome::error(format!("read package: {error}")),
+            }
+        }
+        if bytes != file.size {
+            return ToolOutcome::error(format!(
+                "read {bytes} bytes but the manifest says {}",
+                file.size
+            ));
+        }
+        ToolOutcome::text(format!(
+            "{}: {} bytes in {} part(s) ({})",
+            file.name, bytes, parts, file.id
+        ))
+    }
+
     /// Produce a small report as a blob the host stores and links.
     fn report(&self) -> ToolOutcome {
         let Some(temp) = self.temp.as_deref() else {
@@ -137,7 +178,8 @@ impl Hello {
 }
 
 impl Plugin for Hello {
-    const CAPABILITIES: &'static [&'static str] = &["echo", "stats", "summarize", "report"];
+    const CAPABILITIES: &'static [&'static str] =
+        &["echo", "stats", "summarize", "inspect_file", "report"];
 
     fn call(&mut self, name: &str, arguments: &Value) -> ToolOutcome {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -148,6 +190,7 @@ impl Plugin for Hello {
             },
             "stats" => ToolOutcome::text(self.stats().to_string()),
             "summarize" => self.summarize(arguments),
+            "inspect_file" => self.inspect_file(arguments),
             "report" => self.report(),
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }

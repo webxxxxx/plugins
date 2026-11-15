@@ -56,10 +56,50 @@ export interface PluginUI {
   }): SocketSubscription;
   /** Upload raw bytes to POST /api/v1/blobs and get the content address back. */
   uploadBlob(file: Blob): Promise<BlobMeta>;
+  /** Resumable upload of one blob (<= 512 MiB) through a part session. */
+  uploadBlobResumable(
+    file: Blob,
+    options?: {
+      partSize?: number;
+      concurrency?: number;
+      uploadId?: string | null;
+      onProgress?: (progress: {
+        sent: number;
+        total: number;
+        partCount: number;
+        partNumber?: number;
+        resumed?: number;
+      }) => void;
+    },
+  ): Promise<BlobMeta>;
+  /** Resumable upload of a file package (`/api/v1/file`, up to 16 GiB). */
+  uploadFilePackage(
+    file: File | Blob,
+    options?: {
+      name?: string;
+      mimeType?: string;
+      partSize?: number;
+      concurrency?: number;
+      uploadId?: string | null;
+      onProgress?: (progress: {
+        sent: number;
+        total: number;
+        partCount: number;
+        partNumber?: number;
+        resumed?: number;
+      }) => void;
+    },
+  ): Promise<BlobMeta & { name?: string; mimeType?: string }>;
+  /** DELETE a part session and its temp files. */
+  abortUpload(kind: 'blob' | 'file', uploadId: string): Promise<void>;
   /** GET /api/v1/blobs/<id>; returns the Blob and triggers a download in a browser. */
   downloadBlob(id: string, options?: { filename?: string }): Promise<Blob>;
+  /** GET /api/v1/file/<id>; the server streams the parts. */
+  downloadFile(id: string, options?: { filename?: string }): Promise<Blob>;
   /** `{ $blob: id }` — the argument shape a capability expects for blob input. */
   blobArg(id: string): { $blob: string };
+  /** `{ $file: id }` — the argument shape for a file package (not a blob). */
+  fileArg(id: string): { $file: string };
 }
 
 export function pluginUI(options?: { base?: string }): PluginUI;

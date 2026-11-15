@@ -105,6 +105,7 @@ plugin start <name>
 | `log_info! / log_warn! / log_error!` | 写 stderr（宿主捕获并轮转） |
 | `declared_capabilities(path)` | 读 manifest 的能力清单，用于 drift test |
 | `blob::blob_argument(args, "input")` | 取宿主解析好的 `$blob` 参数（`{path,size}`） |
+| `file::file_argument(args, "input")` → `FileArg::open()` | 取 `$file` 文件包，按 part 顺序流式读 |
 | `BlobWriter::create(&ctx, name, mime)` | 把大结果写进 `incoming/`，`finish()` 返回 `ToolOutcome::Blob` |
 | `FileStore` | 插件**自己的**持久文件（`data_dir` 下），不是传输通道 |
 
@@ -157,9 +158,12 @@ await ui.invoke('echo', { message: 'hi' });          // POST ./rpc
 const r = await ui.invokeResult('report');           // 保留 structuredContent
 ui.subscribe({ onMessage(method, params) {} });      // SSE ./events
 ui.subscribeWebSocket({ onMessage() {} });           // WebSocket ./ws（同样是推送）
-const meta = await ui.uploadBlob(file);              // POST /api/v1/blobs → {id,size}
+const meta = await ui.uploadBlob(file);              // 整体上传（≤512 MiB）
+const big = await ui.uploadFilePackage(file);        // part 会话（≤16 GiB）
 await ui.invoke('summarize', { input: ui.blobArg(meta.id) });
-await ui.downloadBlob(meta.id, { filename: 'x.bin' });  // GET /api/v1/blobs/<id>
+await ui.invoke('inspect_file', { input: ui.fileArg(big.id) });
+await ui.downloadBlob(meta.id, { filename: 'x.bin' });   // Range/流式
+await ui.downloadFile(big.id, { filename: 'x.iso' });
 ```
 
 | 通道 | 路径 | 用途 |
@@ -168,14 +172,18 @@ await ui.downloadBlob(meta.id, { filename: 'x.bin' });  // GET /api/v1/blobs/<id
 | SSE | `./events` | 服务端推送，带 `id: <seq>`，另有 `event: reset` |
 | WebSocket | `./ws` | 同一路推送的另一种承载 |
 
-**大对象**永远不要塞进 JSON 帧（单帧上限 1 MiB）。宿主有内容寻址的 blob 通道：
+**大对象**永远不要塞进 JSON 帧（单帧上限 1 MiB）。宿主有两级传输面：
 
-| 方向 | 做法 |
-|---|---|
-| 输入 | UI 先 `POST /api/v1/blobs` 拿到 `sha256:…`，参数里传 `{"$blob": id}`；宿主把它换成 `{$blob, path, size}`，插件按文件读（流式，别整个进内存） |
-| 输出 | 插件写 `SVCD_TEMP_DIR/incoming/<唯一名>`，返回 `ToolOutcome::Blob`（或 `svcd_blob()` / `@{BlobPath=…}`）；宿主物化成 `resource_link` |
+| 级别 | 上限 | 参数形状 | 说明 |
+|---|---|---|---|
+| blob | 512 MiB | `{"$blob": id}` → `{$blob, path, size}` | 单个对象；整体上传或分片会话；下载支持 Range |
+| file 包 | 16 GiB | `{"$file": id}` → `{$file, dir, manifest, size, name, mimeType}` | parts + manifest；id 是整文件 SHA-256；最多 10000 个 part |
 
-限制：单 blob 512 MiB；上传必须带 `Content-Length`，**不支持** chunked / 断点续传 / Range 下载；临时文件默认 2 小时 TTL。完整语义见 `plugin-manager/docs/plugin-blob.md`。
+- **上传**：`POST /api/v1/blobs`（流式）或 `POST /api/v1/{blobs,file}/uploads` 的 S3 风格 part 会话（`PUT .../parts/{n}`、`GET .../uploads/{id}` 查进度、`POST .../complete`）。
+- **下载**：`GET /api/v1/blobs/{id}`、`GET /api/v1/file/{id}`，都支持 `Range` / `HEAD` / 条件请求。
+- **读文件包**：`file_argument(args, "input")` → `FileArg::open()` 顺序流式读所有 part，别整读进内存。
+- 两套会话不通用：拿 blob 的 id 去打 file 的 part 接口会 409，反之亦然。
+- 临时文件默认 2 小时 TTL。完整语义见 `plugin-manager/docs/plugin-blob.md`。
 
 `FileStore` 是另一回事：那是插件**自己**要长期保存的文件（`data_dir` 下），不用于和调用方传大对象。
 

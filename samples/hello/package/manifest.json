@@ -46,6 +46,23 @@
       }
     },
     {
+      "name": "inspect_file",
+      "desc": "Stream a file package (parts + manifest) and verify its declared size",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "object",
+            "properties": { "$file": { "type": "string" } },
+            "required": ["$file"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["input"],
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "report",
       "desc": "Produce a report as a blob; the host stores it and returns a resource_link",
       "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }

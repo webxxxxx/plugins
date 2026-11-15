@@ -10,10 +10,11 @@
 |---|---|
 | 配置读取（缺失即用默认） | `src/main.rs` 的 `Hello::new` |
 | 结构化日志 → stderr | `log_info!` / `log_warn!` |
-| 四种能力 + 错误处理 | `impl Plugin for Hello` |
+| 五种能力 + 错误处理 | `impl Plugin for Hello` |
 | 后台任务 + 取消令牌 | `cancel.ticker(...)` |
 | 推送事件给 UI | `svcd_plugin::emit` |
-| **blob 输入**（流式） | `summarize` + `blob_argument` |
+| **blob 输入**（≤512 MiB，流式） | `summarize` + `blob_argument` |
+| **file 包输入**（≤16 GiB，按 part 流式） | `inspect_file` + `file_argument` / `FileArg::open` |
 | **blob 输出** | `report` + `BlobWriter` |
 | 能力清单与 manifest 一致 | `declared_capabilities_match_the_manifest` |
 
@@ -29,20 +30,28 @@ plugin start hello
 宿主需要 `allow_insecure_install = on`（未签名包）。打开 UI 后可以试 echo、上传一个
 文本文件看摘要、生成报告并下载、看 tick 事件。
 
-## 大对象：`$blob` 与 `$blobPath`
+## 大对象：两级传输面
 
 控制帧上限 1 MiB，所以大文件从不进 JSON。完整语义见
-`plugin-manager/docs/plugin-blob.md`，这里是插件侧要点：
+`plugin-manager/docs/plugin-blob.md`，这里是插件侧要点。
 
-**输入**（浏览器 → 插件）
+| 级别 | 上限 | 参数 | 读法 |
+|---|---|---|---|
+| blob | 512 MiB | `{"$blob": id}` → `{$blob, path, size}` | 直接按文件流式读 |
+| file 包 | 16 GiB | `{"$file": id}` → `{$file, dir, manifest, size, name, mimeType}` | 读 manifest 的 parts，按 `part-<n>` 顺序流式读 |
+
+**上传**（浏览器 → 插件）
 
 ```js
-const meta = await ui.uploadBlob(file);          // POST /api/v1/blobs → {id, size}
-await ui.invoke('summarize', { input: ui.blobArg(meta.id) });
+const meta = await ui.uploadBlob(file);                  // 整体流式，≤512 MiB
+const big  = await ui.uploadFilePackage(file);           // part 会话，≤16 GiB
+await ui.invoke('summarize',    { input: ui.blobArg(meta.id) });
+await ui.invoke('inspect_file', { input: ui.fileArg(big.id) });
 ```
 
-宿主把 `{"$blob": id}` 替换成 `{"$blob": id, "path": "/…", "size": n}` 再交给插件。
-插件拿到的是**只读文件路径**——按流读，别整个 `read_to_string` 一个 512 MiB 的文件。
+需要断点续传时给 `uploadId`：`uploadBlobResumable(file, { uploadId })` 或
+`uploadFilePackage(file, { uploadId })`，服务端会告诉你已有哪些 part，只补缺的。
+失败时错误对象上带 `uploadId`，下次接着传。
 
 **输出**（插件 → 浏览器）
 
@@ -60,5 +69,6 @@ const r = await ui.invokeResult('report');
 await ui.downloadBlob(r.structuredContent.$blob, { filename: 'report.txt' });
 ```
 
-**边界**：单 blob ≤ 512 MiB；上传必须带 `Content-Length`，不支持 chunked / 断点续传；
-`GET /api/v1/blobs/<id>` 不支持 Range；临时文件默认 2 小时 TTL。
+**边界**：blob 会话与 file 会话不通用（拿错 id 会 409）；下载两个级别都支持
+`Range` / `HEAD` / 条件请求；临时文件默认 2 小时 TTL。`$file` 不是 `$blob` 的别名，
+它们是两个不同的层级。
