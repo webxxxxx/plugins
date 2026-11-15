@@ -1,0 +1,6 @@
+# Build output and local packages never enter git.
+target/
+dist/
+node_modules/
+
+# Cargo lockfiles for plugin binaries are worth keeping; leave them.

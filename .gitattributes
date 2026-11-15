@@ -1,0 +1,14 @@
+# Shell payloads must stay LF: a CRLF shebang makes the kernel look for
+# "/bin/sh\r", and the packer rejects CR in hooks. Windows checkouts are the
+# normal case here, so pin it rather than depend on core.autocrlf.
+* text=auto
+*.sh   text eol=lf
+*.mjs  text eol=lf
+*.json text eol=lf
+*.rs   text eol=lf
+*.toml text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
+*.spk  binary
+*.pem  binary
+*.pub  binary

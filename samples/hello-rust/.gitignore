@@ -1,0 +1,5 @@
+# Build output never ships; the packer collects package/ only.
+/target
+/dist
+/package/payload/bin/*
+!/package/payload/bin/.gitkeep

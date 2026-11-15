@@ -1,0 +1,9 @@
+[package]
+name = "svcd-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Protocol shell for .spk plugins supervised by svcd"
+publish = false
+
+[dependencies]
+serde_json = "1"
