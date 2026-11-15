@@ -36,3 +36,18 @@ plugin start hello-shell
 - 没有 JSON 解析器：需要解析嵌套结构的插件请用 Rust / C / PowerShell。
 - `interpreter.name` 写 `sh`，**不要**写 `version`——Debian 的 sh 是 dash，
   `--version` 探测会失败、安装被拒。
+
+## 它演示了宿主哪些能力
+
+| 宿主能力 | 在这个样例里怎么触发 |
+|---|---|
+| 方法调用 | `echo`（文本往返）、`get_stats`（JSON 文本） |
+| 文件上传（≤512 MiB，`$blob`） | `count_text`：UI 上传 → 宿主 blob store → 插件按文件流式读 |
+| 大文件上传（≤16 GiB，`$file` 文件包） | `get_file_info`：part 会话 → manifest → 逐 part 读 |
+| 文件下载（`$blobPath`） | `create_report`：写 `SVCD_TEMP_DIR/incoming/` → 宿主落 blob → UI GET |
+| SSE | 每次能力调用推一条 `notifications/message`，UI 的 `./events` 上能看到 |
+| WebSocket | 同一批通知；`./ws` 上还可以直接发 `tools/call` |
+| 日志 | 每次调用写一行 stderr，宿主落到 `<logs>/<id>.log` 并轮转 |
+
+也就是说：**能力（capabilities）只有一种形状**（`tools/call`），文件上传/下载是它携带
+`$blob` / `$blobPath` 的两个特例，SSE/WS 是同一份通知的两条承载，日志走 stderr。

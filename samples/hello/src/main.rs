@@ -182,8 +182,9 @@ impl Plugin for Hello {
         &["echo", "get_stats", "count_text", "get_file_info", "create_report"];
 
     fn call(&mut self, name: &str, arguments: &Value) -> ToolOutcome {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        match name {
+        let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+
+        let outcome = match name {
             "echo" => match arguments.get("message").and_then(Value::as_str) {
                 Some(message) => ToolOutcome::text(format!("{} {}", self.greeting, message)),
                 None => ToolOutcome::error("echo: \"message\" is required"),
@@ -193,7 +194,18 @@ impl Plugin for Hello {
             "get_file_info" => self.inspect_file(arguments),
             "create_report" => self.report(),
             other => ToolOutcome::error(format!("unknown tool: {other}")),
-        }
+        };
+
+        // Every call is visible twice: as a log line (stderr → svcd's log) and as
+        // a notification (→ SSE / WebSocket subscribers). That is what makes the
+        // push channels observable from the UI.
+        log_info!("call #{} {}", count, name);
+        svcd_plugin::emit(
+            "notifications/message",
+            json!({ "type": "call", "name": name, "count": count }),
+        );
+
+        outcome
     }
 
     fn status(&self) -> Option<String> {

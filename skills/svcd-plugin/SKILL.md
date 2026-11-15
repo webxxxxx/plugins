@@ -72,7 +72,9 @@ plugin start <name>
 | `powershell` | `templates/powershell` | Windows 的 `powershell` 或 Linux/macOS 的 `pwsh` | `samples/hello-powershell` |
 
 四个示例实现**同一组能力**（`echo` / `get_stats` / `count_text` / `get_file_info` /
-`create_report`），可以逐行对照。SDK 提供的能力面也是对等的：
+`create_report`），可以逐行对照；每份 README 末尾都有一张「演示了宿主哪些能力」的表：
+方法调用、文件上传（`$blob`）、大文件上传（`$file`）、文件下载（`$blobPath`）、
+SSE、WebSocket、日志——以及它们分别由哪个能力触发。SDK 提供的能力面也是对等的：
 
 | 能力 | Rust | C | Shell | PowerShell |
 |---|---|---|---|---|

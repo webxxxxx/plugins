@@ -79,8 +79,11 @@ svcd_reply_error() {
 
 # Push a notification to the host; it mirrors it to UI subscribers over SSE and
 # WebSocket. $1 = method, $2 = params as a raw JSON value.
+#
+# Writes to fd 4 (the protocol stdout captured before any handler redirect), so
+# a handler can notify while its own stdout is being collected.
 svcd_notify() {
-    printf '{"jsonrpc":"2.0","method":"%s","params":%s}\n' "$1" "$2"
+    printf '{"jsonrpc":"2.0","method":"%s","params":%s}\n' "$1" "$2" >&4
 }
 
 # Override this to feed `svc status`.
@@ -186,6 +189,8 @@ svcd_plugin_serve() {
     done
 }
 
-# The handler needs the real stderr even though its stdout is captured, so open
-# fd 3 before the loop starts.
+# The handler needs the real stderr even though its stdout is captured, and
+# svcd_notify needs the real stdout even while that capture is in effect, so open
+# both before the loop starts.
 exec 3>&2
+exec 4>&1

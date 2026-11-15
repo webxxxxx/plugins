@@ -116,8 +116,11 @@
   };
 
   const onMessage = (method, params) => {
-    if (method === 'notifications/message' && params?.type === 'tick') {
+    if (method !== 'notifications/message') return;
+    if (params?.type === 'tick') {
       feed.textContent = `tick #${params.count}`;
+    } else if (params?.type === 'call') {
+      feed.textContent = `能力调用 #${params.count}：${params.name}（经 SSE/WS 推送）`;
     }
   };
   const sse = ui.subscribe({ onMessage, onReset: () => { feed.textContent = '历史不可回放'; } });

@@ -18,6 +18,24 @@ function Invoke-SvcdCapability {
         $Arguments
     )
     $Script:Calls++
+    $outcome = Invoke-Dispatch -Name $Name -Arguments $Arguments
+
+    # Every call is visible twice: a log line (stderr → svcd's log) and a
+    # notification (→ SSE / WebSocket subscribers).
+    Send-SvcdNotification -Method 'notifications/message' -Params @{
+        type  = 'call'
+        name  = $Name
+        count = $Calls
+    }
+    Write-SvcdLog 'info' "call #$Calls $Name"
+    return $outcome
+}
+
+function Invoke-Dispatch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        $Arguments
+    )
 
     switch ($Name) {
         'echo' {

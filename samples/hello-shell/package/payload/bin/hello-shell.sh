@@ -12,10 +12,9 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 STARTED=$(svcd_now)
 CALLS=0
 
-handle() {
+dispatch() {
     name=$1
     args=$2
-    CALLS=$((CALLS + 1))
 
     case "$name" in
     echo)
@@ -90,6 +89,17 @@ handle() {
         return 1
         ;;
     esac
+}
+
+# Every call is visible twice: a log line (stderr → svcd's log) and a
+# notification (→ SSE / WebSocket subscribers).
+handle() {
+    CALLS=$((CALLS + 1))
+    dispatch "$1" "$2"
+    status=$?
+    svcd_notify 'notifications/message' "{\"type\":\"call\",\"name\":\"$1\",\"count\":$CALLS}"
+    echo "call #$CALLS $1" >&2
+    return $status
 }
 
 svcd_plugin_serve handle

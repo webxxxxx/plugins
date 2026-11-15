@@ -139,8 +139,7 @@ static svcd_outcome report(const svcd_context *context) {
     return svcd_blob(path, "report.txt", "text/plain; charset=utf-8");
 }
 
-static svcd_outcome handle(const char *name, const char *args_json, void *user) {
-    calls++;
+static svcd_outcome dispatch(const char *name, const char *args_json, void *user) {
     const svcd_context *context = (const svcd_context *)user;
 
     if (strcmp(name, "echo") == 0) {
@@ -168,6 +167,20 @@ static svcd_outcome handle(const char *name, const char *args_json, void *user) 
         return report(context);
     }
     return svcd_error("unknown tool");
+}
+
+/* Every call is visible twice: a log line (stderr → svcd's log) and a
+ * notification (→ SSE / WebSocket subscribers). The wrapper keeps that in one
+ * place instead of at every return. */
+static svcd_outcome handle(const char *name, const char *args_json, void *user) {
+    calls++;
+    svcd_outcome outcome = dispatch(name, args_json, user);
+
+    char event[256];
+    snprintf(event, sizeof event, "{\"type\":\"call\",\"name\":\"%s\",\"count\":%ld}", name, calls);
+    svcd_notify("notifications/message", event);
+    svcd_log("info", "call #%ld %s", calls, name);
+    return outcome;
 }
 
 int main(void) {
