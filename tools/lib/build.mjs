@@ -1,11 +1,12 @@
 // Shared build/pack helpers for the plugin CLIs.
 //
-// `plugin-template` only lays a project down; `plugin-build` compiles it and
-// packs the .spk. Both live here so the two commands cannot drift on where the
-// binary goes or how the bundle is invoked.
+// The driver knows no language. A template declares how to turn source into one
+// file in `build.json` (a sibling of `package/`, never inside it), and this
+// module just runs that command and copies the artifact it names. Adding a
+// language is a template plus a recipe, not a change here.
 
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 export const PLUGIN_BIN = process.env.SVCD_PLUGIN_BIN ?? 'plugin';
@@ -39,6 +40,17 @@ export function readManifest(root) {
   return JSON.parse(readFileSync(join(root, 'package', 'manifest.json'), 'utf8'));
 }
 
+/** `build.json` beside `package/`, or null when the plugin ships no recipe. */
+export function readRecipe(root) {
+  const path = join(root, 'build.json');
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    return fail(`build.json: ${error.message}`);
+  }
+}
+
 export function hostTriple() {
   const { platform, arch } = process;
   if (platform === 'win32' && arch === 'x64') return 'x86_64-pc-windows-msvc';
@@ -47,6 +59,13 @@ export function hostTriple() {
   if (platform === 'darwin' && arch === 'arm64') return 'aarch64-apple-darwin';
   if (platform === 'darwin' && arch === 'x64') return 'x86_64-apple-darwin';
   fail(`cannot guess a target triple for ${platform}/${arch}; pass --platform`);
+}
+
+function expand(value, vars) {
+  return String(value)
+    .replaceAll('{name}', vars.name)
+    .replaceAll('{platform}', vars.platform)
+    .replaceAll('{version}', vars.version);
 }
 
 function countFiles(dir) {
@@ -69,21 +88,54 @@ export function assertPayload(root) {
 }
 
 /**
- * Compile a native plugin and put the binary where `manifest.exec.path` points.
- * Script plugins have no Cargo.toml and skip this entirely.
+ * Run the template's build recipe and put the artifact where
+ * `manifest.exec.path` points.
+ *
+ * Recipe shape:
+ *   { "build": {
+ *       "command": ["cargo", "build", "--release"],
+ *       "artifact": "target/release/{name}",
+ *       "env": { "*": {"CGO_ENABLED": "0"}, "<triple>": {"GOOS": "linux"} }
+ *   } }
+ *
+ * `build: null` (or a missing `build.json`) means the payload is already source
+ * — script plugins need no compile step. Braces expand `{name}`, `{version}`
+ * and `{platform}` so the same recipe works for every target.
  */
-export function buildNative(root, manifest) {
-  if (!existsSync(join(root, 'Cargo.toml'))) return;
-  run('cargo', ['build', '--release'], { cwd: root });
-  const binary = (manifest.exec?.path ?? '').split('/').pop();
-  if (!binary) fail('manifest.exec.path is missing');
-  const candidates = [
-    join(root, 'target', 'release', binary),
-    join(root, 'target', 'release', `${binary}.exe`),
-  ];
-  const built = candidates.find((candidate) => existsSync(candidate));
-  if (!built) fail(`cargo produced no ${binary} in target/release`);
-  const target = join(root, 'package', 'payload', 'bin', binary);
+export function buildFromRecipe(root, manifest, recipe, platform) {
+  const spec = recipe?.build;
+  if (!spec) return;
+
+  if (!Array.isArray(spec.command) || spec.command.length === 0) {
+    fail('build.json: build.command must be a non-empty array');
+  }
+  if (typeof spec.artifact !== 'string' || spec.artifact.length === 0) {
+    fail('build.json: build.artifact is required when build.command is set');
+  }
+
+  const vars = { name: manifest.name, version: manifest.version, platform };
+  const command = spec.command.map((part) => expand(part, vars));
+
+  const env = { ...process.env };
+  for (const layer of [spec.env?.['*'], spec.env?.[platform]]) {
+    for (const [key, value] of Object.entries(layer ?? {})) {
+      env[key] = expand(value, vars);
+    }
+  }
+
+  run(command[0], command.slice(1), { cwd: root, env });
+
+  const artifact = expand(spec.artifact, vars);
+  const built = [join(root, artifact), join(root, `${artifact}.exe`)].find((candidate) =>
+    existsSync(candidate),
+  );
+  if (!built) {
+    fail(`build.json: no artifact at ${artifact} (or ${artifact}.exe) after the build`);
+  }
+
+  const execPath = manifest.exec?.path;
+  if (!execPath) fail('manifest.exec.path is missing');
+  const target = join(root, 'package', 'payload', 'bin', basename(execPath));
   mkdirSync(dirname(target), { recursive: true });
   cpSync(built, target);
 }
@@ -93,8 +145,7 @@ export function buildNative(root, manifest) {
  * which installs only on a host with `allow_insecure_install`.
  */
 export function packPackage(root, manifest, { platform, key = null, out = null }) {
-  const spk =
-    out ?? join(root, 'dist', `${manifest.name}-${manifest.version}-${platform}.spk`);
+  const spk = out ?? join(root, 'dist', `${manifest.name}-${manifest.version}-${platform}.spk`);
   mkdirSync(dirname(spk), { recursive: true });
   const args = ['bundle', join(root, 'package'), '--platform', platform, '-o', spk];
   if (key) args.push('--key', key);

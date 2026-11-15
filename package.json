@@ -12,6 +12,7 @@
     "build": "node tools/plugin-build.mjs",
     "dev": "node tools/plugin.mjs dev",
     "check": "node tools/plugin.mjs check",
-    "sync": "node tools/plugin.mjs sync"
+    "sync": "node tools/plugin.mjs sync",
+    "test": "node --test tools/test/"
   }
 }

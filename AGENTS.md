@@ -22,3 +22,7 @@ Single-context: one root `GLOSSARY.md` plus ADRs in `docs/adr/`. See `docs/agent
 - `templates/{rust,shell}` 是唯一模板源；`samples/` 由 `node tools/plugin-template.mjs ... --force` 生成，不要手改
 - `tools/plugin-template.mjs` 只建项目；`tools/plugin-build.mjs` 构建 + 打包；`tools/plugin.mjs` 提供 `devkey / dev / check / sync`
 - 每个插件的 `package/` 是唯一打包根：打包器不过滤任何文件，源码必须留在它外面
+
+## 写插件
+
+新增插件、改插件代码、改 `sdk/` 之前读 `skills/svcd-plugin/SKILL.md`：支持的语言、toolkit 用法、以及会让包直接失效的边界。

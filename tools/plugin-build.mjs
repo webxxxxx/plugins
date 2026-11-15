@@ -13,12 +13,13 @@ import { fileURLToPath } from 'node:url';
 import {
   PLUGIN_BIN,
   assertPayload,
-  buildNative,
+  buildFromRecipe,
   fail,
   findPluginRoot,
   hostTriple,
   packPackage,
   readManifest,
+  readRecipe,
   run,
 } from './lib/build.mjs';
 
@@ -70,11 +71,11 @@ function main() {
   const options = parse(process.argv.slice(2));
   const root = findPluginRoot(options.dir ?? process.cwd());
   const manifest = readManifest(root);
+  const platform = options.platform ?? process.env.SVCD_TARGET ?? hostTriple();
 
-  buildNative(root, manifest);
+  buildFromRecipe(root, manifest, readRecipe(root), platform);
   assertPayload(root);
 
-  const platform = options.platform ?? process.env.SVCD_TARGET ?? hostTriple();
   const spk = packPackage(root, manifest, {
     platform,
     key: options.key,

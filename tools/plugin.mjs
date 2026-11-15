@@ -18,12 +18,13 @@ import { fileURLToPath } from 'node:url';
 import {
   PLUGIN_BIN,
   assertPayload,
-  buildNative,
+  buildFromRecipe,
   fail,
   findPluginRoot,
   hostTriple,
   packPackage,
   readManifest,
+  readRecipe,
   run,
 } from './lib/build.mjs';
 
@@ -59,10 +60,11 @@ function devKey() {
 function pack(argv) {
   const root = findPluginRoot(argValue(argv, '--dir') ?? process.cwd());
   const manifest = readManifest(root);
-  buildNative(root, manifest);
+  const platform = argValue(argv, '--platform') ?? process.env.SVCD_TARGET ?? hostTriple();
+
+  buildFromRecipe(root, manifest, readRecipe(root), platform);
   assertPayload(root);
 
-  const platform = argValue(argv, '--platform') ?? process.env.SVCD_TARGET ?? hostTriple();
   const key = argValue(argv, '--key') ?? null;
   const spk = packPackage(root, manifest, { platform, key });
   console.log(`packed ${spk}${key ? '' : '  (unsigned)'}`);

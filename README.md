@@ -12,6 +12,7 @@ sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）
 templates/rust/   模板源
 templates/shell/  模板源
 samples/          脚手架空跑出来的标准示例（plugin-template ... --force 重新生成）
+skills/           给 AI 的插件开发手册（语言、toolkit、边界）
 tools/            plugin-template.mjs（只建项目）、plugin-build.mjs（构建+打包）、plugin.mjs（devkey/dev/check/sync）
 ```
 
@@ -74,6 +75,15 @@ ui.subscribe({ onMessage: (method, params) => {} }); // 推送
 
 打包器无差别递归，**没有忽略规则**：`package/` 里有什么，包里就有什么。
 所以源码、`Cargo.toml`、`target/`、占位文件都必须留在它外面。
+
+构建由插件根目录的 `build.json` 声明，驱动里没有任何语言分支：
+
+```json
+{ "build": { "command": ["cargo", "build", "--release"],
+             "artifact": "target/release/{name}" } }
+```
+
+加一门语言 = 加一个模板目录 + 一份 `build.json`，`plugin-build` 不用改。
 
 已知还需要宿主侧放宽的两点（会挡流水线）：
 
