@@ -11,6 +11,8 @@ export interface Subscription {
 
 export interface SocketSubscription {
   close(): void;
+  /** `tools/call` over this socket; resolves to the raw JSON-RPC result. */
+  invoke(name: string, args?: Record<string, unknown>): Promise<unknown>;
 }
 
 export interface CallResult {
@@ -41,15 +43,15 @@ export interface PluginUI {
     text(path: string, init?: RequestInit): Promise<string>;
     json<T = unknown>(path: string, init?: RequestInit): Promise<T>;
   };
-  /** Server push over SSE, with automatic reconnection. */
+  /** Server push over SSE; the browser resumes with Last-Event-ID automatically. */
   subscribe(handlers?: {
-    onMessage?: (method: string, params: unknown, message: unknown) => void;
+    onMessage?: (method: string, params: unknown, message: unknown, seq: number | null) => void;
     onReset?: (info: unknown) => void;
     onError?: (event: Event) => void;
   }): Subscription;
-  /** Server push over WebSocket, with backoff. Not a request path. */
+  /** Symmetric WebSocket: notifications in, `tools/call` out on one socket. */
   subscribeWebSocket(handlers?: {
-    onMessage?: (method: string, params: unknown, message: unknown) => void;
+    onMessage?: (method: string, params: unknown, message: unknown, seq: number | null) => void;
     onReset?: (info: unknown) => void;
     onOpen?: () => void;
     onClose?: (retryDelayMs: number) => void;

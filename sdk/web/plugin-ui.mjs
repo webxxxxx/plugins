@@ -164,16 +164,22 @@ export function pluginUI(options = {}) {
   };
 
   /**
-   * Subscribe over SSE. The host replays recent history on connect (bounded),
-   * and emits `event: reset` when history is unavailable — that is the signal to
-   * refetch whatever state you were displaying.
+   * Subscribe over SSE.
+   *
+   * The host keeps a bounded ring per plugin (256 events) and honours
+   * `Last-Event-ID` on reconnect: the browser's EventSource sends it
+   * automatically because every frame carries `id: <seq>`, so a dropped
+   * connection resumes instead of losing events. When the requested id has
+   * already fallen out of the ring the host sends `event: reset` first — that
+   * is the signal to refetch state with `invoke`.
    */
   function subscribe({ onMessage, onReset, onError } = {}) {
     const source = new EventSource(url(EVENTS));
     source.onmessage = (event) => {
       const message = parse(event.data);
       if (message && typeof message.method === 'string') {
-        onMessage?.(message.method, message.params ?? {}, message);
+        const seq = event.lastEventId ? Number(event.lastEventId) : null;
+        onMessage?.(message.method, message.params ?? {}, message, seq);
       }
     };
     source.addEventListener('reset', (event) => onReset?.(parse(event.data) ?? {}));
@@ -187,15 +193,25 @@ export function pluginUI(options = {}) {
   }
 
   /**
-   * Same stream over WebSocket. Use it when the page holds one long-lived
-   * connection; it is a push channel exactly like SSE, not a request path.
-   * Requests still go through `invoke`.
+   * The same stream over WebSocket. Unlike SSE this connection is symmetric:
+   * notifications arrive as JSON-RPC notifications, and the host accepts
+   * `tools/call` frames from the client on the same socket, so `invoke` here
+   * avoids a second round trip.
    */
   function subscribeWebSocket({ onMessage, onReset, onOpen, onClose } = {}) {
     let socket = null;
     let retry = 0;
     let closing = false;
     let timer = null;
+    let sequence = 0;
+    const pending = new Map();
+
+    const settle = (error) => {
+      for (const { reject } of pending.values()) {
+        reject(error ?? new PluginRpcError(-32000, 'socket closed'));
+      }
+      pending.clear();
+    };
 
     const connect = () => {
       socket = new WebSocket(url(WS).replace(/^http/, 'ws'));
@@ -206,13 +222,27 @@ export function pluginUI(options = {}) {
       socket.onmessage = (event) => {
         const message = parse(event.data);
         if (!message) return;
+
+        if (message.id != null && pending.has(message.id)) {
+          const waiter = pending.get(message.id);
+          pending.delete(message.id);
+          if (message.error) {
+            waiter.reject(
+              new PluginRpcError(message.error.code, message.error.message, message.error.data),
+            );
+          } else {
+            waiter.resolve(message.result ?? {});
+          }
+          return;
+        }
         if (typeof message.method === 'string') {
-          onMessage?.(message.method, message.params ?? {}, message);
+          onMessage?.(message.method, message.params ?? {}, message, null);
         } else if (message.reason) {
           onReset?.(message);
         }
       };
       socket.onclose = () => {
+        settle();
         if (closing) return;
         const delay = Math.min(30000, 500 * 2 ** retry);
         retry += 1;
@@ -226,7 +256,26 @@ export function pluginUI(options = {}) {
       close() {
         closing = true;
         clearTimeout(timer);
+        settle();
         socket?.close();
+      },
+      /** `tools/call` over this socket; resolves to the raw JSON-RPC result. */
+      invoke(name, args = {}) {
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+          return Promise.reject(new PluginRpcError(-32000, 'socket is not open'));
+        }
+        const id = ++sequence;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          socket.send(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id,
+              method: 'tools/call',
+              params: { name, arguments: args },
+            }),
+          );
+        });
       },
     };
   }

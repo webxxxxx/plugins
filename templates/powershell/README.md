@@ -13,8 +13,8 @@ package/
 ## 命令
 
 ```bash
-plugin-template <name> --lang powershell --webui
-plugin-build                # 无编译，直接打包（默认未签名）
+plugin-tools template <name> --lang powershell --webui
+plugin-tools build                # 无编译，直接打包（默认未签名）
 ```
 
 ## 两个平台差异

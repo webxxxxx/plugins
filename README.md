@@ -13,30 +13,41 @@ sdk/powershell/   PowerShell 协议壳（随插件拷进包里）
 sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）：invoke / SSE / WS / 上传下载
 templates/        rust / c / shell / powershell 四种模板源
 samples/hello     生产级参考插件：能力、配置、日志、定时通知、分块上传下载、UI
-samples/          hello-rust / hello-shell 是模板产物（plugin-template --force 重新生成）
+samples/          hello-rust / hello-shell 是模板产物（plugin-tools template --force 重新生成）
 skills/           给 AI 的插件开发手册（语言、toolkit、边界）
-tools/            plugin-template.mjs（只建项目）、plugin-build.mjs（构建+打包）、plugin.mjs（devkey/dev/check/sync）
+tools/cli/        Rust 工具链：单二进制 plugin-tools（template / build / dev / devkey / sync / check）
 ```
 
 模板是唯一真源；由模板生成的样例用 `--force` 重新生成，别手改。`samples/hello` 是手写的参考实现，不受模板约束。
 
+## 装工具链（一次性）
+
+工具链是一个 Rust 二进制，**不需要 Node、Python 或任何解释器**：
+
+```bash
+cd tools/cli && cargo build --release
+# 产物：tools/cli/target/release/plugin-tools[.exe]，放进 PATH 即可
+```
+
+它只做编排：模板是数据（`build.json` + 目录树），打包仍调宿主的 `plugin bundle`。
+
 ## 两条命令
 
 ```bash
-plugin-template wireguard                 # 数字菜单：语言 1-4 → 平台 1-7
-cd plugins/wireguard && plugin-build      # 构建 + 打包（默认未签名）
+plugin-tools template wireguard                 # 数字菜单：语言 1-4 → 平台 1-7
+cd plugins/wireguard && plugin-tools build      # 构建 + 打包（默认未签名）
 ```
 
 非交互（CI 用）：
 
 ```bash
-plugin-template wireguard --lang c --platforms x86_64-unknown-linux-musl,x86_64-pc-windows-msvc --webui
+plugin-tools template wireguard --lang c --platforms x86_64-unknown-linux-musl,x86_64-pc-windows-msvc --webui
 ```
 
-`plugin-build` 不给 `--key` 时产出未签名包，宿主需要 `allow_insecure_install = on`；
+`plugin-tools build` 不给 `--key` 时产出未签名包，宿主需要 `allow_insecure_install = on`；
 发布路径是 CI 用发布钥调 `plugin bundle --key`。
 
-`node tools/plugin.mjs pack --platform <triple>` 单独打包；`check <file.spk>` 走 `plugin verify`。
+`plugin-tools build --platform <triple>` 单独打包；`check <file.spk>` 走 `plugin verify`。
 
 ## 插件只写核心逻辑
 
@@ -91,7 +102,7 @@ ui.subscribe({ onMessage: (method, params) => {} }); // 推送
              "artifact": "target/release/{name}" } }
 ```
 
-加一门语言 = 加一个模板目录 + 一份 `build.json`，`plugin-build` 不用改。
+加一门语言 = 加一个模板目录 + 一份 `build.json`，`plugin-tools build` 不用改。
 
 已知还需要宿主侧放宽的两点（会挡流水线）：
 

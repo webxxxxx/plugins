@@ -4,3 +4,6 @@ dist/
 node_modules/
 
 # Cargo lockfiles for plugin binaries are worth keeping; leave them.
+
+# Rust 工具链的构建产物
+/tools/cli/target/

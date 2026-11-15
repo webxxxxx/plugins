@@ -16,9 +16,9 @@ build.json                ← 构建配方
 ## 命令
 
 ```bash
-plugin-template <name> --lang c --webui   # 只创建项目
-plugin-build                               # gcc 编译 + 打包（默认未签名）
-plugin-build --platform aarch64-unknown-linux-musl
+plugin-tools template <name> --lang c --webui   # 只创建项目
+plugin-tools build                               # gcc 编译 + 打包（默认未签名）
+plugin-tools build --platform aarch64-unknown-linux-musl
 ```
 
 构建用 `build.json` 里的 `gcc`。交叉编译要换工具链：

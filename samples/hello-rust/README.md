@@ -18,16 +18,16 @@ src/main.rs               ← 你的代码
 ## 命令（在仓库根或插件目录内都行）
 
 ```bash
-plugin-template <name> --lang rust --webui   # 只创建项目
-plugin-build                                 # 构建 + 打包（默认本机三元组，未签名）
-plugin-build --platform aarch64-unknown-linux-musl
-plugin-build --key ~/.svcd-dev/dev.pem       # 打成签名包
-node tools/plugin.mjs dev                    # 打包 + 安装 + 启动
-node tools/plugin.mjs check dist/<name>-<version>-<triple>.spk
+plugin-tools template <name> --lang rust --webui   # 只创建项目
+plugin-tools build                                 # 构建 + 打包（默认本机三元组，未签名）
+plugin-tools build --platform aarch64-unknown-linux-musl
+plugin-tools build --key ~/.svcd-dev/dev.pem       # 打成签名包
+plugin-tools dev                    # 打包 + 安装 + 启动
+plugin-tools check dist/<name>-<version>-<triple>.spk
 cargo test                                   # 清单与代码的能力清单是否一致
 ```
 
-`plugin bundle` 需要一把签名钥；默认用 `~/.svcd-dev/dev.pem`（`node tools/plugin.mjs devkey` 生成一次），
+`plugin bundle` 需要一把签名钥；默认用 `~/.svcd-dev/dev.pem`（`plugin-tools devkey` 生成一次），
 也可以用 `--key` 指定。
 
 ## 验证（当前实现的两个限制）
@@ -41,7 +41,7 @@ cargo test                                   # 清单与代码的能力清单是
 
 这两条都要放宽成"只报事实、不判结论"：输出 `platform` 与 `signature.state`，另给
 `--expect-platform <triple>` 与 `--require-trust` 让调用方自己决定严格程度。在那之前，
-`node tools/plugin.mjs check` 只对本机三元组的包有效。
+`plugin-tools check` 只对本机三元组的包有效。
 
 
 ## 开发机前置
@@ -59,6 +59,6 @@ allow_insecure_install = on
 2. `.spk` 必须输出到打包根之外，否则 packer 直接拒绝。
 3. 包内脚本不许自建日志文件，一律写 stderr——svcd 接走后按 1 MiB 轮转。
 4. 插件恒为常驻进程，没有 oneshot 语义；"跑一次"要写成常驻 + 能力触发。
-5. 首装默认不自启，装完必须 `plugin start`（`node tools/plugin.mjs dev` 已代做）。
+5. 首装默认不自启，装完必须 `plugin start`（`plugin-tools dev` 已代做）。
 6. 含 `.ko` 的包必须声明 `--compat <device>`，否则验包拒。
 7. `capabilities` 只在 `ready: "notify"` 时可用；改成 `exec` 就要把能力清单一起删。

@@ -20,10 +20,10 @@ manifest 的 `capabilities[]` 是 MCP 面上暴露的工具；`handle()` 里的 
 ## 命令
 
 ```bash
-plugin-template <name> --lang shell --webui   # 只创建项目
-plugin-build                                   # 打包（默认本机三元组，未签名）
-plugin-build --platform aarch64-unknown-linux-musl
-node tools/plugin.mjs check dist/xxx.spk
+plugin-tools template <name> --lang shell --webui   # 只创建项目
+plugin-tools build                                   # 打包（默认本机三元组，未签名）
+plugin-tools build --platform aarch64-unknown-linux-musl
+plugin-tools check dist/xxx.spk
 ```
 
 `--webui` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是

@@ -12,8 +12,8 @@ description: 新增或修改 svcd 插件前读：支持哪两种语言、SDK 与
 ### 1. 起项目
 
 ```bash
-plugin-template wireguard          # 数字菜单选语言（1-4）与平台（1-7）
-plugin-template wireguard --lang rust --platforms x86_64-unknown-linux-musl --webui
+plugin-tools template wireguard          # 数字菜单选语言（1-4）与平台（1-7）
+plugin-tools template wireguard --lang rust --platforms x86_64-unknown-linux-musl --webui
 ```
 
 完成判据：`package/manifest.json`、`build.json`、`.plugin.json` 都存在，且目录里**没有** `target/`、`dist/`、`out/`。
@@ -53,12 +53,12 @@ svcd_plugin_serve handle
 ### 3. 打包与安装
 
 ```bash
-plugin-build          # 构建 + 打包（默认未签名，本地开发用）
+plugin-tools build          # 构建 + 打包（默认未签名，本地开发用）
 plugin install <spk>  # 首装不自启
 plugin start <name>
 ```
 
-完成判据：`plugin-build` 打印 `packed … (unsigned)`，且随后 `verify` 输出 `ok: true`。
+完成判据：`plugin-tools build` 打印 `packed … (unsigned)`，且随后 `verify` 输出 `ok: true`。
 
 未签名包要求宿主 `svcd.conf` 里 `allow_insecure_install = on`（改完重启 svcd）。发布走 CI，用发布钥签名。
 
@@ -73,7 +73,7 @@ plugin start <name>
 
 两种语言共用同一套契约和同一个 Web toolkit；**前端不认识后端语言**。
 
-加第三种语言不需要改工具：在 `templates/<lang>/` 放模板，并写一份 `build.json`，`plugin-build` 就会照着做。
+加第三种语言不需要改工具：在 `templates/<lang>/` 放模板，并写一份 `build.json`，`plugin-tools build` 就会照着做。
 
 ## 契约速查
 
@@ -156,8 +156,9 @@ const ui = pluginUI();
 
 await ui.invoke('echo', { message: 'hi' });          // POST ./rpc
 const r = await ui.invokeResult('report');           // 保留 structuredContent
-ui.subscribe({ onMessage(method, params) {} });      // SSE ./events
-ui.subscribeWebSocket({ onMessage() {} });           // WebSocket ./ws（同样是推送）
+ui.subscribe({ onMessage(method, params, msg, seq) {} });  // SSE，自动续传
+const socket = ui.subscribeWebSocket({ onMessage() {} });
+await socket.invoke('stats');                        // 同一条 WS 上发 tools/call
 const meta = await ui.uploadBlob(file);              // 整体上传（≤512 MiB）
 const big = await ui.uploadFilePackage(file);        // part 会话（≤16 GiB）
 await ui.invoke('summarize', { input: ui.blobArg(meta.id) });
@@ -169,8 +170,8 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 | 通道 | 路径 | 用途 |
 |---|---|---|
 | 方法调用 | `POST ./rpc` | 调能力 |
-| SSE | `./events` | 服务端推送，带 `id: <seq>`，另有 `event: reset` |
-| WebSocket | `./ws` | 同一路推送的另一种承载 |
+| SSE | `./events` | 服务端推送；断线重连带 `Last-Event-ID` 补发，窗口外的先收到 `event: reset` |
+| WebSocket | `./ws` | 双向：推送 + 同一连接上的 `tools/call` |
 
 **大对象**永远不要塞进 JSON 帧（单帧上限 1 MiB）。宿主有两级传输面：
 
@@ -205,7 +206,7 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **大对象走 blob，不走 JSON。** 参数传 `{"$blob": id}`，结果返回 `$blobPath`；1 MiB 帧只装小 JSON。
 
-**vendored 副本别手改。** `package/payload/lib/svcd-plugin.sh` 和 `payload/web/plugin-ui.mjs` 是 `sdk/` 的副本；改完 `sdk/` 后跑 `node tools/plugin.mjs sync`。
+**vendored 副本别手改。** `package/payload/lib/svcd-plugin.sh` 和 `payload/web/plugin-ui.mjs` 是 `sdk/` 的副本；改完 `sdk/` 后跑 `plugin-tools sync`。
 
 ## 做不到的事
 
@@ -213,7 +214,7 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 - **自起 HTTP 服务**：单端口模型由宿主独占。
 - **宿主级定时调度**：没有 cron；定时器在进程内，重启即归零。
 - **权限隔离**：插件以安装者权限运行，隔离是未决问题。
-- **跨目标构建**：`plugin-build --platform` 只改 manifest 的盖章；真正的交叉编译需要目标工具链（Rust：`rustup target` + zig）。
+- **跨目标构建**：`plugin-tools build --platform` 只改 manifest 的盖章；真正的交叉编译需要目标工具链（Rust：`rustup target` + zig）。
 
 ## 常见错误 → 症状
 
@@ -225,4 +226,4 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 | Windows 上启动 `exit=9009` | `interpreter.name` 写了 `python3`（那是 0 字节存根，用 `python` 或 `py`） |
 | Debian 上装不上 | 给 `sh` 写了 `interpreter.version`（dash 的 `--version` 会报错） |
 | 包里出现源码 | 源码或占位文件放进了 `package/` |
-| 改了 SDK 但插件没变 | vendored 副本没同步（`node tools/plugin.mjs sync`） |
+| 改了 SDK 但插件没变 | vendored 副本没同步（`plugin-tools sync`） |
