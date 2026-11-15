@@ -1,0 +1,15 @@
+{
+  "name": "svcd-plugins",
+  "private": true,
+  "type": "module",
+  "description": "svcd plugin templates, SDKs and the plugin-template scaffold",
+  "bin": {
+    "plugin-template": "tools/plugin-template.mjs"
+  },
+  "scripts": {
+    "template": "node tools/plugin-template.mjs",
+    "pack": "node tools/plugin.mjs pack",
+    "check": "node tools/plugin.mjs check",
+    "sync": "node tools/plugin.mjs sync"
+  }
+}

@@ -18,7 +18,7 @@ src/main.rs               ← 你的代码
 ## 命令（在仓库根或插件目录内都行）
 
 ```bash
-node tools/scaffold.mjs <name> --lang rust      # 从模板新建
+node tools/plugin-template.mjs <name> --lang rust --webui   # 新建（含 Web UI）
 node tools/plugin.mjs pack                      # 构建 + 打包（默认本机三元组）
 node tools/plugin.mjs pack --platform aarch64-unknown-linux-musl
 node tools/plugin.mjs dev                       # 打包 + 安装 + 启动

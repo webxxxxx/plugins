@@ -11,8 +11,8 @@ sdk/shell/        POSIX sh 协议壳（随插件拷进包里）
 sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）
 templates/rust/   模板源
 templates/shell/  模板源
-samples/          脚手架空跑出来的标准示例（tools/scaffold.mjs ... --force 重新生成）
-tools/            scaffold.mjs（新建）、plugin.mjs（devkey/pack/dev/check/sync）
+samples/          脚手架空跑出来的标准示例（plugin-template ... --force 重新生成）
+tools/            plugin-template.mjs（新建/构建/打包未签名包）、plugin.mjs（devkey/pack/dev/check/sync）
 ```
 
 模板是唯一真源；`samples/` 是它的实例，改了模板就用 `--force` 重新生成，别手改。
@@ -20,9 +20,9 @@ tools/            scaffold.mjs（新建）、plugin.mjs（devkey/pack/dev/check/
 ## 三条命令
 
 ```bash
-node tools/plugin.mjs devkey                 # 每台机器一次，写 ~/.svcd-dev/dev.pem
-node tools/scaffold.mjs hello --lang rust    # 新建到 plugins/hello/
-node tools/plugin.mjs dev                    # 构建 + 打包 + 安装 + 启动
+node tools/plugin-template.mjs hello --lang rust --webui   # 新建 + 构建 + 打包（未签名）
+node tools/plugin.mjs dev                                  # 打包（签名）+ 安装 + 启动
+node tools/plugin.mjs devkey                               # 需要签名打包时：生成开发钥
 ```
 
 `node tools/plugin.mjs pack --platform <triple>` 单独打包；`check <file.spk>` 走 `plugin verify`。
