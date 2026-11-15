@@ -19,7 +19,7 @@ Single-context: one root `GLOSSARY.md` plus ADRs in `docs/adr/`. See `docs/agent
 ## 仓库结构
 
 - `sdk/rust`：协议壳 crate `svcd-plugin`；`sdk/c`：单头文件壳；`sdk/shell`：POSIX sh 壳；`sdk/powershell`：PS 壳；`sdk/web`：浏览器 toolkit（无构建步骤）
-- `templates/{rust,c,shell,powershell}` 是唯一模板源；`samples/hello-rust`、`samples/hello-shell` 由 `plugin-tools template ... --force` 生成，不要手改；`samples/hello` 是手写的参考实现
+- `samples/{hello,hello-c,hello-shell,hello-powershell}` 是四份等价的手写参考实现（同一组五能力），不要手改模板来迁就它们
 - `tools/cli` 是 Rust 工具链 `plugin-tools`（单二进制）：`template` 建项目、`build` 构建打包、`dev` 装并启动、`devkey`、`sync`、`check`
 - 每个插件的 `package/` 是唯一打包根：打包器不过滤任何文件，源码必须留在它外面
 

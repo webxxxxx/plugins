@@ -1,6 +1,0 @@
-{
-  "build": {
-    "command": ["cargo", "build", "--release"],
-    "artifact": "target/release/{name}"
-  }
-}

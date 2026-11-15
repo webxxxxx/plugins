@@ -64,12 +64,26 @@ plugin start <name>
 
 ## 支持的语言
 
-| 语言 | 模板 | 目标机需要什么 | 适合 |
+| 语言 | 模板 | 目标机需要什么 | 完整示例 |
 |---|---|---|---|
-| `rust` | `templates/rust` | 无（编译成静态二进制） | 需要状态、并发、JSON 处理的插件 |
-| `c` | `templates/c` | 无（编译成静态二进制） | 体积敏感、只想依赖 libc |
-| `shell` | `templates/shell` | 目标机有 `sh` | 包装已有命令、输出是文本 |
-| `powershell` | `templates/powershell` | Windows 的 `powershell` 或 Linux/macOS 的 `pwsh` | Windows 运维脚本 |
+| `rust` | `templates/rust` | 无（编译成静态二进制） | `samples/hello` |
+| `c` | `templates/c` | 无（编译成静态二进制） | `samples/hello-c` |
+| `shell` | `templates/shell` | 目标机有 `sh` | `samples/hello-shell` |
+| `powershell` | `templates/powershell` | Windows 的 `powershell` 或 Linux/macOS 的 `pwsh` | `samples/hello-powershell` |
+
+四个示例实现**同一组能力**（`echo` / `stats` / `summarize` / `inspect_file` /
+`report`），可以逐行对照。SDK 提供的能力面也是对等的：
+
+| 能力 | Rust | C | Shell | PowerShell |
+|---|---|---|---|---|
+| 协议循环 + ping/status/shutdown | `serve` | `svcd_serve` | `svcd_plugin_serve` | `Invoke-SvcdPlugin` |
+| 文本结果 / 错误 | `ToolOutcome::text/error` | `svcd_text/error` | stdout + 退出码 | 返回字符串 / `@{Text,Error}` |
+| 大结果（`$blobPath`） | `ToolOutcome::Blob` | `svcd_blob` | `SVCD_BLOB_PATH` | `@{BlobPath=…}` |
+| 日志 → stderr | `log_info!` 等 | `svcd_log` | `echo >&2` | `Write-SvcdLog` |
+| 配置读取 | `Context::config_json` | `svcd_read_file` | `svcd_config_get` | `Get-SvcdConfig` |
+| `$blob` 输入 | `blob_argument` | `svcd_string(args,"path")` | `svcd_field` | `$Arguments.input.path` |
+| `$file` 文件包 | `file_argument` + `PartReader` | `svcd_json_numbers` + `fopen` | `svcd_json_numbers` | `Get-SvcdFileParts` |
+| 临时目录 | `Context::temp_dir` | `context.temp_dir` | `$SVCD_TEMP_DIR` | `$Context.TempDir` |
 
 两种语言共用同一套契约和同一个 Web toolkit；**前端不认识后端语言**。
 

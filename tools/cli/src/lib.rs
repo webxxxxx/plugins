@@ -445,6 +445,13 @@ pub fn sync(repo: &Repo) -> Result<usize, String> {
                     web.join("plugin-ui.mjs"),
                 );
             }
+            let header = entry.path().join("src").join("svcd_plugin.h");
+            if header.is_file() {
+                let _ = fs::copy(
+                    repo.root.join("sdk").join("c").join("svcd_plugin.h"),
+                    header,
+                );
+            }
             let lib = package.join("payload").join("lib");
             if lib.is_dir() {
                 // Only refresh the SDK the plugin actually vendors; a shell

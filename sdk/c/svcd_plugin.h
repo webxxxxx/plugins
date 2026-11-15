@@ -25,6 +25,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#ifdef _WIN32
+#include <direct.h>
+#define svcd_mkdir(path) _mkdir(path)
+#else
+#include <sys/stat.h>
+#define svcd_mkdir(path) mkdir(path, 0755)
+#endif
 
 #define SVCD_MAX_FRAME_BYTES (1024 * 1024)
 
@@ -470,6 +478,85 @@ static int svcd_notify(const char *method, const char *params_json) {
     svcd_write_string(stdout, method);
     printf(",\"params\":%s}\n", params_json == NULL ? "null" : params_json);
     fflush(stdout);
+    return 0;
+}
+
+/* --- helpers a capability usually wants ------------------------------ */
+
+/* Seconds since the epoch; a monotonic-enough start for an uptime counter. */
+static long svcd_now(void) {
+    return (long)time(NULL);
+}
+
+/* Read a whole file into a malloc'd buffer. Caller frees. */
+static char *svcd_read_file(const char *path, size_t *size) {
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    long length = ftell(file);
+    if (length < 0) {
+        fclose(file);
+        return NULL;
+    }
+    rewind(file);
+    char *buffer = (char *)malloc((size_t)length + 1);
+    if (buffer == NULL) {
+        fclose(file);
+        return NULL;
+    }
+    size_t read = fread(buffer, 1, (size_t)length, file);
+    fclose(file);
+    buffer[read] = '\0';
+    if (size != NULL) {
+        *size = read;
+    }
+    return buffer;
+}
+
+/* Collect the integers stored under `"key": <n>` (e.g. partNumber). */
+static int svcd_json_numbers(const char *json, const char *key, long *out, int max) {
+    char pattern[96];
+    snprintf(pattern, sizeof pattern, "\"%s\"", key);
+    const char *at = json;
+    int found = 0;
+    while (found < max && (at = strstr(at, pattern)) != NULL) {
+        at += strlen(pattern);
+        const char *colon = strchr(at, ':');
+        if (colon == NULL) {
+            break;
+        }
+        at = colon + 1;
+        while (*at == ' ' || *at == '\t') {
+            at++;
+        }
+        long value = strtol(at, NULL, 10);
+        out[found++] = value;
+    }
+    return found;
+}
+
+/* Build a unique path under `$SVCD_TEMP_DIR/incoming/` for a blob result. */
+static int svcd_incoming_path(const svcd_context *context, const char *name, char *out, size_t size) {
+    if (context->temp_dir[0] == '\0') {
+        return -1;
+    }
+    char incoming[600];
+    snprintf(incoming, sizeof incoming, "%s/incoming", context->temp_dir);
+    svcd_mkdir(incoming);
+    char stem[128];
+    snprintf(stem, sizeof stem, "%s", name == NULL || name[0] == '\0' ? "blob" : name);
+    for (char *at = stem; *at != '\0'; at++) {
+        if (!((*at >= 'a' && *at <= 'z') || (*at >= 'A' && *at <= 'Z') || (*at >= '0' && *at <= '9') ||
+              *at == '.' || *at == '-' || *at == '_')) {
+            *at = '_';
+        }
+    }
+    snprintf(out, size, "%s/%s-%ld-%ld", incoming, stem, svcd_now(), (long)rand());
     return 0;
 }
 

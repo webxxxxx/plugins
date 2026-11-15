@@ -1,7 +1,0 @@
-# Build output never ships; the packer collects package/ only.
-/target
-/dist
-/package/payload/bin/*
-
-# A template pins no lockfile; the scaffolded project generates its own.
-/Cargo.lock

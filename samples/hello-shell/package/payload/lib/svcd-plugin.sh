@@ -33,10 +33,32 @@ svcd_json_escape() {
     LC_ALL=C awk 'BEGIN { ORS = "" } { if (NR > 1) printf "\\n"; printf "%s", $0 }'
 }
 
+# The FIRST string field named $2. The dispatcher needs this for `name`: the
+# capability name comes before the handler arguments, which may carry their own
+# `"name"` field (a file's display name, for instance).
+svcd_field_first() {
+    printf '%s\n' "$1" | LC_ALL=C awk -v key="\"$2\"" '
+        {
+            at = index($0, key)
+            if (at == 0) exit
+            rest = substr($0, at + length(key))
+            sub(/^[ \t]*:[ \t]*"/, "", rest)
+            sub(/".*$/, "", rest)
+            gsub(/\\\\/, "\\", rest)
+            gsub(/\\"/, "\"", rest)
+            print rest
+            exit
+        }'
+}
+
 # First string field named $2 in the frame $1. The frames we parse are flat, so
-# a greedy match on the last occurrence is acceptable and documented.
+# a greedy match on the last occurrence is acceptable and documented. Escaped
+# backslashes and quotes are decoded, because Windows paths arrive as `D:\\…`.
 svcd_field() {
-    printf '%s\n' "$1" | LC_ALL=C sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+    printf '%s\n' "$1" |
+        LC_ALL=C sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+        head -n 1 |
+        LC_ALL=C sed -e 's/\\\\/\\/g' -e 's/\\"/"/g'
 }
 
 # First raw (unquoted) field named $2, for `id` and numbers.
@@ -66,6 +88,37 @@ svcd_status() {
     printf 'running'
 }
 
+# Read one flat key from the user-editable config copy.
+svcd_config_get() {
+    [ -n "${SVCD_CONFIG:-}" ] && [ -f "${SVCD_CONFIG}" ] || return 0
+    svcd_field "$(cat "${SVCD_CONFIG}")" "$1"
+}
+
+# Seconds since the epoch, for uptime counters.
+svcd_now() {
+    date +%s
+}
+
+# Print every integer stored under `"key": <n>` in a JSON file, one per line.
+# Shell has no JSON parser; this is the one array-shaped read we support, and it
+# covers `manifest.json`'s partNumber list.
+svcd_json_numbers() {
+    LC_ALL=C awk -v key="\"$2\"" '
+        {
+            rest = $0
+            while ((at = index(rest, key)) > 0) {
+                rest = substr(rest, at + length(key))
+                sub(/^[ \t]*:[ \t]*/, "", rest)
+                if (match(rest, /^[0-9]+/) > 0) {
+                    print substr(rest, 1, RLENGTH)
+                    rest = substr(rest, RLENGTH + 1)
+                } else {
+                    rest = substr(rest, 2)
+                }
+            }
+        }' "$1"
+}
+
 # Serve the protocol until stdin closes or the host asks us to stop.
 svcd_plugin_serve() {
     _svcd_handler=$1
@@ -90,14 +143,29 @@ svcd_plugin_serve() {
             exit 0
             ;;
         tools/call)
-            _svcd_name=$(svcd_field "$_svcd_frame" name)
+            _svcd_name=$(svcd_field_first "$_svcd_frame" name)
             _svcd_args=$(printf '%s\n' "$_svcd_frame" |
                 LC_ALL=C sed -n 's/.*"arguments"[[:space:]]*:[[:space:]]*\({.*}\).*/\1/p' | head -n 1)
             [ -z "$_svcd_args" ] && _svcd_args='{}'
 
             # fd 3 is the real stderr: the handler's own logs bypass the capture.
-            _svcd_out=$("$_svcd_handler" "$_svcd_name" "$_svcd_args" 2>&3)
+            # The handler runs in *this* shell (stdout to a temp file, not a
+            # command substitution), so a handler that wants to return a blob can
+            # set SVCD_BLOB_PATH and have the loop see it.
+            SVCD_BLOB_PATH=""
+            SVCD_BLOB_NAME=""
+            SVCD_BLOB_MIME=""
+            _svcd_out_file="${TMPDIR:-/tmp}/svcd-reply.$$"
+            "$_svcd_handler" "$_svcd_name" "$_svcd_args" > "$_svcd_out_file" 2>&3
             _svcd_code=$?
+            _svcd_out=$(cat "$_svcd_out_file")
+            rm -f "$_svcd_out_file"
+
+            if [ -n "$SVCD_BLOB_PATH" ]; then
+                svcd_reply_result "$_svcd_id" \
+                    "{\"\$blobPath\":\"$(printf '%s' "$SVCD_BLOB_PATH" | svcd_json_escape)\",\"name\":\"$(printf '%s' "${SVCD_BLOB_NAME:-blob}" | svcd_json_escape)\",\"mimeType\":\"$(printf '%s' "${SVCD_BLOB_MIME:-application/octet-stream}" | svcd_json_escape)\"}"
+                continue
+            fi
 
             _svcd_text=$(printf '%s' "$_svcd_out" | svcd_json_escape)
             if [ "$_svcd_code" -eq 0 ]; then

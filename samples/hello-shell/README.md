@@ -1,38 +1,38 @@
-# hello-shell — Shell 插件模板
+# hello-shell —— Shell 参考插件
 
-把一条已有命令包装成能力。只写 `case` 分支，协议在 `package/payload/lib/svcd-plugin.sh` 里。
+和 `samples/hello`、`samples/hello-c`、`samples/hello-powershell` 能力一致。
+POSIX sh 里没有 JSON 解析器，所以这里演示的是「用 SDK 的扁平扫描 + awk」能做到什么。
 
-## 布局
+| 能力 | 演示什么 |
+|---|---|
+| `echo` | 文本入 / 文本出 |
+| `stats` | JSON 文本出（调用数、uptime、pid） |
+| `summarize` | `$blob` 输入：`awk` 流式统计行数与词数 |
+| `inspect_file` | `$file` 文件包：`svcd_json_numbers` 取 part 列表，逐 part 读大小 |
+| `report` | `$blobPath` 输出：写 `incoming/` 并设 `SVCD_BLOB_PATH` |
+| 日志 | `echo … >&2` |
+| 配置 | `svcd_config_get <key>` 读 `SVCD_CONFIG` |
 
-```
-package/                        ← 打包根：里面有什么，包里就有什么
-├── manifest.json
-└── payload/
-    ├── bin/hello-shell.sh         ← 你的代码（提交）
-    └── lib/svcd-plugin.sh      ← 协议壳（由 sdk/shell 同步，勿手改）
-```
-
-## 能力清单要和代码对上
-
-manifest 的 `capabilities[]` 是 MCP 面上暴露的工具；`handle()` 里的 `case` 分支是实现。
-两边一旦漂移，工具会"存在但调用必错"。shell 没法编译期检查，所以改一处就同步改另一处。
-
-## 命令
+## 跑起来
 
 ```bash
-plugin-tools template <name> --lang shell --webui   # 只创建项目
-plugin-tools build                                   # 打包（默认本机三元组，未签名）
-plugin-tools build --platform aarch64-unknown-linux-musl
-plugin-tools check dist/xxx.spk
+cd samples/hello-shell
+plugin-tools build            # 无编译，直接打包（未签名）
+plugin install dist/hello-shell-1.0.0-<triple>.spk
+plugin start hello-shell
 ```
 
-`--webui` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是
-`uname` / `date` 两个能力，和后端是 shell 还是 rust 无关。
+## 三个 shell 特有的约定
 
-`pack` 的 `interpreter.name` 写的是 `sh`，且**故意不写 `version`**：`sh` 会走 `--version`
-探测，而 Debian 的 sh 是 dash，探测会报非法选项、安装直接被拒。
+1. **日志走 stderr**：`echo … >&2`。stdout 是协议，写一行日志就断一条连接。
+2. **大结果靠变量**：handler 里设置 `SVCD_BLOB_PATH` / `SVCD_BLOB_NAME` /
+   `SVCD_BLOB_MIME`，SDK 会把回复换成 `{"$blobPath": …}`。handler 在**同一个 shell**
+   里执行（stdout 重定向到临时文件），所以变量能传回来。
+3. **能力名用首个匹配**：分发用 `svcd_field_first`，因为参数里可能也有
+   `"name"`（文件名）；取字段用 `svcd_field`（最后一个匹配），参数是扁平结构时足够。
 
 ## 边界
 
-POSIX sh 里没有 JSON 解析器，所以这个壳只给 handler 两样东西：能力名，和原样的
-`arguments` 字符串。参数是扁平字符串时够用；需要真正解析 JSON 的插件请用 Rust 模板。
+- 没有 JSON 解析器：需要解析嵌套结构的插件请用 Rust / C / PowerShell。
+- `interpreter.name` 写 `sh`，**不要**写 `version`——Debian 的 sh 是 dash，
+  `--version` 探测会失败、安装被拒。

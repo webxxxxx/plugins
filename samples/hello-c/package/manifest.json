@@ -1,0 +1,71 @@
+{
+  "schema": 2,
+  "name": "hello-c",
+  "version": "1.0.0",
+  "desc": "C reference plugin: blob and file package transfer",
+  "protocol": 1,
+  "exec": {
+    "path": "payload/bin/hello-c",
+    "ready": "notify"
+  },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "capabilities": [
+    {
+      "name": "echo",
+      "desc": "Echo a message back, prefixed with the configured greeting",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "message": { "type": "string" } },
+        "required": ["message"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stats",
+      "desc": "Counters and uptime as a JSON object",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    },
+    {
+      "name": "summarize",
+      "desc": "Summarize a large text blob (streams it instead of loading it)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "object",
+            "properties": { "$blob": { "type": "string" } },
+            "required": ["$blob"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["input"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "inspect_file",
+      "desc": "Stream a file package (parts + manifest) and verify its declared size",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input": {
+            "type": "object",
+            "properties": { "$file": { "type": "string" } },
+            "required": ["$file"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["input"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "report",
+      "desc": "Produce a report as a blob; the host stores it and returns a resource_link",
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+    }
+  ]
+}

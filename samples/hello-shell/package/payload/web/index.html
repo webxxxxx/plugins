@@ -1,38 +1,135 @@
 <!doctype html>
 <html lang="zh">
 <meta charset="utf-8">
-<title>hello-shell</title>
+<title>hello</title>
 <style>
-  body { font: 14px/1.6 system-ui, sans-serif; margin: 2rem; max-width: 46rem; }
-  pre { background: #f4f4f4; padding: .8rem; border-radius: 6px; min-height: 2rem; }
-  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 4px; }
-  button { margin-right: .5rem; }
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 2rem; max-width: 52rem; }
+  section { border: 1px solid #e3e3e3; border-radius: 8px; padding: .8rem 1rem; margin: 1rem 0; }
+  h2 { font-size: 1rem; margin: 0 0 .6rem; }
+  pre { background: #f6f6f6; padding: .6rem; border-radius: 6px; min-height: 1.5rem; margin: .4rem 0 0; white-space: pre-wrap; }
+  input, button { font: inherit; }
+  input[type="text"] { padding: .3rem .5rem; }
+  button { margin-right: .4rem; padding: .3rem .7rem; }
+  .row { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; }
+  .muted { color: #777; }
 </style>
 
-<h1>hello-shell</h1>
-<p>这是一个 <strong>shell</strong> 插件的 Web UI。静态文件由 svcd 反代，能力调用走
-<code>POST ./rpc</code>，事件推送走 <code>./events</code>（SSE）——和后端用什么语言实现无关。</p>
+<h1>hello</h1>
+<p class="muted">参考插件：能力调用、事件推送、大对象输入输出。请求走 <code>./rpc</code>，
+推送走 <code>./events</code>，大文件走 <code>/api/v1/blobs</code>。</p>
 
-<div>
-  <button id="uname">uname</button>
-  <button id="date">date</button>
-</div>
-<pre id="out">（等待调用）</pre>
+<section>
+  <h2>方法调用</h2>
+  <div class="row">
+    <input id="message" type="text" value="world" size="24">
+    <button id="echo">echo</button>
+    <button id="stats">stats</button>
+  </div>
+  <pre id="out">（等待调用）</pre>
+</section>
+
+<section>
+  <h2>大对象</h2>
+  <p class="muted">上传走 <code>POST /api/v1/blobs</code>，插件只看到 <code>{path,size}</code>；
+  插件产出的报告写到 <code>SVCD_TEMP_DIR/incoming/</code> 并返回 <code>$blobPath</code>。</p>
+  <div class="row">
+    <input id="file" type="file">
+    <button id="summarize">上传并总结</button>
+    <button id="report">生成报告并下载</button>
+  </div>
+  <div class="row">
+    <input id="package" type="file">
+    <button id="inspect">上传文件包并检查（&gt;512 MiB 走这条）</button>
+  </div>
+  <pre id="blob">（等待操作）</pre>
+</section>
+
+<section>
+  <h2>事件推送</h2>
+  <div class="row">
+    <button id="sse">SSE 已连接</button>
+    <button id="ws">连接 WebSocket</button>
+  </div>
+  <pre id="feed">（等待 tick）</pre>
+</section>
 
 <script type="module">
   import { pluginUI } from './plugin-ui.mjs';
 
   const ui = pluginUI();
   const out = document.getElementById('out');
-  const show = (promise) =>
+  const blobOut = document.getElementById('blob');
+  const feed = document.getElementById('feed');
+
+  const show = (promise, into = out) =>
     promise.then(
-      (text) => { out.textContent = text; },
-      (error) => { out.textContent = `error ${error.code ?? ''}: ${error.message}`; },
+      (text) => { into.textContent = text; },
+      (error) => { into.textContent = `error ${error.code ?? ''}: ${error.message}`; },
     );
 
-  document.getElementById('uname').onclick = () => show(ui.invoke('uname'));
-  document.getElementById('date').onclick = () => show(ui.invoke('date'));
+  document.getElementById('echo').onclick = () =>
+    show(ui.invoke('echo', { message: document.getElementById('message').value }));
+  document.getElementById('stats').onclick = () => show(ui.invoke('stats'));
 
-  show(ui.invoke('uname'));
+  document.getElementById('summarize').onclick = () => {
+    const file = document.getElementById('file').files[0];
+    if (!file) { blobOut.textContent = '先选一个文本文件'; return; }
+    show(
+      (async () => {
+        blobOut.textContent = `上传中 ${file.size} B…`;
+        const meta = await ui.uploadBlob(file);
+        blobOut.textContent = `已上传 ${meta.id}（${meta.size} B），正在总结…`;
+        return ui.invoke('summarize', { input: ui.blobArg(meta.id) });
+      })(),
+      blobOut,
+    );
+  };
+
+  document.getElementById('report').onclick = () => {
+    show(
+      (async () => {
+        const result = await ui.invokeResult('report');
+        const id = result.structuredContent?.$blob;
+        if (!id) {
+          return `插件已产出 blob，但宿主没有物化它（无 structuredContent）。原始结果：${JSON.stringify(result.raw)}`;
+        }
+        const blob = await ui.downloadBlob(id, { filename: 'report.txt' });
+        return `报告已下载：${id}（${blob.size} B）`;
+      })(),
+      blobOut,
+    );
+  };
+
+  document.getElementById('inspect').onclick = () => {
+    const file = document.getElementById('package').files[0];
+    if (!file) { blobOut.textContent = '先选一个大文件'; return; }
+    show(
+      (async () => {
+        const meta = await ui.uploadFilePackage(file, {
+          onProgress: (p) => { blobOut.textContent = `上传 ${p.sent}/${p.total} B`; },
+        });
+        blobOut.textContent = `已上传 ${meta.id}（${meta.size} B），正在检查…`;
+        return ui.invoke('inspect_file', { input: ui.fileArg(meta.id) });
+      })(),
+      blobOut,
+    );
+  };
+
+  const onMessage = (method, params) => {
+    if (method === 'notifications/message' && params?.type === 'tick') {
+      feed.textContent = `tick #${params.count}`;
+    }
+  };
+  const sse = ui.subscribe({ onMessage, onReset: () => { feed.textContent = '历史不可回放'; } });
+  document.getElementById('sse').onclick = () => { sse.close(); out.textContent = 'SSE 已关闭'; };
+
+  let socket = null;
+  document.getElementById('ws').onclick = () => {
+    if (socket) { socket.close(); socket = null; return; }
+    socket = ui.subscribeWebSocket({ onMessage, onClose: (ms) => { feed.textContent = `${ms} ms 后重连`; } });
+    feed.textContent = 'WebSocket 已连接';
+  };
+
+  show(ui.invoke('stats'));
 </script>
 </html>

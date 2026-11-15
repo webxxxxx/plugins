@@ -143,3 +143,32 @@ function Invoke-SvcdPlugin {
         }
     }
 }
+
+# --- helpers a capability usually wants --------------------------------
+
+# Parse the user-editable config copy; missing file means "defaults still apply".
+function Get-SvcdConfig {
+    param($Context)
+    if (-not $Context -or -not $Context.Config) { return $null }
+    if (-not (Test-Path -LiteralPath $Context.Config)) { return $null }
+    try { return Get-Content -LiteralPath $Context.Config -Raw | ConvertFrom-Json } catch { return $null }
+}
+
+# Build a unique path under $SVCD_TEMP_DIR/incoming for a blob result.
+function New-SvcdIncomingPath {
+    param([string]$Name = 'blob')
+    if (-not $env:SVCD_TEMP_DIR) { throw 'SVCD_TEMP_DIR is not set' }
+    $dir = Join-Path $env:SVCD_TEMP_DIR 'incoming'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $safe = ($Name -replace '[^A-Za-z0-9._-]', '_')
+    return Join-Path $dir ("{0}-{1}-{2}" -f $safe, $PID, (Get-Random))
+}
+
+# Parts of a `$file` package, in manifest order (host names them part-00001 …).
+function Get-SvcdFileParts {
+    param($File)
+    $manifest = Get-Content -LiteralPath $File.manifest -Raw | ConvertFrom-Json
+    foreach ($part in $manifest.parts) {
+        Join-Path $File.dir ('part-{0:D5}' -f [int]$part.partNumber)
+    }
+}

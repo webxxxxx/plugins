@@ -12,8 +12,10 @@ sdk/shell/        POSIX sh 协议壳（随插件拷进包里）
 sdk/powershell/   PowerShell 协议壳（随插件拷进包里）
 sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）：invoke / SSE / WS / 上传下载
 templates/        rust / c / shell / powershell 四种模板源
-samples/hello     生产级参考插件：能力、配置、日志、定时通知、分块上传下载、UI
-samples/          hello-rust / hello-shell 是模板产物（plugin-tools template --force 重新生成）
+samples/hello             Rust 参考实现：五能力 + 配置 + 通知 + UI
+samples/hello-c           C 同款（单头文件 SDK）
+samples/hello-shell       Shell 同款（POSIX sh + awk）
+samples/hello-powershell  PowerShell 同款
 skills/           给 AI 的插件开发手册（语言、toolkit、边界）
 tools/cli/        Rust 工具链：单二进制 plugin-tools（template / build / dev / devkey / sync / check）
 ```
