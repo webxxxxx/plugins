@@ -32,6 +32,8 @@ plugin-tools check dist/xxx.spk
 `pack` 的 `interpreter.name` 写的是 `sh`，且**故意不写 `version`**：`sh` 会走 `--version`
 探测，而 Debian 的 sh 是 dash，探测会报非法选项、安装直接被拒。
 
+Windows 上要求 `PATH` 里能找到 `sh`（Git Bash / MSYS）；否则请用 PowerShell 模板。
+
 ## 边界
 
 POSIX sh 里没有 JSON 解析器，所以这个壳只给 handler 两样东西：能力名，和原样的

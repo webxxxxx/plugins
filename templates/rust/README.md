@@ -15,6 +15,9 @@ src/main.rs               ← 你的代码
 源码必须留在 `package/` 之外。`plugin bundle` 会无差别递归整个目录，放进去的
 `src/`、`Cargo.toml`、`target/` 都会被打进 `.spk`。
 
+`Cargo.toml` 用 path 依赖本仓库的 `sdk/rust`；如果把插件拆成独立仓库，
+需要把 `svcd-plugin` 改成 git 或已发布版本的依赖。
+
 ## 命令（在仓库根或插件目录内都行）
 
 ```bash
@@ -29,6 +32,9 @@ cargo test                                   # 清单与代码的能力清单是
 
 `plugin bundle` 需要一把签名钥；默认用 `~/.svcd-dev/dev.pem`（`plugin-tools devkey` 生成一次），
 也可以用 `--key` 指定。
+
+多平台构建会执行 `cargo build --target <triple>`；先 `rustup target add <triple>`，
+musl / ARM 目标还需要对应的链接器。
 
 ## 验证（当前实现的两个限制）
 

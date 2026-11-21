@@ -6,7 +6,7 @@
 
 ```
 package/
-├── manifest.json          ← interpreter 写 powershell，不写 version
+├── manifest.json          ← interpreter 由工具按目标平台写，不写 version
 └── payload/{bin,lib,web}/
 ```
 
@@ -24,7 +24,10 @@ plugin-tools build                # 无编译，直接打包（默认未签名�
 | Windows | `powershell`（系统自带 5.1） |
 | Linux / macOS | `pwsh`（PowerShell 7） |
 
-模板默认写 `powershell`。跨到 Linux 时把 manifest 改成 `pwsh`，并确认目标机装了。
+`plugin-tools template` 会根据 `--platforms` 自动写：Windows 用 `powershell`，
+Linux / macOS 用 `pwsh`。同一项目不允许同时选 Windows 和非 Windows 平台，
+因为一个 manifest 只能有一个解释器名；需要两边就 scaffold 两个项目。
+目标机必须确实装了对应的解释器。
 
 ## 边界
 

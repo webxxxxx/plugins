@@ -21,7 +21,8 @@ plugin-tools build                               # gcc 编译 + 打包（默认�
 plugin-tools build --platform aarch64-unknown-linux-musl
 ```
 
-构建用 `build.json` 里的 `gcc`。交叉编译要换工具链：
+构建用 `build.json` 里的 `gcc`。Windows 上需要 MinGW/MSYS 的 `gcc`；
+没有就改用 `cl` 等编译器并同步改 `build.json`。交叉编译要换工具链：
 
 ```json
 { "build": { "command": ["aarch64-linux-gnu-gcc", "-static", "-o", "out/{name}", "src/main.c"],

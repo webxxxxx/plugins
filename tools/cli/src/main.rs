@@ -2,12 +2,20 @@
 
 use plugin_tools::{
     build_from_recipe, devkey, host_triple, instantiate, pack, pascal, read_manifest, read_recipe,
-    sync, valid_name, vendor_sdk, write_project, LANGUAGES, PLATFORMS, Project, Repo,
+    sync, valid_name, vendor_sdk, write_project, Project, Repo, LANGUAGES, PLATFORMS,
 };
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
-const RESERVED: &[&str] = &["svc", "svcd", "mcp", "plugin", "core", "system", "svcd-plugin"];
+const RESERVED: &[&str] = &[
+    "svc",
+    "svcd",
+    "mcp",
+    "plugin",
+    "core",
+    "system",
+    "svcd-plugin",
+];
 
 fn fail(message: impl Into<String>) -> ! {
     eprintln!("plugin-tools: {}", message.into());
@@ -24,7 +32,9 @@ fn main() {
         "template" => template(&args[1..]),
         "build" => build(&args[1..]),
         "dev" => dev(&args[1..]),
-        "devkey" => devkey().map(|path| println!("{}", path.display())).map(|_| ()),
+        "devkey" => devkey()
+            .map(|path| println!("{}", path.display()))
+            .map(|_| ()),
         "sync" => {
             let repo = Repo::discover(flag(&args[1..], "--repo").map(PathBuf::from).as_deref());
             match repo {
@@ -93,7 +103,14 @@ fn has(args: &[String], name: &str) -> bool {
 /// Flags that consume the next argument. Anything else starting with `-` is a
 /// boolean, so it must not swallow the positional that follows.
 const VALUE_FLAGS: &[&str] = &[
-    "--lang", "--platforms", "--desc", "--dir", "--key", "--out", "--platform", "--repo",
+    "--lang",
+    "--platforms",
+    "--desc",
+    "--dir",
+    "--key",
+    "--out",
+    "--platform",
+    "--repo",
 ];
 
 fn positional<'a>(args: &'a [String], skip: usize) -> Option<&'a str> {
@@ -235,7 +252,27 @@ fn template(args: &[String]) -> Result<(), String> {
     };
     for platform in &platforms {
         if !PLATFORMS.iter().any(|id| *id == platform) {
-            return Err(format!("unknown platform \"{platform}\" (see --help for the list)"));
+            return Err(format!(
+                "unknown platform \"{platform}\" (see --help for the list)"
+            ));
+        }
+    }
+
+    if platforms.is_empty() {
+        return Err("select at least one platform".into());
+    }
+    if language == "powershell" {
+        let windows = platforms
+            .iter()
+            .any(|platform| platform.contains("-windows-"));
+        let unix = platforms
+            .iter()
+            .any(|platform| !platform.contains("-windows-"));
+        if windows && unix {
+            return Err(
+                "the PowerShell template cannot target Windows and non-Windows platforms in one project; scaffold one OS family per project"
+                    .into(),
+            );
         }
     }
 
@@ -253,10 +290,13 @@ fn template(args: &[String]) -> Result<(), String> {
         ));
     }
 
-    let desc = flag(args, "--desc").map(str::to_string).unwrap_or_else(|| format!("{name} plugin"));
+    let desc = flag(args, "--desc")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{name} plugin"));
     instantiate(&source, &project, name, &pascal(name), &desc)?;
     vendor_sdk(&repo, &project, &language)?;
     apply_webui(&project, has(args, "--webui"))?;
+    apply_interpreter(&project, &language, &platforms)?;
     write_project(
         &project,
         &Project {
@@ -293,7 +333,8 @@ fn apply_webui(project: &Path, enabled: bool) -> Result<(), String> {
     }
 
     if web.is_dir() {
-        std::fs::remove_dir_all(&web).map_err(|error| format!("remove {}: {}", web.display(), error))?;
+        std::fs::remove_dir_all(&web)
+            .map_err(|error| format!("remove {}: {}", web.display(), error))?;
     }
     if manifest.get("ui").is_some() {
         if let Some(object) = manifest.as_object_mut() {
@@ -304,9 +345,42 @@ fn apply_webui(project: &Path, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// PowerShell uses different interpreter names on Windows and Unix. The
+/// template manifest cannot be correct for both, so scaffold one OS family
+/// and write the matching name instead of making the author discover it at
+/// install time.
+fn apply_interpreter(project: &Path, language: &str, platforms: &[String]) -> Result<(), String> {
+    if language != "powershell" {
+        return Ok(());
+    }
+    let name = if platforms
+        .iter()
+        .any(|platform| platform.contains("-windows-"))
+    {
+        "powershell"
+    } else {
+        "pwsh"
+    };
+    let manifest_path = project.join("package").join("manifest.json");
+    let bytes = std::fs::read(&manifest_path)
+        .map_err(|error| format!("read {}: {}", manifest_path.display(), error))?;
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|error| format!("parse manifest: {error}"))?;
+    if let Some(interpreter) = manifest
+        .get_mut("interpreter")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        interpreter.insert("name".into(), serde_json::Value::String(name.to_string()));
+    } else {
+        manifest["interpreter"] = serde_json::json!({ "name": name });
+    }
+    write_manifest(&manifest_path, &manifest)
+}
+
 fn write_manifest(path: &Path, manifest: &serde_json::Value) -> Result<(), String> {
     let text = serde_json::to_string_pretty(manifest).map_err(|error| error.to_string())?;
-    std::fs::write(path, format!("{text}\n")).map_err(|error| format!("write {}: {}", path.display(), error))
+    std::fs::write(path, format!("{text}\n"))
+        .map_err(|error| format!("write {}: {}", path.display(), error))
 }
 
 fn find_plugin_root(dir: Option<&str>) -> Result<PathBuf, String> {
@@ -319,7 +393,10 @@ fn find_plugin_root(dir: Option<&str>) -> Result<PathBuf, String> {
             return Ok(current);
         }
         if !current.pop() {
-            return Err("no package/manifest.json found; run inside a plugin directory or pass --dir".into());
+            return Err(
+                "no package/manifest.json found; run inside a plugin directory or pass --dir"
+                    .into(),
+            );
         }
     }
 }
@@ -370,7 +447,10 @@ fn dev(args: &[String]) -> Result<(), String> {
             .status()
             .map_err(|error| format!("{bin}: {error}"))?;
         if !status.success() {
-            return Err(format!("{bin} {verb} exited {}", status.code().unwrap_or(-1)));
+            return Err(format!(
+                "{bin} {verb} exited {}",
+                status.code().unwrap_or(-1)
+            ));
         }
     }
     println!("started {}", manifest.name);
@@ -408,7 +488,11 @@ fn pack_plugin(args: &[String]) -> Result<(Vec<PathBuf>, plugin_tools::Manifest,
             &manifest,
             platform,
             key.as_deref(),
-            if platforms.len() == 1 { out.as_deref() } else { None },
+            if platforms.len() == 1 {
+                out.as_deref()
+            } else {
+                None
+            },
             exec.as_deref(),
         )?;
         if !has(args, "--no-verify") {
