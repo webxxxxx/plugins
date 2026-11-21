@@ -64,6 +64,17 @@ tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代�
 
 插件构建使用仓库存的 `secrets.PLUGIN_SIGNING_KEY`（Ed25519 PKCS#8 PEM）。没有这个 secret 时 PR 只做未签名构建；tag / 手动发布则直接失败，避免发出未签名包。
 
+发布公钥在 [docs/release-key.pub](docs/release-key.pub)（SHA-256 指纹
+`af7c736c946e2340e48cac641177514792daec9539cdbc6a8998b2a8a8e91cf6`）。
+安装发布包前先信任它：
+
+```bash
+svc trust add docs/release-key.pub
+```
+
+私钥只保存在发布机上（`~/.svcd-release/release.pem`），不要提交；轮换时同时更新
+GitHub secret 和这个公钥文件。
+
 ### CI 平台覆盖
 
 每个插件的 `.plugin.json` 可以写 `ci.platforms` 覆盖发布矩阵；meow 因 BoringSSL 交叉链目前只覆盖 Linux x86_64 gnu + 两种 macOS。完整的 `platforms` 仍可用于本地构建。

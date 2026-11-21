@@ -388,6 +388,12 @@ jobs:
           path: dist
           pattern: plugin-tools-*
           merge-multiple: true
+      - name: Add the release public key
+        shell: bash
+        run: |
+          if [ -f docs/release-key.pub ]; then
+            cp docs/release-key.pub dist/
+          fi
       - name: Verify the artifact set
         shell: bash
         env:
@@ -410,7 +416,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          find . -maxdepth 1 -type f \( -name '*.spk' -o -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' \
+          find . -maxdepth 1 -type f \( -name '*.spk' -o -name '*.tar.gz' -o -name '*.zip' -o -name '*.pub' \) -printf '%f\n' \
             | sort | xargs -r sha256sum > SHA256SUMS
           cat SHA256SUMS
       - name: Publish the GitHub release
