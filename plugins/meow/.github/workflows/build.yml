@@ -41,14 +41,25 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install plugin-tools
-        run: cargo install --locked --git https://github.com/webxxxxx/plugins plugin-tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The crate lives in tools/cli; cargo install --git does not look in subdirectories.
+          git clone --depth 1 https://github.com/webxxxxx/plugins "$RUNNER_TEMP/plugins"
+          cargo install --locked --path "$RUNNER_TEMP/plugins/tools/cli"
       - name: Install the host plugin CLI
+        shell: bash
         # plugin-tools 只编排，真正打包的是宿主的 `plugin bundle`。
         run: |
           set -euo pipefail
           cargo install --locked --git https://github.com/webxxxxx/plugin-manager --bin svcd
           mkdir -p "$HOME/.local/bin"
-          cp "$(command -v svcd)" "$HOME/.local/bin/plugin"
+          # Windows 只按 plugin.exe 查找；复制成没有扩展名的 plugin 不会被执行。
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$(command -v svcd.exe || command -v svcd)" "$HOME/.local/bin/plugin.exe"
+          else
+            cp "$(command -v svcd)" "$HOME/.local/bin/plugin"
+          fi
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Build and verify
         run: plugin-tools build --platform ${{ matrix.platform }}

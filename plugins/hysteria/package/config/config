@@ -1,6 +1,6 @@
 {
   "log": {
-    "level": "debug",
+    "level": "info",
     "timestamp": true
   },
   "inbounds": [
@@ -11,27 +11,25 @@
       "listen_port": 8443,
       "users": [
         {
-	  "name": "0",
-          "password": "cf5f7489-0bb6-44c8-b847-5b45a9d9cfcf"
+          "name": "0",
+          "password": "@PASSWORD@"
         }
       ],
       "tls": {
         "enabled": true,
         "alpn": ["h3"],
-        "certificate_path": "/plugin/msa/cert.pem",
-        "key_path": "/plugin/msa/key.pem"
+        "certificate_path": "@CERT@",
+        "key_path": "@KEY@"
       }
     }
   ],
   "outbounds": [
     {
-      "type": "socks",
-      "tag": "meow-proxy",
-      "server": "127.0.0.1",
-      "server_port": 7890
+      "type": "direct",
+      "tag": "direct"
     }
   ],
   "route": {
-    "final": "meow-proxy"
+    "final": "direct"
   }
 }

@@ -1,38 +1,67 @@
-# meow — Shell 插件模板
+# meow — mihomo 兼容代理内核
 
-把一条已有命令包装成能力。只写 `case` 分支，协议在 `package/payload/lib/svcd-plugin.sh` 里。
+把 [meow-rs](https://github.com/madeye/meow-rs) 编译成 svcd 插件。插件没有
+JSON-RPC 能力；生命周期是 `start` / `stop` / `status`，启动后由 meow 自己
+提供 mixed 代理端口和 YACD 面板。
 
 ## 布局
 
 ```
-package/                        ← 打包根：里面有什么，包里就有什么
+vendor/meow-rs/            源码
+build.json                 cargo 构建配方
+build.sh                   平台映射与产物复制
+package/
 ├── manifest.json
+├── config/config          用户可编辑的 YAML（安装后复制到 plugins/meow/config）
 └── payload/
-    ├── bin/meow.sh         ← 你的代码（提交）
-    └── lib/svcd-plugin.sh      ← 协议壳（由 sdk/shell 同步，勿手改）
+    ├── bin/meow.sh        生命周期包装
+    ├── bin/meow           构建产物
+    ├── web/index.html     控制台「打开」入口（跳转到 9090/ui/）
+    ├── cn_domains.yaml    rule-provider
+    └── yacd/              面板静态文件
 ```
 
-## 能力清单要和代码对上
+## 运行方式
 
-manifest 的 `capabilities[]` 是 MCP 面上暴露的工具；`handle()` 里的 `case` 分支是实现。
-两边一旦漂移，工具会"存在但调用必错"。shell 没法编译期检查，所以改一处就同步改另一处。
+- `mixed-port: 7890`：HTTP/SOCKS5 混合代理。
+- `external-controller: 127.0.0.1:9090`，YACD 在 `http://127.0.0.1:9090/ui/`。
+- svcd 控制台的「打开」入口由 `manifest.ui` + `payload/web/index.html` 提供；
+  页面会自动跳到 `http://<当前主机>:9090/ui/`。
+- 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
+  改到代理组后即可用面板切换。
 
-## 命令
+宿主的 `lifecycle.start` 是前台进程，所以 `meow.sh start` 直接
+`exec meow`；启动前先跑 `meow -t` 校验配置，失败就返回非零而不是秒退。
+`stop` 按 pidfile 结束进程，`status` 输出 JSON。
+
+## 配置
 
 ```bash
-plugin-tools template <name> --lang shell --webui   # 只创建项目
-plugin-tools build                                   # 打包（默认本机三元组，未签名）
-plugin-tools build --platform aarch64-unknown-linux-musl
-plugin-tools check dist/xxx.spk
+plugin editconfig meow
 ```
 
-`--webui` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是
-`uname` / `date` 两个能力，和后端是 shell 还是 rust 无关。
+配置直接使用安装后的活动配置 `plugins/meow/config`：
 
-`pack` 的 `interpreter.name` 写的是 `sh`，且**故意不写 `version`**：`sh` 会走 `--version`
-探测，而 Debian 的 sh 是 dash，探测会报非法选项、安装直接被拒。
+- 首次启动把模板里的 `@DATA@` 渲染成数据目录，之后不再覆盖；
+- YACD 的 `/api/subscriptions` 写回的就是这个文件，所以在控制台里能看到，
+  重启也不会丢；
+- 从旧布局升级时，如果数据目录的 `config.yaml` 里已有 `subscriptions:`，
+  第一次启动会把它迁回活动配置；
+- 只有源码 checkout 没有活动配置时，才用 `package/config/config` 生成
+  `$SVCD_DATA_DIR/meow/config.yaml` 作为副本；
+- 数据目录缺失时回退到插件目录下的相对路径 `.data/meow`。
 
-## 边界
+## 构建
 
-POSIX sh 里没有 JSON 解析器，所以这个壳只给 handler 两样东西：能力名，和原样的
-`arguments` 字符串。参数是扁平字符串时够用；需要真正解析 JSON 的插件请用 Rust 模板。
+```bash
+plugin-tools build --platform x86_64-unknown-linux-gnu
+plugin-tools check dist/meow-1.0.0-x86_64-unknown-linux-gnu.spk
+```
+
+Rust 1.98.1（vendor 里的 `rust-toolchain.toml`）和 cmake/C++ 是构建依赖；
+BoringSSL 由 meow-rs 自己静态链接。Windows 不在平台列表里：插件入口是
+POSIX sh 包装。
+
+`.plugin.json` 的 `ci.platforms` 是发布流水线实际构建的子集：Linux x86_64
+gnu + macOS 两种架构。Linux musl / armv7 需要额外的 BoringSSL 交叉链，
+本地可以用 `plugin-tools build --platform ...` 自行尝试。

@@ -1,0 +1,38 @@
+# meow（mihomo 兼容）配置模板。
+# 安装后位于 <plugins>/meow/config，用 `plugin editconfig meow` 编辑。
+# 加代理节点后，把 rules 的 MATCH 改成对应代理组/节点名。
+
+mixed-port: 7890
+allow-lan: true
+bind-address: 0.0.0.0
+mode: rule
+log-level: info
+ipv6: true
+
+# 面板：http://127.0.0.1:9090/ui/ ；secret 为空表示本机免密。
+external-controller: 127.0.0.1:9090
+secret: ""
+external-ui: yacd
+
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+
+# 地理数据库放数据目录，别改安装目录；缺失时 meow 会自行下载。
+geodata:
+  mmdb-path: "@DATA@/Country.mmdb"
+  asn-path: "@DATA@/GeoLite2-ASN.mmdb"
+  geosite-path: "@DATA@/geosite.dat"
+
+rule-providers:
+  cn_domains:
+    type: file
+    behavior: domain
+    path: cn_domains.yaml
+
+rules:
+  - RULE-SET,cn_domains,DIRECT
+  - MATCH,DIRECT

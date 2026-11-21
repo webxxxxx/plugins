@@ -1,4 +1,5 @@
 {
+  "schema": 2,
   "name": "sshd",
   "version": "1.0.0",
   "desc": "dropbear + sftp-server：SSH 与 SFTP 服务",
@@ -7,21 +8,29 @@
     "name": "sh"
   },
   "exec": {
-    "path": "payload/bin/sshd.sh"
+    "path": "payload/bin/sshd.sh",
+    "ready": "exec"
   },
   "lifecycle": {
     "start": {
       "path": "payload/bin/sshd.sh",
-      "args": ["start"]
+      "args": [
+        "start"
+      ]
     },
     "stop": {
       "path": "payload/bin/sshd.sh",
-      "args": ["stop"]
+      "args": [
+        "stop"
+      ]
     },
     "status": {
       "path": "payload/bin/sshd.sh",
-      "args": ["status"]
+      "args": [
+        "status"
+      ]
     }
   },
+  "config": "config/config",
   "capabilities": []
 }

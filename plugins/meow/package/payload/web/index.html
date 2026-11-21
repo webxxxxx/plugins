@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>meow · YACD</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { height: 100%; margin: 0; }
+  body { display: grid; place-items: center; font: 14px/1.6 system-ui, sans-serif; color: #333; }
+  a { color: #2563eb; }
+</style>
+<body>
+  <div>
+    <p>正在打开 meow 控制台…</p>
+    <p><a id="fallback" href="#">如果页面没有自动跳转，点这里</a></p>
+  </div>
+  <script>
+    // YACD 由 meow 自己在 external-controller 上提供；这里只做一个跳转入口。
+    // 用当前浏览器访问的主机名，兼容 127.0.0.1 / localhost / 局域网地址。
+    const raw = location.hostname || '127.0.0.1';
+    const host = (raw === '[::1]' || raw === '::1') ? '127.0.0.1' : raw;
+    const target = 'http://' + host + ':9090/ui/';
+    document.getElementById('fallback').href = target;
+    location.replace(target);
+  </script>
+</body>
+</html>

@@ -1,38 +1,54 @@
-# sshd — Shell 插件模板
+# sshd — dropbear + sftp-server
 
-把一条已有命令包装成能力。只写 `case` 分支，协议在 `package/payload/lib/svcd-plugin.sh` 里。
+把 dropbear（多合一 SSH 服务端）和 OpenSSH 的 `sftp-server` 打包成 svcd 插件。
+插件没有 JSON-RPC 能力；它只有生命周期：`start` / `stop` / `status`。
 
 ## 布局
 
 ```
-package/                        ← 打包根：里面有什么，包里就有什么
+build.json                构建配方：编译 dropbear 与 sftp-server
+package/
 ├── manifest.json
+├── config/config         用户可编辑的配置（port）
 └── payload/
-    ├── bin/sshd.sh         ← 你的代码（提交）
-    └── lib/svcd-plugin.sh      ← 协议壳（由 sdk/shell 同步，勿手改）
+    ├── bin/sshd.sh       生命周期包装
+    ├── bin/sshd          构建产物：dropbearmulti
+    └── bin/sftp-server   构建产物：OpenSSH sftp-server
+vendor/                   dropbear / openssh 源码
 ```
 
-## 能力清单要和代码对上
+## 运行方式
 
-manifest 的 `capabilities[]` 是 MCP 面上暴露的工具；`handle()` 里的 `case` 分支是实现。
-两边一旦漂移，工具会"存在但调用必错"。shell 没法编译期检查，所以改一处就同步改另一处。
+宿主的 `lifecycle.start` 就是被监督的前台进程，所以 `sshd.sh start` 会
+`exec` 到 `dropbear -F`，而不是拉起后台再退出。`stop` 按 pidfile 结束进程，
+`status` 输出一行 JSON 供 `svc status` 的 probe 显示。
 
-## 命令
+`exec.ready` 写 `exec`：这个插件没有协议通道，宿主启动后立即视为 ready。
+`exec.path` 仍指向同一个脚本，只是被 `lifecycle.start` 覆盖，不会单独执行。
+
+## 配置
+
+`plugin editconfig sshd` 编辑：
+
+```ini
+port = 2222
+```
+
+默认 2222，因为 user mode 下不能绑定 22。root 安装时改成 22 即可。
+登录认证沿用系统账户：密码或目标用户的 `~/.ssh/authorized_keys`。
+
+## SFTP
+
+dropbear 的 sftp 子系统路径优先读环境变量 `SVCD_SFTP_SERVER`；
+`sshd.sh start` 把它设成包内的 `payload/bin/sftp-server` 后再 `exec` dropbear。
+这样不写死安装路径、不要求 root 写 `/usr/libexec`，user mode 下也能用 SFTP。
+环境变量缺失时才回退到 dropbear 编译时的默认路径。
+
+## 构建
 
 ```bash
-plugin-tools template <name> --lang shell --webui   # 只创建项目
-plugin-tools build                                   # 打包（默认本机三元组，未签名）
-plugin-tools build --platform aarch64-unknown-linux-musl
-plugin-tools check dist/xxx.spk
+plugin-tools build --platform x86_64-unknown-linux-gnu
+plugin-tools check dist/sshd-1.0.0-x86_64-unknown-linux-gnu.spk
 ```
 
-`--webui` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是
-`uname` / `date` 两个能力，和后端是 shell 还是 rust 无关。
-
-`pack` 的 `interpreter.name` 写的是 `sh`，且**故意不写 `version`**：`sh` 会走 `--version`
-探测，而 Debian 的 sh 是 dash，探测会报非法选项、安装直接被拒。
-
-## 边界
-
-POSIX sh 里没有 JSON 解析器，所以这个壳只给 handler 两样东西：能力名，和原样的
-`arguments` 字符串。参数是扁平字符串时够用；需要真正解析 JSON 的插件请用 Rust 模板。
+平台只声明 Linux；dropbear 没有 Windows 移植，macOS 下静态链接也不成立。

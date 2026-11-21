@@ -12,7 +12,7 @@ case "$PLATFORM" in
     export CC_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-gcc
     export CXX_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-g++
     export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc
-    TC=/tmp/svcd-armv7.cmake
+    TC=${TMPDIR:-/tmp}/svcd-armv7.cmake
     {
       echo "set(CMAKE_SYSTEM_NAME Linux)"
       echo "set(CMAKE_SYSTEM_PROCESSOR arm)"
@@ -35,9 +35,9 @@ case "$PLATFORM" in
   *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
 esac
 cd "$HERE/vendor/meow-rs"
-# 在 /mnt/d 上直接编译会因 drvfs 压力 OOM，target 放到 WSL 本地盘
+# 在 /mnt/d 上直接编译会因 drvfs 压力 OOM，target 放到 WSL 本地盘。
+# 不要移动 rust-toolchain.toml：它决定工具链，移走会让构建版本漂移。
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/svcd-meow-target}
-[ -f rust-toolchain.toml ] && mv rust-toolchain.toml rust-toolchain.toml.bak
 JOBS=${JOBS:-4}
-cargo build --release -j "$JOBS" --target "$PLATFORM"
+cargo build --release --locked -j "$JOBS" --target "$PLATFORM"
 cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow" "$HERE/out/$NAME"

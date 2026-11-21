@@ -1,38 +1,66 @@
-# hysteria — Shell 插件模板
+# hysteria — Hysteria2 服务端
 
-把一条已有命令包装成能力。只写 `case` 分支，协议在 `package/payload/lib/svcd-plugin.sh` 里。
+把 [mini-sb-agent](https://github.com/ashvvvvv/mini-sb-agent)（sing-box 内核）
+编译成 svcd 插件，用一份 sing-box 配置跑 Hysteria2 入站。插件没有 JSON-RPC
+能力；生命周期是 `start` / `stop` / `status`。
 
 ## 布局
 
 ```
-package/                        ← 打包根：里面有什么，包里就有什么
+vendor/mini-sb-agent/      Go 源码
+build.json                 go build 配方
+build.sh                   平台映射
+package/
 ├── manifest.json
-└── payload/
-    ├── bin/hysteria.sh         ← 你的代码（提交）
-    └── lib/svcd-plugin.sh      ← 协议壳（由 sdk/shell 同步，勿手改）
+├── config/config          sing-box 配置模板（@CERT@ / @KEY@ / @PASSWORD@ 占位）
+└── payload/bin/hysteria.sh 生命周期包装
+    └── mini-sb-agent       构建产物
 ```
 
-## 能力清单要和代码对上
+## 运行方式
 
-manifest 的 `capabilities[]` 是 MCP 面上暴露的工具；`handle()` 里的 `case` 分支是实现。
-两边一旦漂移，工具会"存在但调用必错"。shell 没法编译期检查，所以改一处就同步改另一处。
+宿主把 `lifecycle.start` 当成常驻前台进程，所以 `hysteria.sh start` 直接
+`exec mini-sb-agent -config …`。启动前会：
 
-## 命令
+1. 从活动配置（`plugin editconfig hysteria`）或 `package/config/config` 取模板；
+2. 首次启动用 `openssl` 生成自签 TLS 证书到 `$SVCD_DATA_DIR/hysteria/`；
+3. 首次启动生成 32 位十六进制密码到同目录的 `password`；
+4. 替换 `@CERT@`、`@KEY@`、`@PASSWORD@`，再启动内核。
+
+默认入站 `0.0.0.0:8443/udp`（Hysteria2 基于 QUIC），出站 `direct`。要接
+meow 的本地代理，把配置的 `route.final` 改成 `meow`，并加一个
+`{"type":"socks","tag":"meow","server":"127.0.0.1","server_port":7890}`
+出站。
+
+客户端连接信息：
 
 ```bash
-plugin-tools template <name> --lang shell --webui   # 只创建项目
-plugin-tools build                                   # 打包（默认本机三元组，未签名）
-plugin-tools build --platform aarch64-unknown-linux-musl
-plugin-tools check dist/xxx.spk
+cat "$SVCD_DATA_DIR/hysteria/password"   # 默认 ~/.local/share/svcd/hysteria/password
 ```
 
-`--webui` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是
-`uname` / `date` 两个能力，和后端是 shell 还是 rust 无关。
+自签证书需要在客户端跳过证书校验，或把 `cert.pem` 分发给客户端。
 
-`pack` 的 `interpreter.name` 写的是 `sh`，且**故意不写 `version`**：`sh` 会走 `--version`
-探测，而 Debian 的 sh 是 dash，探测会报非法选项、安装直接被拒。
+### 配置里的占位符
 
-## 边界
+控制台编辑的是活动配置，里面会出现三个占位符：
 
-POSIX sh 里没有 JSON 解析器，所以这个壳只给 handler 两样东西：能力名，和原样的
-`arguments` 字符串。参数是扁平字符串时够用；需要真正解析 JSON 的插件请用 Rust 模板。
+| 占位符 | 启动时替换成 |
+| --- | --- |
+| `@PASSWORD@` | `$SVCD_DATA_DIR/hysteria/password` 的内容（首次启动生成） |
+| `@CERT@` | `$SVCD_DATA_DIR/hysteria/cert.pem` |
+| `@KEY@` | `$SVCD_DATA_DIR/hysteria/key.pem` |
+
+- 保存后需要 `plugin restart hysteria`（或 stop/start）才生效；脚本每次启动都会重新渲染。
+- 想改密码：改 `password` 文件后重启，或者把 `@PASSWORD@` 直接替换成新的字面密码。
+- 想用自己的证书：把 `@CERT@` / `@KEY@` 替换成证书和私钥的实际路径；替换后不再自动生成自签证书。
+- 其他字段（`listen_port`、`outbounds`、`route` 等）直接改，重启即生效。
+
+## 构建
+
+```bash
+plugin-tools build --platform x86_64-unknown-linux-gnu
+plugin-tools check dist/hysteria-1.0.0-x86_64-unknown-linux-gnu.spk
+```
+
+需要 Go 1.25+（vendor 的 `go.mod`）和网络拉模块依赖。平台声明为 Linux +
+macOS；Windows 不在列表里，因为入口是 POSIX sh 包装。

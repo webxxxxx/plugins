@@ -38,30 +38,25 @@
 <div class="status" id="status">就绪</div>
 
 <script>
+function normalizeBase(value) {
+    if (typeof value !== 'string') return '';
+    const v = value.trim();
+    if (!v || v === 'null' || v === 'undefined') return '';
+    return v.replace(/\/+$/, '');
+}
+
 const rawData = localStorage.getItem('yacd.metacubex.one');
-API = null;
-SECRET = null;
+let API = '';
+let SECRET = null;
 if (rawData) {
     try {
-        // 2. 将字符串解析为 JavaScript 对象
         const data = JSON.parse(rawData);
-
-        // 3. 根据截图，选中项的索引是 1 (selectedClashAPIConfigIndex)
         const activeIndex = data.selectedClashAPIConfigIndex;
-
-        // 4. 获取对应的配置对象
-        const activeConfig = data.clashAPIConfigs[activeIndex];
-
+        const activeConfig = (data.clashAPIConfigs || [])[activeIndex];
         if (activeConfig) {
-            const baseURL = activeConfig.baseURL;
-            const secret = activeConfig.secret;
-
-            console.log("BaseURL:", baseURL);
-            console.log("Secret:", secret);
-            API = baseURL;
-            SECRET = secret;
-
-            // 你可以在这里把这两个变量赋给你的全局变量或发送给请求
+            API = normalizeBase(activeConfig.baseURL);
+            SECRET = activeConfig.secret || null;
+            console.log("BaseURL:", API || "(fallback)", "Secret:", SECRET ? "set" : "unset");
         } else {
             console.error("未找到对应的配置项");
         }
@@ -71,6 +66,10 @@ if (rawData) {
 } else {
     console.log("Local Storage 中不存在键名为 'yacd.metacubex.one' 的数据");
 }
+
+// 这个页面本身就由 meow 的 external-controller 提供；localStorage 里的
+// baseURL 为空/失效时，直接回退到当前 origin，避免拼出 /ui/null/api/...
+API = API || window.location.origin;
 
 function headers() {
   const h = { "Content-Type": "application/json" };

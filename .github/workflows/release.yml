@@ -1,0 +1,436 @@
+name: release
+
+# 发布规则：
+#   v<version>              -> 项目 plugin-tools + plugins/ 下全部插件
+#   <plugin>-v<version>     -> 只发布该插件（版本必须与插件 manifest 一致）
+# PR 只构建校验，不发布；workflow_dispatch 可手动选择 all 或单个插件。
+
+on:
+  push:
+    tags: ["v*", "*-v*"]
+  pull_request:
+    paths:
+      - "plugins/**"
+      - "tools/cli/**"
+      - "sdk/**"
+      - "templates/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v1.0.0 or hysteria-v1.0.1 (required when release=true)"
+        required: false
+      plugin:
+        description: "all, or one plugin directory name (hysteria / meow / sshd)"
+        required: false
+        default: "all"
+      release:
+        description: "Create or update a GitHub Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: preflight
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+      filter: ${{ steps.scope.outputs.filter }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: scope
+        name: Determine release scope
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_PLUGIN: ${{ github.event.inputs.plugin }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then tag="$GITHUB_REF_NAME"; fi
+          requested="${INPUT_PLUGIN:-all}"
+          filter=""
+          case "$tag" in
+            *-v*) filter="${tag%%-v*}" ;;
+          esac
+          if [ -n "$requested" ] && [ "$requested" != "all" ]; then filter="$requested"; fi
+          if [ -z "$filter" ]; then filter=all; fi
+
+          if [ "${{ github.event.inputs.release }}" = "true" ] && [ -z "${{ github.event.inputs.tag }}" ]; then
+            echo "::error::workflow_dispatch release requires a tag input"
+            exit 1
+          fi
+
+          if [ "$filter" != "all" ]; then
+            if [ ! -f "plugins/$filter/.plugin.json" ]; then
+              echo "::error::unknown plugin '$filter' (no plugins/$filter/.plugin.json)"
+              exit 1
+            fi
+            is_release=false
+            if [ "$GITHUB_REF_TYPE" = "tag" ] || [ "${{ github.event.inputs.release }}" = "true" ]; then
+              is_release=true
+            fi
+            if [ "$is_release" = true ]; then
+              case "$tag" in
+                "$filter"-v*) ;;
+                *)
+                  echo "::error::per-plugin release tag must look like $filter-v<version>, got $tag"
+                  exit 1
+                  ;;
+              esac
+              version="${tag#"$filter"-v}"
+              base="${version%%-*}"
+              manifest_version=$(jq -r '.version // empty' "plugins/$filter/package/manifest.json")
+              if [ -z "$manifest_version" ] || [ "$base" != "$manifest_version" ]; then
+                echo "::error::tag version $base does not match plugins/$filter/package/manifest.json version $manifest_version"
+                exit 1
+              fi
+            fi
+          fi
+
+          echo "filter=$filter" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - id: version
+        name: Read plugin-tools version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' tools/cli/Cargo.toml | head -n 1)
+          if [ -z "$version" ]; then
+            echo "::error::could not read the version from tools/cli/Cargo.toml"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: matrix
+        name: Build the plugin/platform matrix
+        shell: bash
+        env:
+          FILTER: ${{ steps.scope.outputs.filter }}
+        run: |
+          set -euo pipefail
+          entries='[]'
+          for dir in plugins/*/; do
+            if [ "$FILTER" != "all" ] && [ "${dir%/}" != "plugins/$FILTER" ]; then
+              continue
+            fi
+            manifest="${dir}.plugin.json"
+            [ -f "$manifest" ] || continue
+            name=$(jq -r '.name // empty' "$manifest")
+            [ -n "$name" ] || continue
+            platforms=$(jq -r '(.ci.platforms // .platforms // [])[]' "$manifest")
+            for platform in $platforms; do
+              case "$platform" in
+                *-apple-darwin) os=macos-15 ;;
+                *-windows-*)     os=windows-2025 ;;
+                *)               os=ubuntu-24.04 ;;
+              esac
+              entries=$(jq -c \
+                --arg plugin "$name" \
+                --arg dir "${dir%/}" \
+                --arg platform "$platform" \
+                --arg os "$os" \
+                '. + [{plugin: $plugin, dir: $dir, platform: $platform, os: $os}]' \
+                <<<"$entries")
+            done
+          done
+          if [ "$entries" = "[]" ]; then
+            echo "::error::no plugins with a .plugin.json were found"
+            exit 1
+          fi
+          echo "matrix={\"include\":$entries}" >> "$GITHUB_OUTPUT"
+
+  host:
+    name: host tools / ${{ matrix.os }}
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/cli -> target
+          key: host-tools-${{ matrix.os }}
+      - name: Build plugin-tools and the host CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path tools/cli/Cargo.toml
+          cargo install --locked --git https://github.com/webxxxxx/plugin-manager --bin svcd --root "$RUNNER_TEMP/host"
+          mkdir -p bin
+          cp tools/cli/target/release/plugin-tools bin/plugin-tools
+          cp "$RUNNER_TEMP/host/bin/svcd" bin/plugin
+          chmod +x bin/plugin bin/plugin-tools
+          ls -l bin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: host-${{ matrix.os }}
+          path: bin/
+          if-no-files-found: error
+          retention-days: 7
+
+  project:
+    name: plugin-tools / ${{ matrix.target }}
+    needs: preflight
+    if: needs.preflight.outputs.filter == 'all'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, kind: linux }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, kind: windows }
+          - { os: macos-15, target: universal2-apple-darwin, kind: macos }
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - name: Add macOS targets
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/cli -> target
+          key: project-${{ matrix.target }}
+      - name: Build (Linux)
+        if: matrix.kind == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path tools/cli/Cargo.toml
+          mkdir -p dist/stage
+          cp tools/cli/target/release/plugin-tools dist/stage/
+          cp README.md LICENSE dist/stage/
+          tar -C dist/stage -czf "dist/plugin-tools-${VERSION}-${TARGET}.tar.gz" .
+          rm -rf dist/stage
+      - name: Build (Windows)
+        if: matrix.kind == 'windows'
+        shell: pwsh
+        run: |
+          cargo build --locked --release --target ${{ matrix.target }} --manifest-path tools/cli/Cargo.toml
+          New-Item -ItemType Directory -Force dist/stage | Out-Null
+          Copy-Item "tools/cli/target/${{ matrix.target }}/release/plugin-tools.exe" dist/stage/
+          Copy-Item README.md, LICENSE dist/stage/
+          Compress-Archive -Path "dist/stage/*" -DestinationPath "dist/plugin-tools-${env:VERSION}-${env:TARGET}.zip"
+          Remove-Item -Recurse -Force dist/stage
+      - name: Build (macOS universal)
+        if: matrix.kind == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --manifest-path tools/cli/Cargo.toml --target aarch64-apple-darwin
+          cargo build --locked --release --manifest-path tools/cli/Cargo.toml --target x86_64-apple-darwin
+          mkdir -p dist/stage
+          lipo -create \
+            tools/cli/target/aarch64-apple-darwin/release/plugin-tools \
+            tools/cli/target/x86_64-apple-darwin/release/plugin-tools \
+            -output dist/stage/plugin-tools
+          chmod 755 dist/stage/plugin-tools
+          lipo -info dist/stage/plugin-tools
+          cp README.md LICENSE dist/stage/
+          tar -C dist/stage -czf "dist/plugin-tools-${VERSION}-${TARGET}.tar.gz" .
+          rm -rf dist/stage
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-tools-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  plugins:
+    name: ${{ matrix.plugin }} / ${{ matrix.platform }}
+    needs: [preflight, host]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    env:
+      CARGO_TERM_COLOR: always
+      SVCD_PLUGIN_BIN: ${{ github.workspace }}/bin/plugin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v5
+        with:
+          name: host-${{ matrix.os }}
+          path: bin
+      - name: Add host tools to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x bin/plugin bin/plugin-tools
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+      - name: Install Rust (meow only)
+        if: matrix.plugin == 'meow'
+        uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          targets: ${{ matrix.platform }}
+      - name: Install Go (hysteria only)
+        if: matrix.plugin == 'hysteria'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake clang libssl-dev pkg-config make perl curl xz-utils
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install cmake
+      - name: Install musl cross toolchains (sshd)
+        if: runner.os == 'Linux' && matrix.plugin == 'sshd' && (matrix.platform == 'aarch64-unknown-linux-musl' || matrix.platform == 'armv7-unknown-linux-musleabihf' || matrix.platform == 'x86_64-unknown-linux-musl')
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cross"
+          case "${{ matrix.platform }}" in
+            aarch64-unknown-linux-musl)
+              dir=aarch64-linux-musl-cross
+              url=https://musl.cc/aarch64-linux-musl-cross.tgz
+              ;;
+            armv7-unknown-linux-musleabihf)
+              dir=arm-linux-musleabihf-cross
+              url=https://musl.cc/arm-linux-musleabihf-cross.tgz
+              ;;
+            x86_64-unknown-linux-musl)
+              dir=x86_64-linux-musl-cross
+              url=https://musl.cc/x86_64-linux-musl-cross.tgz
+              ;;
+          esac
+          curl -fsSL "$url" | tar xz -C "$RUNNER_TEMP/cross"
+          echo "CROSS_PREFIX=$RUNNER_TEMP/cross/$dir" >> "$GITHUB_ENV"
+          echo "AARCH64_CROSS=$RUNNER_TEMP/cross/aarch64-linux-musl-cross" >> "$GITHUB_ENV"
+          echo "X86_64_MUSL_CROSS=$RUNNER_TEMP/cross/x86_64-linux-musl-cross" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/cross/$dir/bin" >> "$GITHUB_PATH"
+      - name: Build .spk
+        shell: bash
+        env:
+          PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          require_signing="${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.release == 'true' }}"
+          args=()
+          if [ -n "${PLUGIN_SIGNING_KEY:-}" ]; then
+            printf '%s' "$PLUGIN_SIGNING_KEY" > "$RUNNER_TEMP/signing.pem"
+            chmod 600 "$RUNNER_TEMP/signing.pem"
+            args+=(--key "$RUNNER_TEMP/signing.pem")
+          elif [ "$require_signing" = "true" ]; then
+            echo "::error::PLUGIN_SIGNING_KEY is required for a release build"
+            exit 1
+          fi
+          cd "plugins/${{ matrix.dir }}"
+          plugin-tools build --platform "${{ matrix.platform }}" "${args[@]}"
+      - name: Verify .spk
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=()
+          if [ -f "$RUNNER_TEMP/signing.pem" ]; then
+            openssl pkey -in "$RUNNER_TEMP/signing.pem" -pubout -out "$RUNNER_TEMP/signing.pub"
+            args+=(--pubkey "$RUNNER_TEMP/signing.pub")
+          fi
+          found=0
+          for spk in "plugins/${{ matrix.dir }}/dist/"*.spk; do
+            [ -f "$spk" ] || continue
+            found=1
+            plugin verify "$spk" "${args[@]}"
+          done
+          [ "$found" = "1" ] || { echo "::error::no .spk was produced"; exit 1; }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: spk-${{ matrix.plugin }}-${{ matrix.platform }}
+          path: plugins/${{ matrix.dir }}/dist/*.spk
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: publish release
+    needs: [preflight, plugins, project]
+    if: |
+      !cancelled()
+      && needs.preflight.result == 'success'
+      && needs.plugins.result == 'success'
+      && (needs.project.result == 'success' || needs.project.result == 'skipped')
+      && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.release == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          pattern: spk-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v5
+        if: needs.project.result == 'success'
+        with:
+          path: dist
+          pattern: plugin-tools-*
+          merge-multiple: true
+      - name: Verify the artifact set
+        shell: bash
+        env:
+          FILTER: ${{ needs.preflight.outputs.filter }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          spk=$(find dist -maxdepth 1 -type f -name '*.spk' | wc -l | tr -d ' ')
+          tool=$(find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.zip' \) | wc -l | tr -d ' ')
+          if [ "$spk" -lt 1 ]; then
+            echo "::error::no plugin .spk was produced (spk=$spk)"
+            exit 1
+          fi
+          if [ "$FILTER" = "all" ] && [ "$tool" -lt 1 ]; then
+            echo "::error::expected plugin-tools archives for a full release (tool=$tool)"
+            exit 1
+          fi
+      - name: Write SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f \( -name '*.spk' -o -name '*.tar.gz' -o -name '*.zip' \) -printf '%f\n' \
+            | sort | xargs -r sha256sum > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish the GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="$TAG"
+          if [ -z "$tag" ]; then tag="$GITHUB_REF_NAME"; fi
+          if [ -z "$tag" ] || [ "$tag" = "main" ]; then
+            echo "::error::a release tag is required (workflow_dispatch input: tag)"
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          elif [[ "$tag" == *-* ]]; then
+            gh release create "$tag" dist/* --title "$tag" --generate-notes --prerelease
+          else
+            gh release create "$tag" dist/* --title "$tag" --generate-notes
+          fi

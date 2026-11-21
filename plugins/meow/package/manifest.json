@@ -1,27 +1,40 @@
 {
+  "schema": 2,
   "name": "meow",
   "version": "1.0.0",
-  "desc": "meow 代理：mihomo 内核，带 yacd 面板",
+  "desc": "meow 代理：mihomo 兼容内核，带 yacd 面板",
   "protocol": 1,
   "interpreter": {
     "name": "sh"
   },
   "exec": {
-    "path": "payload/bin/meow.sh"
+    "path": "payload/bin/meow.sh",
+    "ready": "exec"
   },
   "lifecycle": {
     "start": {
       "path": "payload/bin/meow.sh",
-      "args": ["start"]
+      "args": [
+        "start"
+      ]
     },
     "stop": {
       "path": "payload/bin/meow.sh",
-      "args": ["stop"]
+      "args": [
+        "stop"
+      ]
     },
     "status": {
       "path": "payload/bin/meow.sh",
-      "args": ["status"]
+      "args": [
+        "status"
+      ]
     }
   },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "config": "config/config",
   "capabilities": []
 }

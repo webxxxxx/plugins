@@ -1,97 +1,90 @@
 #!/bin/sh
-# sshd：dropbear + sftp-server 的插件包装。能力：start / stop / status。
+# sshd：dropbear + sftp-server 的生命周期包装。
+#
+# 宿主把 lifecycle.start 当成常驻前台进程，所以 start 必须 exec 到 dropbear，
+# 不能像旧版那样 start 完就 exit（那样宿主只看到一个已经退出的进程）。
+# stop / status 由宿主按 manifest.lifecycle 带参数调用，执行完即退出。
 set -u
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-. "$HERE/../lib/svcd-plugin.sh"
 
-DATA=${SVCD_DATA_DIR:-$HERE/.sshd}
-mkdir -p "$DATA" 2>/dev/null || true
-PORT=$(svcd_config_get port); PORT=${PORT:-22}
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PLUGIN_ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
+BASE=${SVCD_DATA_DIR:-$PLUGIN_ROOT/.data}
+DATA="$BASE/sshd"
+
 MULTI="$HERE/sshd"
+SFTP_BIN="$HERE/sftp-server"
+
+PORT=2222
+CONFIG="$PLUGIN_ROOT/config"
+if [ -f "$CONFIG" ]; then
+    configured=$(sed -n 's/^[[:space:]]*port[[:space:]]*[:=][[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | head -n 1)
+    [ -n "$configured" ] && PORT=$configured
+fi
+
 PIDFILE="$DATA/dropbear.pid"
 KEY="$DATA/dropbear_host_key"
 
-# dropbearmulti 按 argv[0] 分派，需要 dropbear / dropbearkey 这两个名字
+fail() { echo "sshd: $*" >&2; return 1; }
+
 link_applets() {
-    ln -sf "$MULTI" "$DATA/dropbear" 2>/dev/null || true
-    ln -sf "$MULTI" "$DATA/dropbearkey" 2>/dev/null || true
+    mkdir -p "$DATA" || return 1
+    ln -sf "$MULTI" "$DATA/dropbear" 2>/dev/null || return 1
+    ln -sf "$MULTI" "$DATA/dropbearkey" 2>/dev/null || return 1
 }
 
 running() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
 }
 
-# dropbear 只认 /usr/libexec/sftp-server；包里的副本在需要时放到那儿
-deploy_sftp() {
-    [ -x /usr/libexec/sftp-server ] && return 0
-    mkdir -p /usr/libexec 2>/dev/null || true
-    cp "$HERE/sftp-server" /usr/libexec/sftp-server 2>/dev/null || true
-    chmod 755 /usr/libexec/sftp-server 2>/dev/null || true
-}
-
 do_start() {
-    link_applets
-    deploy_sftp
+    link_applets || fail "不能创建 dropbear/dropbearkey 符号链接"
+    [ -x "$SFTP_BIN" ] || fail "缺少 $SFTP_BIN"
     if running; then
-        printf 'already running (pid %s, port %s)' "$(cat "$PIDFILE")" "$PORT"
-        return 0
-    fi
-    [ -f "$KEY" ] || "$DATA/dropbearkey" -t ed25519 -f "$KEY" >/dev/null 2>&1 || true
-    "$DATA/dropbear" -p "$PORT" -r "$KEY" -P "$PIDFILE" >/dev/null 2>&1 || true
-    sleep 1
-    if running; then
-        printf 'started (pid %s, port %s)' "$(cat "$PIDFILE")" "$PORT"
-    else
-        echo 'start failed: dropbear did not stay up' >&2
+        echo "already running (pid $(cat "$PIDFILE"), port $PORT)"
+        # lifecycle.start 是宿主管理的前台进程；已经有人占着端口时不要假装成功。
         return 1
     fi
+    if [ ! -f "$KEY" ]; then
+        "$DATA/dropbearkey" -t ed25519 -f "$KEY" >/dev/null 2>&1 || fail "生成主机密钥失败"
+    fi
+    echo $$ > "$PIDFILE"
+    echo "sshd starting on port $PORT" >&2
+    # dropbear 的 sftp 子系统路径由补丁优先读这个环境变量；值来自包内相对路径。
+    SVCD_SFTP_SERVER="$SFTP_BIN"
+    export SVCD_SFTP_SERVER
+    # -F 前台运行，-P 写 pid（dropbear 退出时会清理），-r 主机密钥。
+    exec "$DATA/dropbear" -F -p "$PORT" -r "$KEY" -P "$PIDFILE"
 }
 
 do_stop() {
     if running; then
-        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        pid=$(cat "$PIDFILE")
+        kill "$pid" 2>/dev/null || true
+        n=0
+        while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 5 ]; do
+            n=$((n + 1))
+            sleep 1
+        done
+        kill -9 "$pid" 2>/dev/null || true
         rm -f "$PIDFILE"
-        printf 'stopped'
+        echo "stopped (pid $pid)"
     else
         rm -f "$PIDFILE"
-        printf 'not running'
+        echo "not running"
     fi
 }
 
 do_status() {
     if running; then
-        printf '{"running":true,"pid":%s,"port":%s}' "$(cat "$PIDFILE")" "$PORT"
+        printf '{"running":true,"pid":%s,"port":%s}\n' "$(cat "$PIDFILE")" "$PORT"
     else
-        printf '{"running":false,"port":%s}' "$PORT"
+        printf '{"running":false,"port":%s}\n' "$PORT"
     fi
 }
 
-handle() {
-    case "$1" in
-    start) do_start ;;
-    stop) do_stop ;;
-    status) do_status ;;
-    *) echo "unknown tool: $1" >&2; return 1 ;;
-    esac
-}
-
-# 生命周期入口：宿主按 manifest.lifecycle 用参数调用，执行完即退出。
 case "${1:-}" in
-start)
-    do_start
-    exit $?
-    ;;
-stop)
-    do_stop
-    exit $?
-    ;;
-status)
-    do_status
-    exit $?
-    ;;
+start)  do_start ;;
+stop)   do_stop ;;
+status) do_status ;;
+*)      echo "usage: $0 start|stop|status" >&2; exit 2 ;;
 esac
-
-# 无参数：作为插件进程常驻，先把守护进程拉起来，再进入协议循环。
-do_start >&2 || true
-
-svcd_plugin_serve handle

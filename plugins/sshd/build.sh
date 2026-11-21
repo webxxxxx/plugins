@@ -36,7 +36,7 @@ case "$PLATFORM" in
     echo "sshd: $PLATFORM 没有 dropbear 移植（上游无 Windows 版本）" >&2
     exit 1 ;;
 esac
-[ -n "$CROSS" ] && export PATH="$CROSS/bin:$PATH"
+if [ -n "$CROSS" ]; then export PATH="$CROSS/bin:$PATH"; fi
 if [ "$HOST" = "x86_64-linux-gnu" ]; then
   CC_CMD=gcc
 elif [ "$PLATFORM" = "aarch64-apple-darwin" ] || [ "$PLATFORM" = "x86_64-apple-darwin" ]; then
@@ -47,6 +47,8 @@ fi
 
 cd "$HERE/vendor/dropbear-2022.83"
 make distclean >/dev/null 2>&1 || true
+# 不写死 sftp 路径：运行时 sshd.sh 通过 SVCD_SFTP_SERVER 传入包内相对路径。
+rm -f localoptions.h
 CC=$CC_CMD CFLAGS="-Os -ffunction-sections -fdata-sections -fno-pie -fno-PIE $EXTRA" \
 LDFLAGS="-static -no-pie -Wl,-no-pie -Wl,--gc-sections -Wl,--strip-all" \
 ./configure --host=$HOST --enable-static --disable-harden --disable-zlib --disable-pam \
@@ -63,3 +65,6 @@ make -j"$(nproc)" sftp-server || true
 $CC_CMD -o "$HERE/out/sftp-server" sftp-common.o sftp-server.o sftp-server-main.o \
   -static -no-pie -L. -Lopenbsd-compat -lssh -lopenbsd-compat -lssh
 ${HOST}-strip "$HERE/out/sftp-server" 2>/dev/null || strip "$HERE/out/sftp-server"
+
+mkdir -p "$HERE/package/payload/bin"
+cp "$HERE/out/sftp-server" "$HERE/package/payload/bin/sftp-server"

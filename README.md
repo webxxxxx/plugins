@@ -37,6 +37,37 @@ cd tools/cli && cargo build --release
 
 `.github/workflows/test.yml` 在两个操作系统上跑 SDK、工具链与 Rust 样例的测试，并给四种语言各脚手架一次；`.github/workflows/build.yml` 先构建宿主的 `plugin` CLI，再用它打包每份样例并 `verify`，产物作为 artifact 上传。没有 Node、没有 daemon，跑的全是 `plugin bundle` 的本地路径。
 
+## 发布
+
+`.github/workflows/release.yml` 处理发布。两种 tag：
+
+- **全量发布**：`v*`（如 `v1.0.0`）构建 `plugin-tools` + `plugins/` 下全部插件；
+- **单插件发布**：`<plugin>-v*`（如 `hysteria-v1.0.1`）只构建该插件，tag 版本必须等于该插件 `package/manifest.json` 的 `version`。
+
+单插件发布示例：
+
+```bash
+# 先把 plugins/hysteria/package/manifest.json 的 version 改成 1.0.1
+git tag hysteria-v1.0.1
+git push origin hysteria-v1.0.1
+```
+
+tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代码、不 bump 版本时 workflow 会直接报错。
+
+手动 `workflow_dispatch` 也可以选 `plugin=all` 或单个插件名（配合 `tag` 和 `release`）。
+
+每次发布：
+
+- **项目本身**：构建 `plugin-tools`，产出 Linux x86_64 gnu、Windows x86_64 msvc、macOS universal2 三份归档（仅全量发布）；
+- **`plugins/` 下的插件**：自动发现 `plugins/*/.plugin.json`，按 `ci.platforms`（没有就 `platforms`）生成矩阵，逐个平台构建 `.spk`；
+- **发布**：汇总 `.spk`、`plugin-tools` 归档和 `SHA256SUMS`，`gh release create/upload` 到同一个 Release；tag 带 `-`（如 `v1.0.0-rc1`、`hysteria-v1.0.1-rc1`）自动标 prerelease。
+
+插件构建使用仓库存的 `secrets.PLUGIN_SIGNING_KEY`（Ed25519 PKCS#8 PEM）。没有这个 secret 时 PR 只做未签名构建；tag / 手动发布则直接失败，避免发出未签名包。
+
+### CI 平台覆盖
+
+每个插件的 `.plugin.json` 可以写 `ci.platforms` 覆盖发布矩阵；meow 因 BoringSSL 交叉链目前只覆盖 Linux x86_64 gnu + 两种 macOS。完整的 `platforms` 仍可用于本地构建。
+
 ## 两条命令
 
 ```bash
