@@ -338,7 +338,7 @@ jobs:
             echo "::error::PLUGIN_SIGNING_KEY is required for a release build"
             exit 1
           fi
-          cd "plugins/${{ matrix.dir }}"
+          cd "${{ matrix.dir }}"
           plugin-tools build --platform "${{ matrix.platform }}" "${args[@]}"
       - name: Verify .spk
         shell: bash
@@ -350,7 +350,7 @@ jobs:
             args+=(--pubkey "$RUNNER_TEMP/signing.pub")
           fi
           found=0
-          for spk in "plugins/${{ matrix.dir }}/dist/"*.spk; do
+          for spk in "${{ matrix.dir }}/dist/"*.spk; do
             [ -f "$spk" ] || continue
             found=1
             plugin verify "$spk" "${args[@]}"
@@ -359,7 +359,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: spk-${{ matrix.plugin }}-${{ matrix.platform }}
-          path: plugins/${{ matrix.dir }}/dist/*.spk
+          path: ${{ matrix.dir }}/dist/*.spk
           if-no-files-found: error
           retention-days: 7
 
