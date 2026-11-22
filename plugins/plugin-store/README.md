@@ -82,9 +82,10 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   的 sha256 校验归档 → 才走 `svcd upgrade --file`。
 - `download: true` 的结果只有 blob，**不带** `tag`/`version`/`assets`；元数据一律来自
   第一次查询。`asset` 必须是 `assets[].name` 里的精确名字，未知名字报错并列出候选。
-- 同一 release 的资产全部列出；单文件超过 256 MiB 直接拒绝，不截断。
+- 列出可下载的资产（GitHub 标记为 `uploaded` 且带文件名/大小/下载地址的那些）；单文件超过
+  256 MiB 直接拒绝，不截断。
 - 查询带 `User-Agent: plugin-store/<version>`，匿名配额 60 次/小时；403/429 只有在
-  确实是限流（剩余 0、429 或文案含 rate limit）时才报限流，否则报「拒绝访问」，
+  确实是限流（剩余 0、HTTP 429，或文案含 rate limit/abuse）时才报限流，否则报「拒绝访问」，
   都给出可读错误而不是裸 403。
 - 下载复用直连 + DoH 回退与代理，但**不走** `PLUGIN_STORE_MIRROR`：镜像可以决定插件包，
   不能决定 svcd 本体的字节。版本不缓存，每次升级都重新查、重新下；失败时清掉 `.part`。
@@ -101,7 +102,7 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   `incoming/` 下；不依赖外网。限流响应另有一条本地假 403 用例，直接驱动 `net::fetch_json`
   验证 `x-ratelimit-*` 头与可读文案。
 - 构建：`plugin-tools build --platform x86_64-pc-windows-msvc` 产出
-  `dist/plugin-store-0.1.10-x86_64-pc-windows-msvc.spk`（未签名本地包），`plugin verify`
+  `dist/plugin-store-<version>-x86_64-pc-windows-msvc.spk`（未签名本地包），`plugin verify`
   返回 `ok: true`、`signature.state: "missing"`；发布包需在发布流程里用发布钥签名。
 
 ## 构建

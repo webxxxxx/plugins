@@ -71,6 +71,8 @@ struct PluginStore {
     temp_dir: PathBuf,
     own_id: String,
     cancel: Cancel,
+    /// GitHub REST root; only tests point this somewhere else.
+    api_base: String,
 }
 
 impl Plugin for PluginStore {
@@ -505,36 +507,39 @@ impl PluginStore {
     /// Downloads deliberately skip `PLUGIN_STORE_MIRROR`: a mirror may serve
     /// plugins, not the daemon itself.
     fn release_asset(&self, arguments: &Value) -> ToolOutcome {
-        let repo = match arguments.get("repo") {
-            None => release::DEFAULT_REPO,
-            Some(Value::String(value)) if !value.trim().is_empty() => value.trim(),
-            Some(_) => return ToolOutcome::error("repo 必须是 owner/name 字符串"),
+        let repo = match optional(arguments, "repo") {
+            Ok(Some(repo)) => repo,
+            Ok(None) => release::DEFAULT_REPO,
+            Err(error) => return ToolOutcome::error(error),
         };
         let download = match arguments.get("download") {
             None => false,
             Some(Value::Bool(value)) => *value,
             Some(_) => return ToolOutcome::error("download 只能是 true 或 false"),
         };
-        let asset_name = match arguments.get("asset") {
-            None => None,
-            Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim()),
-            Some(_) => return ToolOutcome::error("asset 必须是非空字符串"),
+        let asset_name = match optional(arguments, "asset") {
+            Ok(asset) => asset,
+            Err(error) => return ToolOutcome::error(error),
         };
-        if download && asset_name.is_none() {
-            return ToolOutcome::error("download=true 时必须给 asset 文件名");
-        }
+        // Validate the download target before the API call, so a missing name
+        // never burns a request from the anonymous quota.
+        let download_target = if download {
+            match asset_name {
+                Some(name) => Some(name),
+                None => return ToolOutcome::error("download=true 时必须给 asset 文件名"),
+            }
+        } else {
+            None
+        };
 
-        let release = match release::fetch(repo, &|url| net::fetch_json(url)) {
+        let release = match release::fetch_at(&self.api_base, repo, &|url| net::fetch_json(url)) {
             Ok(release) => release,
             Err(error) => return ToolOutcome::error(error),
         };
-        if !download {
-            return ToolOutcome::text(release::check_json(&release).to_string());
-        }
-        let Some(asset_name) = asset_name else {
-            return ToolOutcome::error("download=true 时必须给 asset 文件名");
+        let Some(asset_name) = download_target else {
+            return ToolOutcome::text(release::release_json(&release).to_string());
         };
-        let asset = match release::find_asset(&release, asset_name) {
+        let asset = match release::download_asset(&release, asset_name) {
             Ok(asset) => asset,
             Err(error) => return ToolOutcome::error(error),
         };
@@ -558,6 +563,16 @@ fn required<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("缺少参数 {key}"))
+}
+
+/// An optional string argument: absent means `None`, but a present non-string
+/// or an empty string is an error rather than a silent fallback.
+fn optional<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>, String> {
+    match arguments.get(key) {
+        None => Ok(None),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(Some(value.trim())),
+        Some(_) => Err(format!("{key} 必须是非空字符串")),
+    }
 }
 
 /// The host installs a package as <data>/plugins/<id>/<version>/payload/bin/<exe>.
@@ -981,6 +996,7 @@ fn main() -> Exit {
             temp_dir,
             own_id,
             cancel,
+            api_base: release::API.to_string(),
         },
     )
 }
@@ -1111,6 +1127,7 @@ mod tests {
             temp_dir: dir.to_path_buf(),
             own_id: "plugin-store".into(),
             cancel: Cancel::default(),
+            api_base: release::API.into(),
         }
     }
 
@@ -1235,6 +1252,116 @@ mod tests {
             }
         }
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_asset_returns_exactly_one_blob_per_download() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let archive = b"zip-payload".to_vec();
+        let sums = b"aa11  svcd-0.1.5-x86_64-pc-windows-msvc.zip\n".to_vec();
+        let release_body = json!({
+            "tag_name": "v0.1.5",
+            "draft": false,
+            "prerelease": false,
+            "assets": [
+                {
+                    "name": "SHA256SUMS",
+                    "size": sums.len(),
+                    "browser_download_url": format!("http://{address}/download/SHA256SUMS")
+                },
+                {
+                    "name": "svcd-0.1.5-x86_64-pc-windows-msvc.zip",
+                    "size": archive.len(),
+                    "browser_download_url": format!("http://{address}/download/archive.zip")
+                }
+            ]
+        })
+        .to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server_archive = archive.clone();
+        let server_sums = sums.clone();
+        let server = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !server_stop.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                };
+                let mut request = [0u8; 2048];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (body, content_type) = if path.ends_with("/releases/latest") {
+                    (release_body.clone().into_bytes(), "application/json")
+                } else if path.ends_with("/SHA256SUMS") {
+                    (server_sums.clone(), "text/plain")
+                } else {
+                    (server_archive.clone(), "application/octet-stream")
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-release-tool-{}-{}",
+            std::process::id(),
+            address.port()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = PluginStore {
+            api_base: format!("http://{address}"),
+            ..store_with(&dir, job("done"))
+        };
+
+        match store.release_asset(&json!({})) {
+            ToolOutcome::Text(text) => {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(value["tag"], "v0.1.5");
+                assert_eq!(value["version"], "0.1.5");
+                assert_eq!(value["sumsAsset"], "SHA256SUMS");
+                assert_eq!(value["assets"].as_array().unwrap().len(), 2);
+            }
+            _ => panic!("the metadata call must answer with JSON text"),
+        }
+
+        match store.release_asset(&json!({
+            "download": true,
+            "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zip"
+        })) {
+            ToolOutcome::Blob {
+                path,
+                name,
+                mime_type,
+            } => {
+                assert_eq!(name, "svcd-0.1.5-x86_64-pc-windows-msvc.zip");
+                assert_eq!(mime_type, "application/octet-stream");
+                assert_eq!(fs::read(path).unwrap(), archive);
+            }
+            _ => panic!("a download must be exactly one blob"),
+        }
+
+        match store.release_asset(&json!({ "download": true, "asset": "SHA256SUMS" })) {
+            ToolOutcome::Blob { path, .. } => assert_eq!(fs::read(path).unwrap(), sums),
+            _ => panic!("the checksum list must be exactly one blob"),
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 

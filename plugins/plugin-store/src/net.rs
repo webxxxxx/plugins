@@ -340,7 +340,7 @@ fn download_one(
         if downloaded > MAX_DOWNLOAD_BYTES {
             let _ = fs::remove_file(part);
             return Err(format!(
-                "{url}: 包超过 {} MiB",
+                "{url}: 文件超过 {} MiB",
                 MAX_DOWNLOAD_BYTES / 1024 / 1024
             ));
         }
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn candidates_keep_the_mirror_out_of_the_upgrade_path() {
+    fn candidates_list_the_mirror_first_only_when_one_is_given() {
         assert_eq!(
             candidates("https://github.com/x", Some("https://gh.example/{url}")),
             vec![

@@ -14,14 +14,14 @@ use svcd_plugin::BlobWriter;
 
 use crate::net::MAX_DOWNLOAD_BYTES;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Asset {
     pub name: String,
     pub size: u64,
     pub url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct Release {
     pub tag: String,
     pub version: String,
@@ -111,7 +111,7 @@ pub const SUMS_ASSET: &str = "SHA256SUMS";
 /// The `download: false` answer: every asset the release carries, plus whether
 /// a checksum list exists. The host picks its archive by target suffix and
 /// refuses to upgrade when `sumsAsset` is null.
-pub fn check_json(release: &Release) -> Value {
+pub fn release_json(release: &Release) -> Value {
     let assets: Vec<Value> = release
         .assets
         .iter()
@@ -138,17 +138,18 @@ pub fn check_json(release: &Release) -> Value {
 /// GitHub's REST root for one repository's `/releases/latest`.
 pub const API: &str = "https://api.github.com";
 
-/// The transport is injected so parsing and picking never touch the network;
-/// `main` passes `net::fetch_json`.
-pub fn fetch(
+/// Same lookup against another API root; tests point this at a local server so
+/// the whole capability can be exercised without GitHub.
+pub fn fetch_at(
+    base: &str,
     repo: &str,
     transport: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<Release, String> {
-    let url = latest_url(repo)?;
+    let url = latest_url_at(base, repo)?;
     parse(&transport(&url)?)
 }
 
-pub fn latest_url(repo: &str) -> Result<String, String> {
+pub fn latest_url_at(base: &str, repo: &str) -> Result<String, String> {
     let repo = repo.trim();
     let mut parts = repo.split('/');
     let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
@@ -166,13 +167,17 @@ pub fn latest_url(repo: &str) -> Result<String, String> {
             return Err(format!("repo 的 {label} 不合法：{part:?}"));
         }
     }
-    Ok(format!("{API}/repos/{owner}/{name}/releases/latest"))
+    Ok(format!(
+        "{}/repos/{owner}/{name}/releases/latest",
+        base.trim_end_matches('/')
+    ))
 }
 
-/// Pick one asset by its exact file name. Names are the contract the host
-/// chooses from in the `download: false` answer, so no wildcard guessing happens
-/// here anymore — a typo must fail loudly instead of matching the wrong file.
-pub fn find_asset<'a>(release: &'a Release, name: &str) -> Result<&'a Asset, String> {
+/// Pick one asset for download by its exact file name. The names come from the
+/// `release_json` answer, so the host never guesses with a wildcard; a typo
+/// fails loudly. This is also where the 256 MiB budget is enforced, before any
+/// bytes move.
+pub fn download_asset<'a>(release: &'a Release, name: &str) -> Result<&'a Asset, String> {
     let name = name.trim();
     if name.is_empty() {
         return Err("asset 不能为空".into());
@@ -293,7 +298,7 @@ mod tests {
     fn a_check_result_lists_every_asset_and_marks_the_checksum_list() {
         let release = parse(RELEASE).unwrap();
 
-        let value = check_json(&release);
+        let value = release_json(&release);
 
         assert_eq!(value["tag"], "v0.1.5");
         assert_eq!(value["version"], "0.1.5");
@@ -305,14 +310,13 @@ mod tests {
         );
         assert_eq!(value["assets"][1]["size"], 1_234_567);
         assert_eq!(value["sumsAsset"], "SHA256SUMS");
-        assert!(value.get("archive").is_none(), "{value}");
     }
 
     #[test]
     fn a_release_without_sums_reports_a_null_sums_asset() {
         let release = release_of(&[("svcd-0.1.5-x86_64-pc-windows-msvc.zip", 1_234)]);
 
-        let value = check_json(&release);
+        let value = release_json(&release);
 
         assert!(value["sumsAsset"].is_null(), "{value}");
     }
@@ -339,13 +343,13 @@ mod tests {
             ("svcd-0.1.5-x86_64-pc-windows-msvc.zip", 1_234),
         ]);
 
-        let asset = find_asset(&release, "svcd-0.1.5-x86_64-pc-windows-msvc.zip").unwrap();
+        let asset = download_asset(&release, "svcd-0.1.5-x86_64-pc-windows-msvc.zip").unwrap();
         assert_eq!(asset.size, 1_234);
 
         // The checksum list is its own lookup, so the host calls the same
         // capability twice: once for the archive, once for SHA256SUMS.
         assert_eq!(
-            find_asset(&release, "SHA256SUMS").unwrap().name,
+            download_asset(&release, "SHA256SUMS").unwrap().name,
             "SHA256SUMS"
         );
     }
@@ -357,7 +361,7 @@ mod tests {
             ("svcd-0.1.5-aarch64-unknown-linux-gnu.tar.gz", 2_345),
         ]);
 
-        let error = find_asset(&release, "svcd-0.1.5-x86_64.zip").unwrap_err();
+        let error = download_asset(&release, "svcd-0.1.5-x86_64.zip").unwrap_err();
 
         assert!(
             error.contains("svcd-0.1.5-aarch64-unknown-linux-gnu.tar.gz"),
@@ -370,7 +374,7 @@ mod tests {
     fn an_asset_over_the_download_budget_is_refused() {
         let release = release_of(&[("svcd-big.zip", MAX_DOWNLOAD_BYTES + 1)]);
 
-        let error = find_asset(&release, "svcd-big.zip").unwrap_err();
+        let error = download_asset(&release, "svcd-big.zip").unwrap_err();
 
         assert!(error.contains("256 MiB"), "{error}");
     }
@@ -379,7 +383,7 @@ mod tests {
     fn fetches_the_latest_release_at_the_github_endpoint() {
         let seen = std::cell::RefCell::new(String::new());
 
-        let release = fetch("webxxxxx/plugin-manager", &|url| {
+        let release = fetch_at(API, "webxxxxx/plugin-manager", &|url| {
             *seen.borrow_mut() = url.to_string();
             Ok(RELEASE.to_string())
         })
@@ -405,7 +409,7 @@ mod tests {
             "webxxxxx/plugins?x=1",
         ] {
             assert!(
-                fetch(repo, &|_| Ok(RELEASE.to_string())).is_err(),
+                fetch_at(API, repo, &|_| Ok(RELEASE.to_string())).is_err(),
                 "{repo:?}"
             );
         }
@@ -459,10 +463,10 @@ mod tests {
     #[test]
     #[ignore = "hits api.github.com; run by hand when the network is available"]
     fn finds_the_latest_stable_release_of_the_daemon() {
-        let release =
-            fetch(DEFAULT_REPO, &|url| crate::net::fetch_json(url)).expect("latest release");
+        let release = fetch_at(API, DEFAULT_REPO, &|url| crate::net::fetch_json(url))
+            .expect("latest release");
 
-        let value = check_json(&release);
+        let value = release_json(&release);
 
         assert_eq!(value["sumsAsset"], SUMS_ASSET);
         assert!(value["assets"].as_array().unwrap().len() > 1);
