@@ -1,9 +1,11 @@
 {
-  "schema": 2,
-  "name": "hello-powershell",
+  "schema": 1,
+  "id": "hello-powershell",
+  "name": "PowerShell 示例插件",
   "version": "1.0.0",
   "desc": "PowerShell reference plugin: blob and file package transfer",
   "protocol": 1,
+  "icons": { "png": "payload/icons/icon.png" },
   "interpreter": {
     "name": "powershell",
     "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
@@ -30,7 +32,17 @@
     {
       "name": "get_stats",
       "desc": "Counters and uptime as a JSON object",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "greeting": { "type": "string" },
+          "calls": { "type": "integer" },
+          "uptime_secs": { "type": "integer" },
+          "pid": { "type": "integer" }
+        },
+        "required": ["greeting", "calls", "uptime_secs", "pid"]
+      }
     },
     {
       "name": "count_text",

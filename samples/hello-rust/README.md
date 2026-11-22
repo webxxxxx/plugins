@@ -22,9 +22,9 @@
 
 ```bash
 cd samples/hello-rust
-node ../../tools/plugin-build.mjs      # 构建 + 打包（未签名）
-plugin install dist/hello-1.0.0-<triple>.spk
-plugin start hello
+plugin-tools build --platform <triple>   # 构建 + 打包（未签名）
+plugin install dist/hello-rust-1.0.0-<triple>.spk
+plugin start hello-rust
 ```
 
 宿主需要 `allow_insecure_install = on`（未签名包）。打开 UI 后可以试 echo、上传一个

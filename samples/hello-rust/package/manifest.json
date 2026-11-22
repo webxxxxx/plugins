@@ -1,9 +1,11 @@
 {
-  "schema": 2,
-  "name": "hello-rust",
+  "schema": 1,
+  "id": "hello-rust",
+  "name": "Rust 示例插件",
   "version": "1.0.0",
   "desc": "Reference plugin: capabilities, notifications, chunked file transfer",
   "protocol": 1,
+  "icons": { "png": "payload/icons/icon.png" },
   "exec": {
     "path": "payload/bin/hello-rust",
     "ready": "notify"
@@ -26,7 +28,17 @@
     {
       "name": "get_stats",
       "desc": "Counters and uptime as a JSON object",
-      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+      "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "greeting": { "type": "string" },
+          "calls": { "type": "integer" },
+          "ticks": { "type": "integer" },
+          "uptime_secs": { "type": "integer" }
+        },
+        "required": ["greeting", "calls", "ticks", "uptime_secs"]
+      }
     },
     {
       "name": "count_text",
