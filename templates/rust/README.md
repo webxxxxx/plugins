@@ -22,6 +22,9 @@ src/main.rs               ← 你的代码
 - `icons` 可选：`{"png"|"ico"|"icns": "<包内路径>"}`；`plugin-tools build` 会先校验文件存在且非空。
 - `platform` / `files[]` / `signature.json` 由打包器盖章，源清单里不要写。
 
+`build.json` 里的 `{name}` 展开成插件 **id**（不是显示名），默认等于项目名；把 `id` 改成
+别的值时，记得同步 `command` 与 `artifact` 里的路径。
+
 源码必须留在 `package/` 之外。`plugin bundle` 会无差别递归整个目录，放进去的
 `src/`、`Cargo.toml`、`target/` 都会被打进 `.spk`。
 

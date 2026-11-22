@@ -13,6 +13,9 @@ src/svcd_plugin.h         ← 协议壳（由 sdk/c 同步，勿手改）
 build.json                ← 构建配方
 ```
 
+`build.json` 里的 `{name}` 展开成插件 **id**（默认 = 项目名）；改 `id` 时同步 `command` 与
+`artifact` 的路径。
+
 ## 命令
 
 ```bash
