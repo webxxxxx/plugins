@@ -413,11 +413,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tar -C "${{ matrix.dir }}" -czf "$RUNNER_TEMP/pkg.tgz" package
+          tar -C "${{ matrix.dir }}" -czf pkg.tgz package
       - uses: actions/upload-artifact@v7
         with:
           name: pkg-${{ matrix.plugin }}-${{ matrix.platform }}
-          path: ${{ runner.temp }}/pkg.tgz
+          path: pkg.tgz
           if-no-files-found: error
           retention-days: 7
 
