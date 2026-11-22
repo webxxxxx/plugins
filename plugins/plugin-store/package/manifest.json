@@ -1,0 +1,108 @@
+{
+  "schema": 2,
+  "name": "plugin-store",
+  "version": "0.1.0",
+  "desc": "浏览、搜索并安装插件",
+  "protocol": 1,
+  "exec": {
+    "path": "payload/bin/plugin-store",
+    "ready": "notify"
+  },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "capabilities": [
+    {
+      "name": "list",
+      "desc": "分页列出当前设备支持的插件；按名称搜索",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "query": {
+            "type": "string",
+            "maxLength": 100
+          },
+          "scope": {
+            "type": "string",
+            "enum": ["device", "all"],
+            "default": "device"
+          },
+          "platform": {
+            "type": "string"
+          },
+          "device": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "install",
+      "desc": "下载并安装一个目录里的 .spk；下载走本地缓存，安装交给宿主 CLI",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "platform": { "type": "string" },
+          "device": { "type": "string" }
+        },
+        "required": ["name", "version", "platform"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "install_status",
+      "desc": "查询当前安装任务的进度",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "package_blob",
+      "desc": "把已下载的包变成宿主的 blob，交给浏览器 POST 到 /api/v1/plugins",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "version": { "type": "string" },
+          "platform": { "type": "string" },
+          "device": { "type": "string" }
+        },
+        "required": ["name", "version", "platform"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "install_result",
+      "desc": "记录浏览器调用宿主安装 API 的结果",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "message": { "type": "string" }
+        },
+        "required": ["ok"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "refresh",
+      "desc": "立即从远程刷新插件目录并写入本地缓存",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ]
+}

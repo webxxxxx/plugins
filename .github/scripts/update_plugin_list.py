@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Generate docs/plugins.md from the latest stable GitHub release assets.
 
-The page lists the newest .spk for every plugin/platform pair. A per-plugin
-release therefore only replaces that plugin's rows, while other plugins keep
-their current build.
+The page lists the newest .spk for every plugin/platform/device triple. A
+per-plugin release therefore only replaces that plugin's rows, while other
+plugins keep their current build.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ from pathlib import Path
 ASSET_RE = re.compile(
     r"^(?P<plugin>.+?)-(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-"
     r"(?P<platform>(?:x86_64|aarch64|armv7|i686|universal2)-"
-    r"(?:unknown-linux-(?:gnu|musl(?:eabihf)?)|apple-darwin|pc-windows-(?:msvc|gnu)))\.spk$"
+    r"(?:unknown-linux-(?:gnu|musl(?:eabihf)?)|apple-darwin|pc-windows-(?:msvc|gnu)))"
+    r"(?:-(?P<device>[a-z0-9][a-z0-9._-]*))?\.spk$"
 )
 
 
@@ -64,8 +65,15 @@ def human_size(size: int) -> str:
     return f"{size / (1024 * 1024):.1f} MiB"
 
 
-def render(repo: str, latest: dict[tuple[str, str], dict[str, object]]) -> str:
-    rows = sorted(latest.values(), key=lambda row: (str(row["plugin"]), str(row["platform"])))
+def render(repo: str, latest: dict[tuple[str, str, str], dict[str, object]]) -> str:
+    rows = sorted(
+        latest.values(),
+        key=lambda row: (
+            str(row["plugin"]),
+            str(row["platform"]),
+            str(row.get("device") or ""),
+        ),
+    )
     if not rows:
         raise SystemExit("no stable .spk assets were found")
 
@@ -74,7 +82,7 @@ def render(repo: str, latest: dict[tuple[str, str], dict[str, object]]) -> str:
     lines = [
         "# 插件下载",
         "",
-        "> 本文件由 CI 自动生成，请勿手改。只列每个插件/平台的最新稳定版；"
+        "> 本文件由 CI 自动生成，请勿手改。只列每个插件/平台/设备的最新稳定版；"
         f"预发布和历史版本见 [Releases]({release_url})。",
         ">",
         "> 安装前先信任发布公钥：[docs/release-key.pub](release-key.pub)。",
@@ -111,7 +119,7 @@ def main() -> None:
         raise SystemExit("--repo (or GH_REPO/GITHUB_REPOSITORY) is required")
 
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    latest: dict[tuple[str, str], dict[str, object]] = {}
+    latest: dict[tuple[str, str, str], dict[str, object]] = {}
 
     for release in iter_releases(args.repo, token):
         if release.get("draft") or release.get("prerelease"):
@@ -126,12 +134,13 @@ def main() -> None:
             if parsed is None:
                 print(f"warning: cannot parse asset name: {name}", file=sys.stderr)
                 continue
-            key = (parsed["plugin"], parsed["platform"])
+            key = (parsed["plugin"], parsed["platform"], parsed.get("device") or "")
             row = {
                 **parsed,
                 "tag": tag,
                 "published_at": published_at,
                 "name": name,
+                "device": parsed.get("device") or "",
                 "size": int(asset.get("size") or 0),
                 "url": str(asset.get("browser_download_url") or ""),
             }

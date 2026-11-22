@@ -192,7 +192,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        os: [ubuntu-24.04, macos-15, windows-2025]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -207,9 +207,15 @@ jobs:
           cargo build --locked --release --manifest-path tools/cli/Cargo.toml
           cargo install --locked --git https://github.com/webxxxxx/plugin-manager --bin svcd --root "$RUNNER_TEMP/host"
           mkdir -p bin
-          cp tools/cli/target/release/plugin-tools bin/plugin-tools
-          cp "$RUNNER_TEMP/host/bin/svcd" bin/plugin
-          chmod +x bin/plugin bin/plugin-tools
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp tools/cli/target/release/plugin-tools.exe bin/plugin-tools.exe
+            cp "$RUNNER_TEMP/host/bin/svcd.exe" bin/plugin.exe
+            chmod +x bin/plugin.exe bin/plugin-tools.exe
+          else
+            cp tools/cli/target/release/plugin-tools bin/plugin-tools
+            cp "$RUNNER_TEMP/host/bin/svcd" bin/plugin
+            chmod +x bin/plugin bin/plugin-tools
+          fi
           ls -l bin
       - uses: actions/upload-artifact@v7
         with:
@@ -301,7 +307,6 @@ jobs:
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       CARGO_TERM_COLOR: always
-      SVCD_PLUGIN_BIN: ${{ github.workspace }}/bin/plugin
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v5
@@ -312,10 +317,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x bin/plugin bin/plugin-tools
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            chmod +x bin/plugin.exe bin/plugin-tools.exe
+            echo "SVCD_PLUGIN_BIN=$GITHUB_WORKSPACE/bin/plugin.exe" >> "$GITHUB_ENV"
+          else
+            chmod +x bin/plugin bin/plugin-tools
+            echo "SVCD_PLUGIN_BIN=$GITHUB_WORKSPACE/bin/plugin" >> "$GITHUB_ENV"
+          fi
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
-      - name: Install Rust (meow only)
-        if: matrix.plugin == 'meow'
+      - name: Install Rust (meow/plugin-store)
+        if: matrix.plugin == 'meow' || matrix.plugin == 'plugin-store'
         uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: ${{ matrix.platform }}
@@ -336,8 +347,8 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: brew install cmake
-      - name: Install musl cross toolchains (sshd/meow)
-        if: runner.os == 'Linux' && (matrix.plugin == 'sshd' || matrix.plugin == 'meow') && (matrix.platform == 'aarch64-unknown-linux-musl' || matrix.platform == 'armv7-unknown-linux-musleabihf' || matrix.platform == 'x86_64-unknown-linux-musl')
+      - name: Install musl cross toolchains (sshd/meow/plugin-store)
+        if: runner.os == 'Linux' && (matrix.plugin == 'sshd' || matrix.plugin == 'meow' || matrix.plugin == 'plugin-store') && (matrix.platform == 'aarch64-unknown-linux-musl' || matrix.platform == 'armv7-unknown-linux-musleabihf' || matrix.platform == 'x86_64-unknown-linux-musl')
         shell: bash
         run: |
           set -euo pipefail
@@ -345,12 +356,21 @@ jobs:
           case "${{ matrix.platform }}" in
             aarch64-unknown-linux-musl)
               dir=aarch64-linux-musl-cross
+              cc=aarch64-linux-musl-gcc
+              cargo_key=AARCH64_UNKNOWN_LINUX_MUSL
+              cc_key=aarch64_unknown_linux_musl
               ;;
             armv7-unknown-linux-musleabihf)
               dir=arm-linux-musleabihf-cross
+              cc=arm-linux-musleabihf-gcc
+              cargo_key=ARMV7_UNKNOWN_LINUX_MUSLEABIHF
+              cc_key=armv7_unknown_linux_musleabihf
               ;;
             x86_64-unknown-linux-musl)
               dir=x86_64-linux-musl-cross
+              cc=x86_64-linux-musl-gcc
+              cargo_key=X86_64_UNKNOWN_LINUX_MUSL
+              cc_key=x86_64_unknown_linux_musl
               ;;
           esac
           file="$dir.tgz"
@@ -377,6 +397,11 @@ jobs:
           echo "CROSS_PREFIX=$RUNNER_TEMP/cross/$dir" >> "$GITHUB_ENV"
           echo "AARCH64_CROSS=$RUNNER_TEMP/cross/aarch64-linux-musl-cross" >> "$GITHUB_ENV"
           echo "X86_64_MUSL_CROSS=$RUNNER_TEMP/cross/x86_64-linux-musl-cross" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_${cargo_key}_LINKER=$RUNNER_TEMP/cross/$dir/bin/$cc" >> "$GITHUB_ENV"
+          echo "CC_${cc_key}=$RUNNER_TEMP/cross/$dir/bin/$cc" >> "$GITHUB_ENV"
+          echo "CXX_${cc_key}=$RUNNER_TEMP/cross/$dir/bin/${cc%gcc}g++" >> "$GITHUB_ENV"
+          echo "AR_${cc_key}=$RUNNER_TEMP/cross/$dir/bin/${cc%gcc}ar" >> "$GITHUB_ENV"
+          echo "RANLIB_${cc_key}=$RUNNER_TEMP/cross/$dir/bin/${cc%gcc}ranlib" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/cross/$dir/bin" >> "$GITHUB_PATH"
       - name: Build unsigned .spk
         shell: bash

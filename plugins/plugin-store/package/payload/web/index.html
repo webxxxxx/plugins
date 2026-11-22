@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>插件商店</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #1d2430;
+    --muted: #697386;
+    --line: #e3e7ee;
+    --accent: #2563eb;
+    --accent-ink: #ffffff;
+    --warn: #9a6700;
+    --warn-bg: #fff8e1;
+    --bad: #b42318;
+    --bad-bg: #fff1f0;
+    --ok: #16794b;
+    --ok-bg: #e9f8f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11151c;
+      --panel: #181e27;
+      --ink: #e6eaf1;
+      --muted: #9aa5b5;
+      --line: #2a3342;
+      --accent: #6ea0ff;
+      --accent-ink: #0b1220;
+      --warn: #f0c36a;
+      --warn-bg: #2b2515;
+      --bad: #ff8d84;
+      --bad-bg: #2d1717;
+      --ok: #6ee7b7;
+      --ok-bg: #122a20;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 48px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
+  h1 { margin: 0; font-size: 24px; letter-spacing: .01em; }
+  .sub { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
+  .sub code { font-size: 12px; }
+  .actions { display: flex; gap: 8px; align-items: center; }
+  button {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.small { padding: 4px 9px; font-size: 12px; border-radius: 6px; }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 12px; }
+  .search { position: relative; flex: 1 1 320px; }
+  .search input {
+    width: 100%;
+    padding: 9px 12px 9px 34px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel);
+    color: var(--ink);
+    font: inherit;
+  }
+  .search::before { content: "⌕"; position: absolute; left: 11px; top: 6px; color: var(--muted); font-size: 18px; }
+  label.check { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); white-space: nowrap; }
+  .notice { border-radius: 8px; padding: 9px 12px; margin: 10px 0; font-size: 13px; }
+  .notice.warn { color: var(--warn); background: var(--warn-bg); }
+  .notice.bad { color: var(--bad); background: var(--bad-bg); }
+  .notice.ok { color: var(--ok); background: var(--ok-bg); }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; min-width: 720px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; letter-spacing: .03em; text-transform: uppercase; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+  .name { font-weight: 650; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--bg); color: var(--muted); font-size: 11px; margin-left: 6px; white-space: nowrap; }
+  .badge.cached { color: var(--ok); background: var(--ok-bg); }
+  .cell-action { text-align: right; white-space: nowrap; }
+  .empty { padding: 42px 20px; text-align: center; color: var(--muted); }
+  .empty strong { display: block; color: var(--ink); margin-bottom: 6px; }
+  .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .pager .info { color: var(--muted); font-size: 13px; }
+  .pager .buttons { display: flex; gap: 8px; align-items: center; }
+  .job { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+  .job-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .job-title { font-weight: 650; }
+  .job-msg { color: var(--muted); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
+  .bar { height: 8px; border-radius: 999px; background: var(--bg); overflow: hidden; margin-top: 10px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s ease; }
+  .job.done .bar > i { background: var(--ok); }
+  .job.failed .bar > i { background: var(--bad); }
+  footer { margin-top: 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+  .hidden { display: none !important; }
+  @media (max-width: 600px) {
+    main { padding: 20px 12px 36px; }
+    h1 { font-size: 21px; }
+    th, td { padding: 9px 10px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>插件商店</h1>
+      <p class="sub">只显示当前设备可用的包 · 每页 50 个 · 安装由 svcd 校验签名与平台</p>
+      <p class="sub">设备 <code id="target">读取中…</code> · 列表 <span id="source">…</span></p>
+    </div>
+    <div class="actions">
+      <button id="refresh" title="重新获取 docs/plugins.md">刷新列表</button>
+    </div>
+  </header>
+
+  <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
+
+  <div class="toolbar">
+    <div class="search">
+      <input id="query" type="search" placeholder="按插件名称搜索…" autocomplete="off" spellcheck="false" maxlength="100">
+    </div>
+  </div>
+
+  <section class="panel" aria-label="插件列表">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>插件</th>
+            <th>版本</th>
+            <th>平台</th>
+            <th>大小</th>
+            <th class="cell-action">操作</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td colspan="5" class="empty">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="pager">
+      <div class="info" id="pageinfo">…</div>
+      <div class="buttons">
+        <button id="prev" class="small">上一页</button>
+        <button id="next" class="small">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <section id="job" class="job hidden" aria-live="polite">
+    <div class="job-head">
+      <div class="job-title" id="jobtitle">安装任务</div>
+      <button id="jobclose" class="small" title="收起">收起</button>
+    </div>
+    <div class="job-msg" id="jobmsg"></div>
+    <div class="bar"><i id="jobbar"></i></div>
+  </section>
+
+  <footer>
+    数据源：<a href="https://github.com/webxxxxx/plugins/blob/main/docs/plugins.md" target="_blank" rel="noreferrer">docs/plugins.md</a>。
+    列表与下载的包会缓存在插件数据目录，重复安装无需重新下载。
+    安装走宿主现成的 <code>POST /api/v1/plugins</code>（与 plugin-manager 管理页相同）；
+    设备平台与 device id 来自宿主 <code>GET /api/v1/compat</code>，只列出平台匹配的包；
+    带 device 限制的包还会在安装时由 svcd 再次校验。
+    外网访问慢或 GitHub 资源域名被劫持时，客户端会先尝试 CDN，再走 DNS-over-HTTPS 回退。
+  </footer>
+</main>
+
+<script type="module">
+  import { pluginUI } from './plugin-ui.mjs';
+
+  const ui = pluginUI();
+  const $ = (id) => document.getElementById(id);
+  const rows = $('rows');
+  const notice = $('notice');
+  const queryInput = $('query');
+  const refreshButton = $('refresh');
+  const prevButton = $('prev');
+  const nextButton = $('next');
+  const pageInfo = $('pageinfo');
+  const targetLabel = $('target');
+  const sourceLabel = $('source');
+  const jobPanel = $('job');
+  const jobTitle = $('jobtitle');
+  const jobMessage = $('jobmsg');
+  const jobBar = $('jobbar');
+
+  const SOURCE = { network: '在线', cache: '本地缓存', snapshot: '内置快照' };
+  // Filled from GET /api/v1/compat, the same facts the management page and
+  // installer use. The backend falls back to its compile-time target if the
+  // request is unavailable.
+  const HOST = { platform: null, device: null };
+  const PHASE = {
+    queued: '排队中',
+    downloading: '下载中',
+    ready: '已下载',
+    installing: '安装中',
+    done: '完成',
+    error: '失败',
+  };
+
+  const state = { page: 1, query: '', data: null, job: null, loading: false, pending: false, handoffJob: null };
+  let searchTimer = null;
+  let pollTimer = null;
+  let hideJobFor = null;
+
+  function text(value) {
+    const node = document.createElement('span');
+    node.textContent = value == null ? '' : String(value);
+    return node;
+  }
+
+  function showNotice(message, kind) {
+    notice.textContent = message;
+    notice.className = 'notice ' + (kind || 'warn');
+  }
+
+  function clearNotice() {
+    notice.className = 'notice hidden';
+    notice.textContent = '';
+  }
+
+  function fmtBytes(value) {
+    if (!value || value < 0) return '—';
+    if (value >= 1024 * 1024 * 1024) return (value / (1024 * 1024 * 1024)).toFixed(1) + ' GiB';
+    if (value >= 1024 * 1024) return (value / (1024 * 1024)).toFixed(1) + ' MiB';
+    if (value >= 1024) return (value / 1024).toFixed(1) + ' KiB';
+    return value + ' B';
+  }
+
+  function fmtTime(seconds) {
+    if (!seconds) return '从未';
+    try {
+      return new Date(seconds * 1000).toLocaleString();
+    } catch {
+      return '未知';
+    }
+  }
+
+  async function call(name, args, timeoutMs) {
+    const raw = await ui.invoke(name, args || {}, { timeoutMs: timeoutMs || 30000 });
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(raw);
+    }
+  }
+
+  async function load(options) {
+    const quiet = options && options.quiet;
+    if (state.loading) {
+      state.pending = true;
+      return;
+    }
+    state.loading = true;
+    refreshButton.disabled = true;
+    if (!quiet) {
+      rows.replaceChildren(document.createElement('tr'));
+      const loading = document.createElement('td');
+      loading.colSpan = 5;
+      loading.className = 'empty';
+      loading.textContent = '加载中…';
+      rows.firstChild.appendChild(loading);
+    }
+    try {
+      const data = await call('list', {
+        page: state.page,
+        query: state.query,
+        scope: 'device',
+        platform: HOST.platform || undefined,
+        device: HOST.device || undefined,
+      });
+      state.data = data;
+      state.page = data.page || 1;
+      if (data.job) {
+        updateJob(data.job);
+        if (data.job.phase === 'ready' && !data.job.done) maybeHandoff(data.job);
+      }
+      render();
+    } catch (error) {
+      showNotice('读取插件列表失败：' + (error.message || error), 'bad');
+      refreshButton.disabled = false;
+      if (!quiet) renderError(error);
+    } finally {
+      state.loading = false;
+      refreshButton.disabled = Boolean(state.data && state.data.refreshing);
+      if (state.pending) {
+        state.pending = false;
+        load({ quiet: true });
+      }
+    }
+  }
+
+  function renderError(error) {
+    rows.replaceChildren();
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.className = 'empty';
+    td.textContent = '加载失败：' + (error.message || error);
+    tr.appendChild(td);
+    rows.appendChild(tr);
+  }
+
+  function render() {
+    const data = state.data;
+    if (!data) return;
+    let target = data.target || '未知';
+    target += ' · ' + (data.device || 'device 未配置');
+    targetLabel.textContent = target;
+    const source = SOURCE[data.source] || data.source || '未知';
+    let sourceText = source;
+    if (data.fetched_at) sourceText += ' · ' + fmtTime(data.fetched_at);
+    if (data.stale) sourceText += data.refreshing ? ' · 正在后台刷新' : ' · 可能过期';
+    sourceLabel.textContent = sourceText;
+
+    if (data.error) {
+      showNotice('最近一次刷新失败：' + data.error + '（仍在使用' + source + '）', 'warn');
+    } else if (state.job && !state.job.done) {
+      clearNotice();
+    }
+
+    rows.replaceChildren();
+    if (!data.items || data.items.length === 0) {
+      const tr = document.createElement('tr');
+      const td = document.createElement('td');
+      td.colSpan = 5;
+      td.className = 'empty';
+      const strong = document.createElement('strong');
+      strong.textContent = state.query ? '没有匹配的插件' : '当前设备没有可安装的包';
+      td.appendChild(strong);
+      const hint = document.createElement('div');
+      hint.textContent = state.query
+        ? '换个名称试试，或清空搜索框。'
+        : '设备平台：' + (data.target || '未知') + (data.device ? ' · ' + data.device : '') + '。目录里没有这个平台的包。';
+      td.appendChild(hint);
+      tr.appendChild(td);
+      rows.appendChild(tr);
+    } else {
+      for (const entry of data.items) rows.appendChild(renderRow(entry));
+    }
+
+    if (data.total === 0) {
+      pageInfo.textContent = '共 0 个包';
+    } else {
+      pageInfo.textContent = '第 ' + data.page + ' / ' + data.pages + ' 页 · 共 ' + data.total + ' 个包 · 每页 ' + data.page_size;
+    }
+    prevButton.disabled = data.page <= 1;
+    nextButton.disabled = data.pages === 0 || data.page >= data.pages;
+
+  }
+
+  function renderRow(entry) {
+    const tr = document.createElement('tr');
+
+    const nameCell = document.createElement('td');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = entry.name;
+    nameCell.appendChild(name);
+    if (entry.cached) {
+      const badge = document.createElement('span');
+      badge.className = 'badge cached';
+      badge.textContent = '已缓存';
+      nameCell.appendChild(badge);
+    }
+
+    const versionCell = document.createElement('td');
+    versionCell.className = 'mono';
+    versionCell.textContent = entry.version;
+
+    const platformCell = document.createElement('td');
+    platformCell.className = 'mono muted';
+    platformCell.textContent = entry.platform;
+    if (entry.device) {
+      const badge = document.createElement('span');
+      badge.className = 'badge';
+      badge.textContent = entry.device;
+      platformCell.appendChild(badge);
+    }
+
+    const sizeCell = document.createElement('td');
+    sizeCell.className = 'mono';
+    sizeCell.textContent = entry.size || fmtBytes(entry.size_bytes);
+
+    const actionCell = document.createElement('td');
+    actionCell.className = 'cell-action';
+    const button = document.createElement('button');
+    button.className = 'primary small';
+    const active = state.job && !state.job.done && state.job.name === entry.name &&
+      state.job.version === entry.version && state.job.platform === entry.platform &&
+      (state.job.device || '') === (entry.device || '');
+    button.textContent = active ? '处理中…' : (entry.cached ? '安装' : '下载并安装');
+    button.disabled = Boolean(state.job && !state.job.done);
+    button.onclick = () => startInstall(entry);
+    actionCell.appendChild(button);
+
+    tr.append(nameCell, versionCell, platformCell, sizeCell, actionCell);
+    return tr;
+  }
+
+  async function startInstall(entry) {
+    if (state.job && !state.job.done) return;
+    clearNotice();
+    try {
+      const result = await call('install', {
+        name: entry.name,
+        version: entry.version,
+        platform: entry.platform,
+        device: entry.device || '',
+      });
+      updateJob(result.job);
+      if (result.job) startPolling();
+    } catch (error) {
+      showNotice('安装失败：' + (error.message || error), 'bad');
+    }
+  }
+
+  function updateJob(job) {
+    state.job = job;
+    if (!job) {
+      jobPanel.className = 'job hidden';
+      return;
+    }
+    if (hideJobFor && job.id === hideJobFor) return;
+    jobPanel.className = 'job' + (job.done ? (job.ok ? ' done' : ' failed') : '');
+    jobTitle.textContent = (PHASE[job.phase] || job.phase) + ' · ' + job.name + ' ' + job.version;
+    let message = job.message || '';
+    if (job.phase === 'downloading' && job.total) {
+      message += '（' + fmtBytes(job.downloaded) + ' / ' + fmtBytes(job.total) + '）';
+    }
+    jobMessage.textContent = message;
+    const percent = job.total
+      ? Math.max(0, Math.min(100, Math.round((job.downloaded / job.total) * 100)))
+      : (job.done || job.phase === 'ready' || job.phase === 'installing' ? 100 : 0);
+    jobBar.style.width = percent + '%';
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(async () => {
+      try {
+        const result = await call('install_status', {});
+        updateJob(result.job);
+        if (!result.job || result.job.done) {
+          stopPolling();
+          await load({ quiet: true });
+          if (result.job) {
+            showNotice(result.job.ok ? '安装完成：' + result.job.name : '安装未完成：' + (result.job.message || '未知错误'), result.job.ok ? 'ok' : 'bad');
+          }
+        } else if (result.job.phase === 'ready') {
+          stopPolling();
+          await maybeHandoff(result.job);
+        }
+      } catch (error) {
+        stopPolling();
+        showNotice('查询安装进度失败：' + (error.message || error), 'bad');
+      }
+    }, 700);
+  }
+
+  function stopPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  async function responseError(response) {
+    const text = await response.text().catch(() => '');
+    try {
+      const body = JSON.parse(text);
+      if (body && body.error) return body.error.message || body.error.code || ('HTTP ' + response.status);
+    } catch (_) {}
+    if (response.status === 401) return '需要先在 svcd 管理页登录';
+    return text || ('HTTP ' + response.status);
+  }
+
+  async function maybeHandoff(job) {
+    if (!job || job.done || job.phase !== 'ready') return;
+    if (state.handoffJob === job.id) return;
+    state.handoffJob = job.id;
+    await handoff(job);
+  }
+
+  // Use the same install API as the management page: POST the .spk bytes as
+  // application/octet-stream. The plugin only prepares the bytes and asks the
+  // host to turn the cached file into a blob.
+  async function handoff(job) {
+    try {
+      updateJob(Object.assign({}, job, {
+        phase: 'installing',
+        message: '正在把包交给宿主安装',
+      }));
+      const prepared = await ui.invokeResult('package_blob', {
+        name: job.name,
+        version: job.version,
+        platform: job.platform,
+        device: job.device || '',
+      }, { timeoutMs: 60000 });
+      const blobId = prepared.structuredContent && prepared.structuredContent.$blob;
+      if (!blobId) throw new Error('宿主没有返回安装包 blob');
+
+      const blobResponse = await fetch('/api/v1/blobs/' + blobId, { credentials: 'same-origin' });
+      if (!blobResponse.ok) throw new Error(await responseError(blobResponse));
+      const packageBlob = await blobResponse.blob();
+
+      const installResponse = await fetch('/api/v1/plugins?strategy=replace', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Svcd-Csrf': '1',
+        },
+        body: packageBlob,
+      });
+      if (!installResponse.ok) throw new Error(await responseError(installResponse));
+      const installed = await installResponse.json();
+
+      if (!installed.id) throw new Error('安装响应缺少插件 id');
+      if (installed.state !== 'running') {
+        const startResponse = await fetch(
+          '/api/v1/services/' + encodeURIComponent(installed.id) + '/start',
+          {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'X-Svcd-Csrf': '1' },
+          },
+        );
+        if (!startResponse.ok) {
+          const detail = await responseError(startResponse);
+          if (!/already|running|启动/i.test(detail)) throw new Error(detail);
+        }
+      }
+
+      await call('install_result', {
+        ok: true,
+        message: '已安装并启动 ' + installed.id + ' ' + installed.version,
+      });
+      showNotice('已安装 ' + installed.id + ' ' + installed.version, 'ok');
+      await load({ quiet: true });
+    } catch (error) {
+      const message = error && error.message ? error.message : String(error);
+      try {
+        await call('install_result', { ok: false, message: message });
+      } catch (_) {}
+      showNotice('安装失败：' + message, 'bad');
+      await load({ quiet: true });
+    } finally {
+      state.handoffJob = null;
+    }
+  }
+
+  queryInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+      state.query = queryInput.value.trim();
+      state.page = 1;
+      load({ quiet: true });
+    }, 250);
+  });
+
+  prevButton.onclick = () => {
+    if (state.page > 1) {
+      state.page -= 1;
+      load();
+    }
+  };
+  nextButton.onclick = () => {
+    if (state.data && state.page < state.data.pages) {
+      state.page += 1;
+      load();
+    }
+  };
+
+  refreshButton.onclick = async () => {
+    refreshButton.disabled = true;
+    clearNotice();
+    try {
+      const result = await call('refresh', {}, 10000);
+      if (result.started) {
+        showNotice('正在后台刷新插件列表…', 'warn');
+        setTimeout(() => load({ quiet: true }), 800);
+      } else {
+        showNotice('已有刷新任务在运行，完成后列表会自动更新', 'warn');
+        setTimeout(() => load({ quiet: true }), 1200);
+      }
+    } catch (error) {
+      showNotice('刷新失败：' + (error.message || error), 'bad');
+      refreshButton.disabled = false;
+    }
+  };
+
+  $('jobclose').onclick = () => {
+    hideJobFor = state.job ? state.job.id : null;
+    jobPanel.className = 'job hidden';
+  };
+
+  ui.subscribe({
+    onMessage(method, params) {
+      if (method === 'plugin-store/install' && params && params.job) {
+        updateJob(params.job);
+        if (params.job.done) {
+          stopPolling();
+          load({ quiet: true });
+        } else if (params.job.phase === 'ready') {
+          maybeHandoff(params.job);
+        }
+      }
+      if (method === 'plugin-store/catalog') {
+        load({ quiet: true });
+        if (params && params.ok === false) {
+          showNotice('刷新失败：' + (params.error || '未知错误'), 'bad');
+        } else {
+          showNotice('插件列表已更新', 'ok');
+        }
+      }
+    },
+    onReset() {
+      load({ quiet: true });
+    },
+  });
+
+  async function loadCompat() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
+    try {
+      const response = await fetch('/api/v1/compat', {
+        credentials: 'same-origin',
+        signal: controller.signal,
+      });
+      if (!response.ok) return;
+      const compat = await response.json();
+      if (compat && compat.platform) HOST.platform = compat.platform;
+      if (compat && compat.device) HOST.device = compat.device;
+    } catch (_) {
+      // Fall back to the plugin's compile-time target.
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  loadCompat().then(() => load());
+</script>
+</body>
+</html>
