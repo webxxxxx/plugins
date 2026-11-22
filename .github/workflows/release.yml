@@ -44,6 +44,7 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       version: ${{ steps.version.outputs.version }}
       filter: ${{ steps.scope.outputs.filter }}
+      has_plugins: ${{ steps.matrix.outputs.has_plugins }}
     steps:
       - uses: actions/checkout@v7
       - id: scope
@@ -63,13 +64,16 @@ jobs:
           esac
           if [ -n "$requested" ] && [ "$requested" != "all" ]; then filter="$requested"; fi
           if [ -z "$filter" ]; then filter=all; fi
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            filter=changed
+          fi
 
           if [ "${{ github.event.inputs.release }}" = "true" ] && [ -z "${{ github.event.inputs.tag }}" ]; then
             echo "::error::workflow_dispatch release requires a tag input"
             exit 1
           fi
 
-          if [ "$filter" != "all" ]; then
+          if [ "$filter" != "all" ] && [ "$filter" != "changed" ]; then
             if [ ! -f "plugins/$filter/.plugin.json" ]; then
               echo "::error::unknown plugin '$filter' (no plugins/$filter/.plugin.json)"
               exit 1
@@ -114,13 +118,39 @@ jobs:
         shell: bash
         env:
           FILTER: ${{ steps.scope.outputs.filter }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
+          changed=""
+          build_all=false
+          if [ "$FILTER" = "changed" ]; then
+            if [ -z "$PR_NUMBER" ]; then
+              echo "::error::changed scope requires a pull_request event"
+              exit 1
+            fi
+            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
+            # A build-tool/SDK change can affect every plugin; fall back to the full matrix.
+            if printf '%s\n' "$files" | grep -qE '^(sdk|templates|tools/cli)/'; then
+              build_all=true
+            fi
+            changed=$(printf '%s\n' "$files" | sed -n 's#^plugins/\([^/]*\)/.*#\1#p' | sort -u | tr '\n' ' ')
+          fi
+
           entries='[]'
           for dir in plugins/*/; do
-            if [ "$FILTER" != "all" ] && [ "${dir%/}" != "plugins/$FILTER" ]; then
-              continue
+            plugin_dir="${dir%/}"
+            plugin_name="${plugin_dir#plugins/}"
+            include=false
+            if [ "$FILTER" = "all" ] || [ "$build_all" = true ]; then
+              include=true
+            elif [ "$FILTER" = "changed" ]; then
+              case " $changed " in *" $plugin_name "*) include=true ;; esac
+            elif [ "$plugin_dir" = "plugins/$FILTER" ]; then
+              include=true
             fi
+            [ "$include" = true ] || continue
+
             manifest="${dir}.plugin.json"
             [ -f "$manifest" ] || continue
             name=$(jq -r '.name // empty' "$manifest")
@@ -134,7 +164,7 @@ jobs:
               esac
               entries=$(jq -c \
                 --arg plugin "$name" \
-                --arg dir "${dir%/}" \
+                --arg dir "$plugin_dir" \
                 --arg platform "$platform" \
                 --arg os "$os" \
                 '. + [{plugin: $plugin, dir: $dir, platform: $platform, os: $os}]' \
@@ -142,14 +172,22 @@ jobs:
             done
           done
           if [ "$entries" = "[]" ]; then
+            if [ "$FILTER" = "changed" ]; then
+              echo "has_plugins=false" >> "$GITHUB_OUTPUT"
+              echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
+              echo "no changed plugins; skipping the plugin matrix"
+              exit 0
+            fi
             echo "::error::no plugins with a .plugin.json were found"
             exit 1
           fi
+          echo "has_plugins=true" >> "$GITHUB_OUTPUT"
           echo "matrix={\"include\":$entries}" >> "$GITHUB_OUTPUT"
 
   host:
     name: host tools / ${{ matrix.os }}
     needs: preflight
+    if: needs.preflight.outputs.has_plugins == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -255,6 +293,7 @@ jobs:
   plugins:
     name: ${{ matrix.plugin }} / ${{ matrix.platform }}
     needs: [preflight, host]
+    if: needs.preflight.outputs.has_plugins == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -451,9 +490,18 @@ jobs:
             echo "::error::a release tag is required (workflow_dispatch input: tag)"
             exit 1
           fi
+          version="$tag"
+          if [[ "$tag" == *-v* ]]; then
+            version="${tag##*-v}"
+          else
+            version="${tag#v}"
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
-          elif [[ "$tag" == *-* ]]; then
+            if [[ "$version" != *-* ]]; then
+              gh release edit "$tag" --prerelease=false
+            fi
+          elif [[ "$version" == *-* ]]; then
             gh release create "$tag" dist/* --title "$tag" --generate-notes --prerelease
           else
             gh release create "$tag" dist/* --title "$tag" --generate-notes
@@ -463,7 +511,6 @@ jobs:
   update-plugin-list:
     name: update plugin list
     needs: [publish]
-    if: needs.publish.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     concurrency:
