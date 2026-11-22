@@ -57,6 +57,18 @@ cd tools/cli && cargo build --release
 
 它只做编排：模板是数据（`build.json` + 目录树），打包仍调宿主的 `plugin bundle`。
 
+## manifest 只有 schema 1
+
+`.spk` 清单只有一种格式：`schema: 1`。包里的 `id` 是必填身份（`[a-z0-9][a-z0-9_-]{0,63}`，不能是
+`svc`），安装目录、日志、MCP 工具名前缀、`/plugin-ui/<id>/` 都用它；源清单不写时打包器取项目目录名。
+`name` 只是显示名，可以写中文，缺省等于 `id`。能力的 `outputSchema` 与包图标 `icons` 都是可选的，
+只做声明与投影。
+
+`plugin bundle` 恒定写 `schema: 1`（源清单写的值会被覆盖，不会降级），`plugin-tools build` 按
+`<id>-<version>-<platform>.spk` 命名产物。
+**不产出旧 schema 的包**：还在报 `schema_max: 3` 的老宿主装不上新产物，这是有意的——
+先升级宿主，再用同一条线（main）的 `plugin-tools` 重打包。
+
 ## CI
 
 `.github/workflows/test.yml` 在两个操作系统上跑 SDK、工具链与 Rust 样例的测试，并给四种语言各脚手架一次；`.github/workflows/build.yml` 先构建宿主的 `plugin` CLI，再用它打包每份样例并 `verify`，产物作为 artifact 上传。没有 Node、没有 daemon，跑的全是 `plugin bundle` 的本地路径。

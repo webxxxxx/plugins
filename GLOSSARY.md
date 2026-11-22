@@ -16,6 +16,27 @@ _Avoid_: 脚手架、样例（样例是 `plugins/` 下的真实插件）
 插件目录里由人写的 `manifest.json`，不含 `files[]`；`files[]` 只能由打包器计算。
 _Avoid_: 插件配置、plugin.json
 
+**插件 id（Plugin id）**:
+源清单里的 `id`，插件的唯一身份：ASCII、`[a-z0-9][a-z0-9_-]{0,63}`，不能是 `svc`；源清单不写时
+打包器取项目目录名。安装目录、日志文件名、MCP 工具名前缀（`<id>.<能力>`）、`/plugin-ui/<id>/`、
+产物文件名都用它。
+_Avoid_: 插件名、包名（那是显示名或文件名）
+
+**显示名（Display name）**:
+源清单里的 `name`，只给人看：任意 UTF-8，可中文，缺省等于 `id`。命令与 API 只认 `id`，
+不按显示名解析。
+_Avoid_: 插件名（有歧义）
+
+**输出契约（outputSchema）**:
+能力上可选的 `outputSchema`，声明该能力结果的结构；只投影进 MCP `tools/list`，运行期不校验
+（不写 = 未声明，`{}` = 任意）。
+_Avoid_: 返回值校验、结果 schema
+
+**包图标（icons）**:
+源清单里可选的 `icons: {png?, ico?, icns?}`，值必须是包内文件；构建校验存在与非空，验包再校验
+魔数与大小，不做转格式或转尺寸。
+_Avoid_: 图标资源、logo
+
 **发布钥（Release key）**:
 仓库 CI 独占的 Ed25519 私钥，是打进 catalog 的唯一签发者；贡献者的自签钥只用于本地自测。
 _Avoid_: 签名证书、管理员密钥

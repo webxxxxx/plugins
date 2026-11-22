@@ -16,7 +16,7 @@ plugin-tools template wireguard          # 数字菜单选语言（1-4）与平�
 plugin-tools template wireguard --lang rust --platforms x86_64-unknown-linux-musl --webui
 ```
 
-完成判据：`package/manifest.json`、`build.json`、`.plugin.json` 都存在，且目录里**没有** `target/`、`dist/`、`out/`。
+完成判据：`package/manifest.json`、`build.json`、`.plugin.json` 都存在，且目录里**没有** `target/`、`dist/`、`out/`。清单里 `schema` 写成 `1`（打包器也会恒定盖成 `1`），`id` 是身份（不写则取项目目录名）。
 
 ### 2. 只写 handler
 
@@ -55,10 +55,10 @@ svcd_plugin_serve handle
 ```bash
 plugin-tools build          # 构建 + 打包（默认未签名，本地开发用）
 plugin install <spk>  # 首装不自启
-plugin start <name>
+plugin start <id>
 ```
 
-完成判据：`plugin-tools build` 打印 `packed … (unsigned)`，且随后 `verify` 输出 `ok: true`。
+完成判据：`plugin-tools build` 打印 `packed … (unsigned)`，且随后 `verify` 输出 `ok: true`（`"schema": 1`、`"id"` 是 ASCII；`"displayName"` 就是清单里的 `name`，应当是你的中文名）。
 
 未签名包要求宿主 `svcd.conf` 里 `allow_insecure_install = on`（改完重启 svcd）。发布走 CI，用发布钥签名。
 
@@ -214,7 +214,13 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **能力清单一处改全。** 加/删能力时同时改 manifest 的 `capabilities[]` 和代码分支；Rust 用 `cargo test` 兜底，shell 靠 `case` 与清单人工对齐。
 
-**`platform` 由打包器盖章。** 源 manifest 不写 `platform`、不写 `files[]`、不写 `signature.json`——它们都是派生的。
+**`id` 是身份，`name` 是显示名。** `schema` 恒为 `1`（打包器盖章，源清单写别的值也会被覆盖），`id` 只能是 `[a-z0-9][a-z0-9_-]{0,63}`（不能是 `svc`）：安装目录、日志文件名、`<id>.<能力>` 工具名、`/plugin-ui/<id>/` 都用它。源清单省略 `id` 时取项目目录名；`name` 随便写，中文也行，缺省等于 `id`；命令与 API 只认 `id`，不按显示名解析。
+
+**`platform` / `files[]` / `signature.json` 由打包器盖章。** 源 manifest 不写它们——都是派生的。产物文件名是 `<id>-<version>-<platform>.spk`。
+
+**`outputSchema` 只做声明。** `capabilities[].outputSchema` 可选：写了就投影进 MCP `tools/list`，运行期不校验结果（不写 = 未声明，`{}` = 任意）。工具返回结构化 JSON 时才值得声明（模板里的 `stats` / `info` / `date` 就是示例）。
+
+**`icons` 是可选的包图标。** 形状 `{"png"|"ico"|"icns": "<包内路径>"}`，作者自备三种格式（不做转格式/转尺寸）；构建时会先校验文件存在且非空，验包阶段再查魔数与大小。
 
 **插件是常驻进程。** 没有 oneshot 语义；要"跑一次"，写成常驻 + 一个触发能力，或用 core 服务。
 
@@ -242,4 +248,6 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 | Windows 上启动 `exit=9009` | `interpreter.name` 写了 `python3`（那是 0 字节存根，用 `python` 或 `py`） |
 | Debian 上装不上 | 给 `sh` 写了 `interpreter.version`（dash 的 `--version` 会报错） |
 | 包里出现源码 | 源码或占位文件放进了 `package/` |
+| 装不上，提示重打包 | 包不是 `schema: 1` 或没有 `id`——用新版 `plugin-tools build` 重打 |
+| 目录名变成中文/乱码 | 把显示名写进了 `id`；中文只能放 `name` |
 | 改了 SDK 但插件没变 | vendored 副本没同步（`plugin-tools sync`） |
