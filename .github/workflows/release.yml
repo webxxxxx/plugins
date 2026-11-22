@@ -555,28 +555,14 @@ jobs:
             gh release create "$tag" dist/* --title "$tag" --generate-notes
           fi
 
-  # 发布成功后刷新 docs/plugins.md；只列每个插件/平台的最新稳定版。
-  update-plugin-list:
-    name: update plugin list
-    needs: [publish]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    concurrency:
-      group: plugin-list
-      cancel-in-progress: false
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: main
-          fetch-depth: 0
-      - name: Update docs/plugins.md
+      - name: Update plugin list
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          git fetch origin main --depth=1
+          git checkout -B main origin/main
           python3 .github/scripts/update_plugin_list.py docs/plugins.md
           if git diff --quiet -- docs/plugins.md; then
             echo "docs/plugins.md is up to date"
