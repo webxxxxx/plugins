@@ -32,7 +32,7 @@
 
 成功结果写到 <data_dir>/plugin-store/catalog.md，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。
 
-下载的 .spk 暂存在 <data_dir>/plugin-store/downloads/；安装成功后删除，失败时保留以便重试。下载顺序：
+下载的 .spk 暂存在插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/；安装成功后删除，失败时保留以便重试。下载顺序：
 
 1. 直接下载（自动跟随 GitHub release 的 302）；
 2. 如果 release-assets.githubusercontent.com 被 DNS 污染/无法连接，查询 Cloudflare/Google DNS-over-HTTPS 得到真实地址，用固定 resolver 重试；TLS 仍按原主机名校验；

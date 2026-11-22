@@ -63,6 +63,9 @@ struct State {
 struct PluginStore {
     state: Arc<Mutex<State>>,
     data_dir: PathBuf,
+    /// Transient package downloads live under the plugin root, not beside the
+    /// host's data root.
+    download_dir: PathBuf,
     temp_dir: PathBuf,
     own_id: String,
     cancel: Cancel,
@@ -152,7 +155,7 @@ impl PluginStore {
         let items: Vec<Value> = page
             .items
             .iter()
-            .map(|entry| entry_json(entry, &self.data_dir))
+            .map(|entry| entry_json(entry, &self.download_dir))
             .collect();
         let stale = state
             .fetched_at
@@ -252,12 +255,12 @@ impl PluginStore {
         emit_job(&job);
 
         let state = Arc::clone(&self.state);
-        let data_dir = self.data_dir.clone();
+        let download_dir = self.download_dir.clone();
         let cancel = self.cancel.clone();
         let thread_job = job.clone();
         if let Err(error) = thread::Builder::new()
             .name(format!("install-{}", entry.name))
-            .spawn(move || run_install(state, data_dir, entry, thread_job, cancel))
+            .spawn(move || run_install(state, download_dir, entry, thread_job, cancel))
         {
             let mut guard = match self.state.lock() {
                 Ok(guard) => guard,
@@ -323,7 +326,7 @@ impl PluginStore {
                 None => return ToolOutcome::error("目录里找不到这个包"),
             }
         };
-        let package = self.data_dir.join("downloads").join(package_file(&entry));
+        let package = self.download_dir.join(package_file(&entry));
         if !package
             .metadata()
             .map(|meta| meta.is_file() && meta.len() > 0)
@@ -399,7 +402,7 @@ impl PluginStore {
         drop(state);
         emit_job(&job);
         if ok {
-            let cached = self.data_dir.join("downloads").join(package_file_parts(
+            let cached = self.download_dir.join(package_file_parts(
                 &job.name,
                 &job.version,
                 &job.platform,
@@ -463,10 +466,15 @@ fn required<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("缺少参数 {key}"))
 }
 
-fn entry_json(entry: &catalog::Entry, data_dir: &Path) -> Value {
+/// Downloads are transient and belong under the installed plugin's root, not
+/// in a sibling of the host's data root.
+fn plugin_temp_dir(data_root: &Path, id: &str) -> PathBuf {
+    data_root.join("plugins").join(id).join("temp")
+}
+
+fn entry_json(entry: &catalog::Entry, download_dir: &Path) -> Value {
     let file = package_file(entry);
-    let cached = data_dir
-        .join("downloads")
+    let cached = download_dir
         .join(&file)
         .metadata()
         .map(|metadata| metadata.is_file() && metadata.len() > 0)
@@ -525,12 +533,12 @@ fn publish_job(state: &Arc<Mutex<State>>, job: &Job) {
 
 fn run_install(
     state: Arc<Mutex<State>>,
-    data_dir: PathBuf,
+    download_dir: PathBuf,
     entry: catalog::Entry,
     mut job: Job,
     cancel: Cancel,
 ) {
-    let package = data_dir.join("downloads").join(package_file(&entry));
+    let package = download_dir.join(package_file(&entry));
     let mut last_emit = Instant::now() - Duration::from_secs(1);
 
     if !package
@@ -785,16 +793,23 @@ fn main() -> Exit {
 
     let context = Context::from_env();
     let own_id = OWN_ID.to_string();
-    let data_root = context
-        .data_dir()
-        .map(PathBuf::from)
+    let data_root = context.data_dir().map(PathBuf::from);
+    let data_dir = data_root
+        .as_ref()
+        .map(|root| root.join(OWN_ID))
         .unwrap_or_else(|| std::env::temp_dir().join("plugin-store"));
-    let data_dir = data_root.join(OWN_ID);
+    // The host keeps installed plugins under <data>/plugins/<id>; downloads
+    // belong in that root's temp directory, not next to the data root.
+    let download_dir = data_root
+        .as_ref()
+        .map(|root| plugin_temp_dir(root, OWN_ID))
+        .unwrap_or_else(|| data_dir.join("temp"));
     let state = Arc::new(Mutex::new(initial_state(&data_dir)));
     log_info!(
-        "plugin-store 启动: target={TARGET}, 内置/缓存 {} 个包, data={}",
+        "plugin-store 启动: target={TARGET}, 内置/缓存 {} 个包, data={}, downloads={}",
         state.lock().map(|guard| guard.entries.len()).unwrap_or(0),
-        data_dir.display()
+        data_dir.display(),
+        download_dir.display()
     );
     let temp_dir = context
         .temp_dir()
@@ -808,6 +823,7 @@ fn main() -> Exit {
         PluginStore {
             state,
             data_dir,
+            download_dir,
             temp_dir,
             own_id,
             cancel,
@@ -837,6 +853,15 @@ mod tests {
         assert_eq!(
             declared, implemented,
             "manifest and code disagree on capabilities"
+        );
+    }
+
+    #[test]
+    fn downloads_live_under_the_plugin_root() {
+        let root = Path::new("data");
+        assert_eq!(
+            plugin_temp_dir(root, "plugin-store"),
+            root.join("plugins").join("plugin-store").join("temp")
         );
     }
 

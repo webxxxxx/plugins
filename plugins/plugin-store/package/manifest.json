@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "name": "plugin-store",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "desc": "浏览、搜索并安装插件",
   "protocol": 1,
   "exec": {
