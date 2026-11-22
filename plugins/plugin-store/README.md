@@ -56,34 +56,46 @@ cargo run --release --manifest-path plugins/plugin-store/Cargo.toml -- download
 
 svcd 自己不链 TLS，检查与下载 svcd 本体由 plugin-store 代劳。`release_asset`
 查 GitHub 仓库的最新**稳定** release（`/releases/latest`，prerelease/draft 直接拒绝），
-按文件名通配选**恰好一个**资产：
+`repo` 省略时默认 `webxxxxx/plugin-manager`：
 
-```json
-{ "repo": "webxxxxx/plugin-manager", "platform": "x86_64-pc-windows-msvc",
-  "pattern": "svcd-*-{platform}.zip", "download": false }
+```jsonc
+// 1) 只查：返回全部资产与校验清单是否存在，不产生下载流量
+release_asset({ "download": false })
+-> {
+     "tag": "v0.1.5",
+     "version": "0.1.5",
+     "assets": [
+       { "name": "SHA256SUMS", "size": 767 },
+       { "name": "svcd-0.1.5-x86_64-pc-windows-msvc.zip", "size": 1234567 }
+     ],
+     "sumsAsset": "SHA256SUMS"      // 没有就是 null，宿主据此拒绝升级
+   }
+
+// 2) 按精确文件名取一个文件；每个调用只回一个 blob
+release_asset({ "download": true, "asset": "SHA256SUMS" })
+release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zip" })
+-> { "$blobPath": "…", "name": "…", "mimeType": "application/octet-stream" }
 ```
 
-- `download: false`（默认）只查，返回
-  `{ "tag": "v0.1.5", "version": "0.1.5", "asset": { "name": "svcd-0.1.5-x86_64-pc-windows-msvc.zip", "size": 1234567 } }`，
-  不产生下载流量；`version` 是 tag 去掉前导 `v`。
-- `download: true` 把匹配到的资产下载到宿主 `SVCD_TEMP_DIR/incoming/`，以**单个**
-  `$blob` 交回，不返回磁盘路径，**也不带 `tag`/`version`/`asset`**（一个结果只装一个 blob）。
-  宿主先调一次 `download: false` 拿版本，再用第二次调用取校验清单：
-  `{ "repo": "...", "pattern": "SHA256SUMS", "download": true }`。
-- 同一 release 里 0 个匹配或多个匹配都报错，并列出候选文件名；超过 256 MiB 直接拒绝，不截断。
-- 查询带 `User-Agent: plugin-store/<version>`，匿名配额 60 次/小时；403/429 返回带剩余次数
-  与重置时间的可读错误，而不是裸 403。
+- 宿主侧流程：`download: false` 拿版本与资产清单 → 按 target 后缀挑归档、`sumsAsset`
+  为 null 直接拒绝 → `download: true` 分别取归档与 `SHA256SUMS` → 用 SUMS 里该行
+  的 sha256 校验归档 → 才走 `svcd upgrade --file`。
+- `download: true` 的结果只有 blob，**不带** `tag`/`version`/`assets`；元数据一律来自
+  第一次查询。`asset` 必须是 `assets[].name` 里的精确名字，未知名字报错并列出候选。
+- 同一 release 的资产全部列出；单文件超过 256 MiB 直接拒绝，不截断。
+- 查询带 `User-Agent: plugin-store/<version>`，匿名配额 60 次/小时；403/429 只有在
+  确实是限流（剩余 0、429 或文案含 rate limit）时才报限流，否则报「拒绝访问」，
+  都给出可读错误而不是裸 403。
 - 下载复用直连 + DoH 回退与代理，但**不走** `PLUGIN_STORE_MIRROR`：镜像可以决定插件包，
   不能决定 svcd 本体的字节。版本不缓存，每次升级都重新查、重新下；失败时清掉 `.part`。
-- 不做签名；校验链由宿主用 `SHA256SUMS` 里的 sha256 完成。清单本身也走同一个能力
-  （`pattern: "SHA256SUMS"`），所以宿主不需要理解 GitHub 的分页/资产结构。
+- 不做签名；校验链由宿主用 `SHA256SUMS` 的 sha256 完成，插件只负责把字节交回。
 
 本地手测（2026-11-23，Windows）：
 
 - `cargo test -- --ignored`：真网用例 `finds_the_latest_stable_release_of_the_daemon`
   在共享出口 IP 上命中了 GitHub 匿名限流，返回可读错误
   `GitHub API 限流（HTTP 403）：API rate limit exceeded ...；本小时剩余 0 次；配额重置于 ...`；
-  配额可用时该用例会断言最新 tag 与 `SHA256SUMS` 资产。
+  配额可用时该用例会断言 `sumsAsset == "SHA256SUMS"` 且资产多于一个。
 - 归档字节往返由 `downloads_an_asset_into_the_incoming_directory_byte_for_byte`
   用本地 HTTP 假 transport 覆盖：下载文件与响应体逐字节一致，`.part` 已清理，路径在
   `incoming/` 下；不依赖外网。限流响应另有一条本地假 403 用例，直接驱动 `net::fetch_json`

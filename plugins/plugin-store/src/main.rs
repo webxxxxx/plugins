@@ -493,42 +493,51 @@ impl PluginStore {
         ToolOutcome::text(json!({ "ok": true, "started": true, "entries": entries }).to_string())
     }
 
-    /// Look up one asset of the newest stable GitHub release, optionally
-    /// downloading it. This is how svcd reaches GitHub for its own upgrade
-    /// while staying TLS-free.
+    /// Look up the newest stable GitHub release, optionally downloading one of
+    /// its assets. This is how svcd reaches GitHub for its own upgrade while
+    /// staying TLS-free.
     ///
-    /// `download: false` is a pure query (no bytes). `download: true` returns
-    /// exactly one blob, because the host materializes a single `$blobPath` per
-    /// call; the checksum list is fetched by calling again with
-    /// `pattern: "SHA256SUMS"`. Downloads deliberately skip
-    /// `PLUGIN_STORE_MIRROR`: a mirror may serve plugins, not the daemon itself.
+    /// `download: false` returns `{tag, version, assets:[{name,size}], sumsAsset}`.
+    /// The host picks its archive from `assets` by target suffix and refuses the
+    /// upgrade when `sumsAsset` is null. `download: true` needs `asset` (an exact
+    /// file name) and returns exactly one blob, because the host materializes a
+    /// single `$blobPath` per call; `SHA256SUMS` is fetched with a second call.
+    /// Downloads deliberately skip `PLUGIN_STORE_MIRROR`: a mirror may serve
+    /// plugins, not the daemon itself.
     fn release_asset(&self, arguments: &Value) -> ToolOutcome {
-        let (repo, pattern) = match (required(arguments, "repo"), required(arguments, "pattern")) {
-            (Ok(repo), Ok(pattern)) => (repo, pattern),
-            (Err(error), _) | (_, Err(error)) => return ToolOutcome::error(error),
+        let repo = match arguments.get("repo") {
+            None => release::DEFAULT_REPO,
+            Some(Value::String(value)) if !value.trim().is_empty() => value.trim(),
+            Some(_) => return ToolOutcome::error("repo 必须是 owner/name 字符串"),
         };
         let download = match arguments.get("download") {
             None => false,
             Some(Value::Bool(value)) => *value,
             Some(_) => return ToolOutcome::error("download 只能是 true 或 false"),
         };
-        let platform = match arguments.get("platform") {
-            None => TARGET,
-            Some(Value::String(value)) if !value.trim().is_empty() => value.trim(),
-            Some(_) => return ToolOutcome::error("platform 必须是非空字符串"),
+        let asset_name = match arguments.get("asset") {
+            None => None,
+            Some(Value::String(value)) if !value.trim().is_empty() => Some(value.trim()),
+            Some(_) => return ToolOutcome::error("asset 必须是非空字符串"),
         };
+        if download && asset_name.is_none() {
+            return ToolOutcome::error("download=true 时必须给 asset 文件名");
+        }
 
         let release = match release::fetch(repo, &|url| net::fetch_json(url)) {
             Ok(release) => release,
             Err(error) => return ToolOutcome::error(error),
         };
-        let asset = match release::pick(&release, pattern, platform) {
+        if !download {
+            return ToolOutcome::text(release::check_json(&release).to_string());
+        }
+        let Some(asset_name) = asset_name else {
+            return ToolOutcome::error("download=true 时必须给 asset 文件名");
+        };
+        let asset = match release::find_asset(&release, asset_name) {
             Ok(asset) => asset,
             Err(error) => return ToolOutcome::error(error),
         };
-        if !download {
-            return ToolOutcome::text(release::check_json(&release, asset).to_string());
-        }
 
         let cancel = self.cancel.clone();
         match release::download_to(&self.temp_dir, asset, &move || cancel.is_cancelled()) {
@@ -1199,6 +1208,33 @@ mod tests {
         assert!(!part.exists());
         // Deleting an already-gone file is not an error.
         remove_download(&package);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_asset_rejects_bad_arguments_before_touching_the_network() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-release-args-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = store_with(&dir, job("done"));
+
+        for arguments in [
+            json!({ "download": "yes" }),
+            json!({ "repo": 7 }),
+            json!({ "asset": 3 }),
+            json!({ "download": true }),
+            json!({ "download": true, "asset": "  " }),
+        ] {
+            match store.release_asset(&arguments) {
+                ToolOutcome::Error(text) => assert!(!text.is_empty(), "{arguments}"),
+                ToolOutcome::Text(text) => panic!("expected an error for {arguments}: {text}"),
+                ToolOutcome::Blob { .. } => panic!("expected an error for {arguments}"),
+            }
+        }
+
         let _ = fs::remove_dir_all(&dir);
     }
 

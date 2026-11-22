@@ -115,16 +115,14 @@
     },
     {
       "name": "release_asset",
-      "desc": "查 GitHub 仓库最新稳定 release，按文件名选一个资产（{platform} 会展开）；download=true 返回该资产的单个 blob，SHA256SUMS 需再查一次",
+      "desc": "查 GitHub 最新稳定 release：download=false 回 {tag, version, assets, sumsAsset}；download=true 按精确文件名 asset 取单个 blob，供 svcd 自升级",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "repo": { "type": "string" },
-          "platform": { "type": "string" },
-          "pattern": { "type": "string" },
-          "download": { "type": "boolean", "default": false }
+          "repo": { "type": "string", "default": "webxxxxx/plugin-manager" },
+          "download": { "type": "boolean", "default": false },
+          "asset": { "type": "string" }
         },
-        "required": ["repo", "pattern"],
         "additionalProperties": false
       }
     }

@@ -99,16 +99,39 @@ fn parse_value(value: Value) -> Result<Release, String> {
     })
 }
 
-/// The `download: false` answer: everything the host needs to decide whether an
-/// upgrade exists, and nothing it would have to fetch bytes for.
-pub fn check_json(release: &Release, asset: &Asset) -> Value {
+/// The daemon this capability exists for. `repo` may be passed explicitly, but
+/// svcd's own upgrade never has to name it.
+pub const DEFAULT_REPO: &str = "webxxxxx/plugin-manager";
+
+/// The checksum list the host uses after downloading. Its presence is
+/// advertised as `sumsAsset`, so a release without it is refused before any
+/// bytes move.
+pub const SUMS_ASSET: &str = "SHA256SUMS";
+
+/// The `download: false` answer: every asset the release carries, plus whether
+/// a checksum list exists. The host picks its archive by target suffix and
+/// refuses to upgrade when `sumsAsset` is null.
+pub fn check_json(release: &Release) -> Value {
+    let assets: Vec<Value> = release
+        .assets
+        .iter()
+        .map(|asset| {
+            json!({
+                "name": asset.name,
+                "size": asset.size,
+            })
+        })
+        .collect();
+    let sums = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == SUMS_ASSET)
+        .map(|asset| asset.name.clone());
     json!({
         "tag": release.tag,
         "version": release.version,
-        "asset": {
-            "name": asset.name,
-            "size": asset.size,
-        },
+        "assets": assets,
+        "sumsAsset": sums,
     })
 }
 
@@ -146,59 +169,36 @@ pub fn latest_url(repo: &str) -> Result<String, String> {
     Ok(format!("{API}/repos/{owner}/{name}/releases/latest"))
 }
 
-/// Exactly one asset must match: a release that grows a second name matching
-/// the pattern is a contract change, and guessing which one is the upgrade
-/// would be a silent way to install the wrong binary.
-pub fn pick<'a>(release: &'a Release, pattern: &str, platform: &str) -> Result<&'a Asset, String> {
-    validate_pattern(pattern)?;
-    validate_platform(platform)?;
-    let pattern = expand(pattern.trim(), platform);
-    let hits: Vec<&Asset> = release
-        .assets
-        .iter()
-        .filter(|asset| wildcard_match(&pattern, &asset.name))
-        .collect();
-
-    match hits.as_slice() {
-        [] => {
-            let names: Vec<&str> = release
-                .assets
-                .iter()
-                .map(|asset| asset.name.as_str())
-                .collect();
-            let names = if names.is_empty() {
-                "无".to_string()
-            } else {
-                names.join("、")
-            };
-            Err(format!(
-                "没有资产匹配 {pattern}（这个 release 有：{names}）"
-            ))
-        }
-        [asset] => {
-            if asset.size > MAX_DOWNLOAD_BYTES {
-                return Err(format!(
-                    "资产 {} 有 {} MiB，超过 {} MiB 的下载上限",
-                    asset.name,
-                    asset.size.div_ceil(1024 * 1024),
-                    MAX_DOWNLOAD_BYTES / 1024 / 1024
-                ));
-            }
-            Ok(asset)
-        }
-        _ => {
-            let names: Vec<&str> = hits.iter().map(|asset| asset.name.as_str()).collect();
-            Err(format!(
-                "资产 {pattern} 匹配到 {} 个：{}；请把 pattern 写得更精确",
-                hits.len(),
-                names.join("、")
-            ))
-        }
+/// Pick one asset by its exact file name. Names are the contract the host
+/// chooses from in the `download: false` answer, so no wildcard guessing happens
+/// here anymore — a typo must fail loudly instead of matching the wrong file.
+pub fn find_asset<'a>(release: &'a Release, name: &str) -> Result<&'a Asset, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("asset 不能为空".into());
     }
-}
-
-pub fn expand(pattern: &str, platform: &str) -> String {
-    pattern.replace("{platform}", platform)
+    let Some(asset) = release.assets.iter().find(|asset| asset.name == name) else {
+        let names: Vec<&str> = release
+            .assets
+            .iter()
+            .map(|asset| asset.name.as_str())
+            .collect();
+        let names = if names.is_empty() {
+            "无".to_string()
+        } else {
+            names.join("、")
+        };
+        return Err(format!("release 里没有资产 {name}（可选：{names}）"));
+    };
+    if asset.size > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "资产 {} 有 {} MiB，超过 {} MiB 的下载上限",
+            asset.name,
+            asset.size.div_ceil(1024 * 1024),
+            MAX_DOWNLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    Ok(asset)
 }
 
 /// Fetch the picked asset into `temp/incoming/` and return its path, which the
@@ -227,69 +227,6 @@ pub fn download_to(
             Err(error)
         }
     }
-}
-
-/// File-name wildcard matching: `*` spans anything, `?` spans one character.
-/// Everything else is literal, so a name such as `svcd-1.0.0+build.zip` needs
-/// no escaping.
-pub fn wildcard_match(pattern: &str, name: &str) -> bool {
-    let pattern: Vec<char> = pattern.chars().collect();
-    let name: Vec<char> = name.chars().collect();
-    let (mut pi, mut ni) = (0usize, 0usize);
-    let mut star: Option<usize> = None;
-    let mut after_star = 0usize;
-
-    while ni < name.len() {
-        if pi < pattern.len() && (pattern[pi] == '?' || pattern[pi] == name[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < pattern.len() && pattern[pi] == '*' {
-            star = Some(pi);
-            pi += 1;
-            after_star = ni;
-        } else if let Some(at) = star {
-            pi = at + 1;
-            after_star += 1;
-            ni = after_star;
-        } else {
-            return false;
-        }
-    }
-    while pi < pattern.len() && pattern[pi] == '*' {
-        pi += 1;
-    }
-    pi == pattern.len()
-}
-
-fn validate_pattern(pattern: &str) -> Result<(), String> {
-    let pattern = pattern.trim();
-    if pattern.is_empty() {
-        return Err("pattern 不能为空".into());
-    }
-    if pattern.chars().count() > 256 {
-        return Err("pattern 太长（最多 256 个字符）".into());
-    }
-    if pattern
-        .chars()
-        .any(|character| matches!(character, '/' | '\\') || character.is_control())
-    {
-        return Err("pattern 只能是文件名，不能带路径分隔符".into());
-    }
-    Ok(())
-}
-
-fn validate_platform(platform: &str) -> Result<(), String> {
-    let platform = platform.trim();
-    if platform.is_empty() || platform.len() > 128 {
-        return Err("platform 为空或太长".into());
-    }
-    if !platform
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.'))
-    {
-        return Err("platform 只能是字母、数字和 - _ .".into());
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -353,18 +290,31 @@ mod tests {
     }
 
     #[test]
-    fn a_check_result_carries_the_metadata_but_no_archive() {
+    fn a_check_result_lists_every_asset_and_marks_the_checksum_list() {
         let release = parse(RELEASE).unwrap();
-        let asset = release.assets[1].clone();
 
-        let value = check_json(&release, &asset);
+        let value = check_json(&release);
 
         assert_eq!(value["tag"], "v0.1.5");
         assert_eq!(value["version"], "0.1.5");
-        assert_eq!(value["asset"]["name"], asset.name);
-        assert_eq!(value["asset"]["size"], 1_234_567);
+        assert_eq!(value["assets"].as_array().unwrap().len(), 2);
+        assert_eq!(value["assets"][0]["name"], "SHA256SUMS");
+        assert_eq!(
+            value["assets"][1]["name"],
+            "svcd-0.1.5-x86_64-pc-windows-msvc.zip"
+        );
+        assert_eq!(value["assets"][1]["size"], 1_234_567);
+        assert_eq!(value["sumsAsset"], "SHA256SUMS");
         assert!(value.get("archive").is_none(), "{value}");
-        assert!(value.get("sums").is_none(), "{value}");
+    }
+
+    #[test]
+    fn a_release_without_sums_reports_a_null_sums_asset() {
+        let release = release_of(&[("svcd-0.1.5-x86_64-pc-windows-msvc.zip", 1_234)]);
+
+        let value = check_json(&release);
+
+        assert!(value["sumsAsset"].is_null(), "{value}");
     }
 
     fn release_of(assets: &[(&str, u64)]) -> Release {
@@ -383,30 +333,31 @@ mod tests {
     }
 
     #[test]
-    fn picks_the_one_asset_the_platform_pattern_names() {
+    fn finds_an_asset_by_its_exact_name() {
         let release = release_of(&[
             ("SHA256SUMS", 320),
             ("svcd-0.1.5-x86_64-pc-windows-msvc.zip", 1_234),
-            ("svcd-0.1.5-x86_64-unknown-linux-gnu.tar.gz", 2_345),
         ]);
 
-        let asset = pick(&release, "svcd-*-{platform}.zip", "x86_64-pc-windows-msvc").unwrap();
-        assert_eq!(asset.name, "svcd-0.1.5-x86_64-pc-windows-msvc.zip");
+        let asset = find_asset(&release, "svcd-0.1.5-x86_64-pc-windows-msvc.zip").unwrap();
+        assert_eq!(asset.size, 1_234);
 
-        // The checksum list is its own lookup, so the host can call the same
+        // The checksum list is its own lookup, so the host calls the same
         // capability twice: once for the archive, once for SHA256SUMS.
-        let sums = pick(&release, "SHA256SUMS", "x86_64-pc-windows-msvc").unwrap();
-        assert_eq!(sums.name, "SHA256SUMS");
+        assert_eq!(
+            find_asset(&release, "SHA256SUMS").unwrap().name,
+            "SHA256SUMS"
+        );
     }
 
     #[test]
-    fn no_match_names_the_assets_that_were_there() {
+    fn an_unknown_asset_lists_the_candidates() {
         let release = release_of(&[
             ("SHA256SUMS", 320),
             ("svcd-0.1.5-aarch64-unknown-linux-gnu.tar.gz", 2_345),
         ]);
 
-        let error = pick(&release, "svcd-*-{platform}.zip", "x86_64-pc-windows-msvc").unwrap_err();
+        let error = find_asset(&release, "svcd-0.1.5-x86_64.zip").unwrap_err();
 
         assert!(
             error.contains("svcd-0.1.5-aarch64-unknown-linux-gnu.tar.gz"),
@@ -416,38 +367,12 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_matches_are_refused_with_every_candidate() {
-        let release = release_of(&[("svcd-1.0.0-x.zip", 1), ("svcd-1.0.0-x.zip.sig", 1)]);
-
-        let error = pick(&release, "svcd-*", "x").unwrap_err();
-
-        assert!(error.contains("svcd-1.0.0-x.zip.sig"), "{error}");
-        assert!(
-            error.contains("更精确") || error.contains("多个"),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn an_asset_over_the_download_budget_is_refused() {
         let release = release_of(&[("svcd-big.zip", MAX_DOWNLOAD_BYTES + 1)]);
 
-        let error = pick(&release, "svcd-*", "x").unwrap_err();
+        let error = find_asset(&release, "svcd-big.zip").unwrap_err();
 
         assert!(error.contains("256 MiB"), "{error}");
-    }
-
-    #[test]
-    fn wildcards_match_inside_a_file_name() {
-        assert!(wildcard_match("svcd-*-x86_64.zip", "svcd-0.1.5-x86_64.zip"));
-        assert!(!wildcard_match(
-            "svcd-*-x86_64.zip",
-            "svcd-0.1.5-aarch64.zip"
-        ));
-        assert!(wildcard_match("SHA256SUMS", "SHA256SUMS"));
-        assert!(!wildcard_match("SHA256SUMS", "SHA256SUMS.sig"));
-        assert!(wildcard_match("a?c", "abc"));
-        assert!(!wildcard_match("a?c", "abbc"));
     }
 
     #[test]
@@ -534,14 +459,13 @@ mod tests {
     #[test]
     #[ignore = "hits api.github.com; run by hand when the network is available"]
     fn finds_the_latest_stable_release_of_the_daemon() {
-        let release = fetch("webxxxxx/plugin-manager", &|url| {
-            crate::net::fetch_json(url)
-        })
-        .expect("latest release");
+        let release =
+            fetch(DEFAULT_REPO, &|url| crate::net::fetch_json(url)).expect("latest release");
 
-        let sums = pick(&release, "SHA256SUMS", "x86_64-pc-windows-msvc").expect("checksum list");
+        let value = check_json(&release);
 
-        assert_eq!(sums.name, "SHA256SUMS");
+        assert_eq!(value["sumsAsset"], SUMS_ASSET);
+        assert!(value["assets"].as_array().unwrap().len() > 1);
         assert!(!release.tag.is_empty());
     }
 }
