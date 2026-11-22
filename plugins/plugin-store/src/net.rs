@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
+pub(crate) const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const USER_AGENT: &str = concat!("plugin-store/", env!("CARGO_PKG_VERSION"));
 
 fn builder() -> ureq::AgentBuilder {
@@ -89,7 +89,11 @@ fn text_from(agent: &ureq::Agent, url: &str) -> Result<String, String> {
         .set("Accept", "text/plain, text/markdown, */*")
         .call()
         .map_err(|error| format!("{url}: {error}"))?;
-    let mut reader = response.into_reader().take(MAX_TEXT_BYTES + 1);
+    read_body(response.into_reader(), url)
+}
+
+fn read_body(reader: impl Read, url: &str) -> Result<String, String> {
+    let mut reader = reader.take(MAX_TEXT_BYTES + 1);
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
@@ -100,6 +104,104 @@ fn text_from(agent: &ureq::Agent, url: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| format!("{url}: not UTF-8: {error}"))
 }
 
+/// Fetch one JSON document (the GitHub API) as text. Same DoH fallback as
+/// [`fetch_text`], but a rate-limit or a missing repo is reported as itself
+/// instead of being retried against another resolver.
+pub fn fetch_json(url: &str) -> Result<String, String> {
+    let direct = agent();
+    match json_from(&direct, url) {
+        Ok(body) => Ok(body),
+        // A 403/404 is an answer, not a broken resolver: retrying it through
+        // DoH would burn another request without changing anything.
+        Err(JsonFailure::Status(message)) => Err(message),
+        Err(JsonFailure::Transport(first)) => {
+            if let Some(agent) = agent_with_doh(&unique_hosts(&[url])) {
+                match json_from(&agent, url) {
+                    Ok(body) => return Ok(body),
+                    Err(JsonFailure::Status(message)) => return Err(message),
+                    Err(JsonFailure::Transport(second)) => {
+                        return Err(format!("{first}；{second}"))
+                    }
+                }
+            }
+            Err(first)
+        }
+    }
+}
+
+enum JsonFailure {
+    Status(String),
+    Transport(String),
+}
+
+fn json_from(agent: &ureq::Agent, url: &str) -> Result<String, JsonFailure> {
+    let response = match agent
+        .get(url)
+        .set("Accept", "application/vnd.github+json")
+        .call()
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(status, response)) => {
+            let remaining = response.header("x-ratelimit-remaining").map(str::to_string);
+            let reset = response.header("x-ratelimit-reset").map(str::to_string);
+            let mut body = String::new();
+            let _ = response
+                .into_reader()
+                .take(4 * 1024)
+                .read_to_string(&mut body);
+            let message = serde_json::from_str::<Value>(&body).ok().and_then(|value| {
+                value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+            return Err(JsonFailure::Status(github_http_error(
+                status,
+                message.as_deref(),
+                remaining.as_deref(),
+                reset.as_deref(),
+            )));
+        }
+        Err(ureq::Error::Transport(error)) => {
+            return Err(JsonFailure::Transport(format!("{url}: {error}")))
+        }
+    };
+    read_body(response.into_reader(), url).map_err(JsonFailure::Transport)
+}
+
+fn github_http_error(
+    status: u16,
+    message: Option<&str>,
+    remaining: Option<&str>,
+    reset: Option<&str>,
+) -> String {
+    let message = message
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .unwrap_or("没有说明");
+    let rate_limited = status == 429
+        || remaining.and_then(|value| value.trim().parse::<u64>().ok()) == Some(0)
+        || message.to_ascii_lowercase().contains("rate limit")
+        || message.to_ascii_lowercase().contains("abuse");
+    if rate_limited {
+        let mut text = format!("GitHub API 限流（HTTP {status}）：{message}");
+        if let Some(remaining) = remaining.map(str::trim).filter(|value| !value.is_empty()) {
+            text.push_str(&format!("；本小时剩余 {remaining} 次"));
+        }
+        if let Some(reset) = reset.map(str::trim).filter(|value| !value.is_empty()) {
+            text.push_str(&format!("；配额重置于 {reset}（Unix 时间）"));
+        }
+        text.push_str("；GitHub 匿名请求每小时 60 次，稍后重试或换出口 IP 即可");
+        text
+    } else if status == 404 {
+        format!("GitHub API 返回 404：仓库或 release 不存在（{message}）")
+    } else if status == 403 {
+        format!("GitHub API 拒绝访问（HTTP 403）：{message}")
+    } else {
+        format!("GitHub API 返回 HTTP {status}：{message}")
+    }
+}
+
 /// Download a package to dest, resuming from a complete dest is not needed:
 /// only a fully renamed file is ever treated as cached. A .part file is always
 /// restarted.
@@ -107,6 +209,31 @@ pub fn download(
     url: &str,
     dest: &Path,
     size_hint: u64,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<u64, String> {
+    let mirror = mirror_template();
+    download_with(url, dest, size_hint, mirror.as_deref(), progress, cancelled)
+}
+
+/// The same download without the `PLUGIN_STORE_MIRROR` hop. The self-upgrade
+/// path uses this: a mirror may serve the packages, but it must never choose
+/// the bytes of the daemon that verifies it.
+pub fn download_direct(
+    url: &str,
+    dest: &Path,
+    size_hint: u64,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<u64, String> {
+    download_with(url, dest, size_hint, None, progress, cancelled)
+}
+
+fn download_with(
+    url: &str,
+    dest: &Path,
+    size_hint: u64,
+    mirror: Option<&str>,
     progress: &mut dyn FnMut(u64, Option<u64>),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<u64, String> {
@@ -125,11 +252,7 @@ pub fn download(
     let part = part_path(dest);
     let _ = fs::remove_file(&part);
 
-    let mut urls = Vec::new();
-    if let Some(mirror) = mirror_template() {
-        urls.push(apply_mirror(&mirror, url));
-    }
-    urls.push(url.to_string());
+    let urls = candidates(url, mirror);
 
     let mut errors = Vec::new();
     let direct = agent();
@@ -214,11 +337,11 @@ fn download_one(
             break;
         }
         downloaded = downloaded.saturating_add(read as u64);
-        if downloaded > MAX_PACKAGE_BYTES {
+        if downloaded > MAX_DOWNLOAD_BYTES {
             let _ = fs::remove_file(part);
             return Err(format!(
                 "{url}: 包超过 {} MiB",
-                MAX_PACKAGE_BYTES / 1024 / 1024
+                MAX_DOWNLOAD_BYTES / 1024 / 1024
             ));
         }
         file.write_all(&buffer[..read])
@@ -251,7 +374,7 @@ fn download_one(
     if looks_like_html(part) {
         let _ = fs::remove_file(part);
         return Err(format!(
-            "{url}: 返回的是 HTML 而不是 .spk（下载地址需要代理或 DNS 回退）"
+            "{url}: 返回的是 HTML 而不是文件（下载地址需要代理或 DNS 回退）"
         ));
     }
     fs::rename(part, dest).map_err(|error| format!("{}: {error}", dest.display()))?;
@@ -290,6 +413,17 @@ fn apply_mirror(template: &str, url: &str) -> String {
     } else {
         format!("{template}/{url}")
     }
+}
+
+/// The URL list in try order. `None` is the upgrade path: the original URL is
+/// the only candidate, so a mirror cannot swap the daemon's bytes.
+fn candidates(url: &str, mirror: Option<&str>) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(mirror) = mirror.map(str::trim).filter(|mirror| !mirror.is_empty()) {
+        urls.push(apply_mirror(mirror, url));
+    }
+    urls.push(url.to_string());
+    urls
 }
 
 fn unique_hosts(urls: &[&str]) -> Vec<String> {
@@ -481,5 +615,77 @@ mod tests {
         std::fs::write(&path, b"ustar\0\0").unwrap();
         assert!(!looks_like_html(&path));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn explains_rate_limiting_and_missing_repos() {
+        let limited = github_http_error(
+            403,
+            Some("API rate limit exceeded for 1.2.3.4."),
+            Some("0"),
+            Some("1763800000"),
+        );
+        assert!(limited.contains("限流"), "{limited}");
+        assert!(limited.contains("API rate limit exceeded"), "{limited}");
+        assert!(limited.contains("1763800000"), "{limited}");
+
+        let missing = github_http_error(404, Some("Not Found"), None, None);
+        assert!(missing.contains("404"), "{missing}");
+        assert!(missing.contains("Not Found"), "{missing}");
+
+        // A plain refusal is not a rate limit, even though GitHub uses 403 for
+        // both.
+        let forbidden = github_http_error(403, Some("Forbidden"), None, Some("1763800000"));
+        assert!(!forbidden.contains("限流"), "{forbidden}");
+        assert!(forbidden.contains("拒绝访问"), "{forbidden}");
+    }
+
+    #[test]
+    fn candidates_keep_the_mirror_out_of_the_upgrade_path() {
+        assert_eq!(
+            candidates("https://github.com/x", Some("https://gh.example/{url}")),
+            vec![
+                "https://gh.example/https://github.com/x".to_string(),
+                "https://github.com/x".to_string()
+            ]
+        );
+        assert_eq!(
+            candidates("https://github.com/x", None),
+            vec!["https://github.com/x".to_string()]
+        );
+    }
+
+    #[test]
+    fn maps_a_real_rate_limit_response_to_a_readable_error() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            let body = r#"{"message":"API rate limit exceeded for 1.2.3.4."}"#;
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1763800000\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let error = fetch_json(&format!(
+            "http://{address}/repos/webxxxxx/plugin-manager/releases/latest"
+        ))
+        .unwrap_err();
+
+        assert!(error.contains("限流"), "{error}");
+        assert!(error.contains("API rate limit exceeded"), "{error}");
+        assert!(error.contains("本小时剩余 0 次"), "{error}");
+        assert!(error.contains("1763800000"), "{error}");
+        server.join().unwrap();
     }
 }

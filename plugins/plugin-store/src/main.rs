@@ -1,13 +1,15 @@
 // plugin-store - a small catalog UI for the .spk packages hosted by this repo.
 //
-// It does five things: read a generated Markdown table, cache it locally,
-// filter by the host's compat facts, download one package, and hand the bytes
-// to the host's own /api/v1/plugins install endpoint. Signature and platform
-// checks stay in the daemon.
+// It does six things: read a generated Markdown table, cache it locally,
+// filter by the host's compat facts, download one package, hand the bytes
+// to the host's own /api/v1/plugins install endpoint, and look up a GitHub
+// release asset so svcd can upgrade itself without linking TLS. Signature and
+// platform checks stay in the daemon.
 
 mod catalog;
 mod download;
 mod net;
+mod release;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,6 +82,7 @@ impl Plugin for PluginStore {
         "package_blob",
         "install_result",
         "refresh",
+        "release_asset",
     ];
 
     fn call(&mut self, name: &str, arguments: &Value) -> ToolOutcome {
@@ -91,6 +94,7 @@ impl Plugin for PluginStore {
             "package_blob" => self.package_blob(arguments),
             "install_result" => self.install_result(arguments),
             "refresh" => self.refresh(),
+            "release_asset" => self.release_asset(arguments),
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -487,6 +491,54 @@ impl PluginStore {
             return ToolOutcome::error(format!("启动刷新线程失败: {error}"));
         }
         ToolOutcome::text(json!({ "ok": true, "started": true, "entries": entries }).to_string())
+    }
+
+    /// Look up one asset of the newest stable GitHub release, optionally
+    /// downloading it. This is how svcd reaches GitHub for its own upgrade
+    /// while staying TLS-free.
+    ///
+    /// `download: false` is a pure query (no bytes). `download: true` returns
+    /// exactly one blob, because the host materializes a single `$blobPath` per
+    /// call; the checksum list is fetched by calling again with
+    /// `pattern: "SHA256SUMS"`. Downloads deliberately skip
+    /// `PLUGIN_STORE_MIRROR`: a mirror may serve plugins, not the daemon itself.
+    fn release_asset(&self, arguments: &Value) -> ToolOutcome {
+        let (repo, pattern) = match (required(arguments, "repo"), required(arguments, "pattern")) {
+            (Ok(repo), Ok(pattern)) => (repo, pattern),
+            (Err(error), _) | (_, Err(error)) => return ToolOutcome::error(error),
+        };
+        let download = match arguments.get("download") {
+            None => false,
+            Some(Value::Bool(value)) => *value,
+            Some(_) => return ToolOutcome::error("download 只能是 true 或 false"),
+        };
+        let platform = match arguments.get("platform") {
+            None => TARGET,
+            Some(Value::String(value)) if !value.trim().is_empty() => value.trim(),
+            Some(_) => return ToolOutcome::error("platform 必须是非空字符串"),
+        };
+
+        let release = match release::fetch(repo, &|url| net::fetch_json(url)) {
+            Ok(release) => release,
+            Err(error) => return ToolOutcome::error(error),
+        };
+        let asset = match release::pick(&release, pattern, platform) {
+            Ok(asset) => asset,
+            Err(error) => return ToolOutcome::error(error),
+        };
+        if !download {
+            return ToolOutcome::text(release::check_json(&release, asset).to_string());
+        }
+
+        let cancel = self.cancel.clone();
+        match release::download_to(&self.temp_dir, asset, &move || cancel.is_cancelled()) {
+            Ok(path) => ToolOutcome::Blob {
+                path,
+                name: asset.name.clone(),
+                mime_type: "application/octet-stream".into(),
+            },
+            Err(error) => ToolOutcome::error(error),
+        }
     }
 }
 

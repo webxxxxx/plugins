@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "name": "plugin-store",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "desc": "浏览、搜索并安装插件",
   "protocol": 1,
   "exec": {
@@ -110,6 +110,21 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "release_asset",
+      "desc": "查 GitHub 仓库最新稳定 release，按文件名选一个资产（{platform} 会展开）；download=true 返回该资产的单个 blob，SHA256SUMS 需再查一次",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": { "type": "string" },
+          "platform": { "type": "string" },
+          "pattern": { "type": "string" },
+          "download": { "type": "boolean", "default": false }
+        },
+        "required": ["repo", "pattern"],
         "additionalProperties": false
       }
     }
