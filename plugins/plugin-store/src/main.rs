@@ -170,6 +170,7 @@ impl PluginStore {
             "pages": page.pages,
             "page_size": PAGE_SIZE,
             "target": target,
+            "self": self.own_id,
             "device": device,
             "scope": scope,
             "source": state.source.clone(),
@@ -197,10 +198,6 @@ impl PluginStore {
             .get("device")
             .and_then(Value::as_str)
             .unwrap_or("");
-        if name == self.own_id {
-            return ToolOutcome::error("不能从自己的页面里更新插件商店本身");
-        }
-
         let entry = {
             let state = match self.state.lock() {
                 Ok(state) => state,
@@ -1054,6 +1051,40 @@ mod tests {
             own_id: "plugin-store".into(),
             cancel: Cancel::default(),
         }
+    }
+
+    #[test]
+    fn list_marks_the_store_itself() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-list-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = store_with(&dir, job("done"));
+        {
+            let mut state = store.state.lock().unwrap();
+            state.job = None;
+            state.entries = vec![catalog::Entry {
+                name: "plugin-store".into(),
+                version: "0.1.9".into(),
+                platform: "x86_64-unknown-linux-gnu".into(),
+                size: "1.8 MiB".into(),
+                size_bytes: 1_873_408,
+                url: "https://example.test/plugin-store-0.1.9.spk".into(),
+                device: None,
+            }];
+        }
+
+        match store.list(&json!({ "scope": "all", "platform": "x86_64-unknown-linux-gnu" })) {
+            ToolOutcome::Text(text) => {
+                let body: Value = serde_json::from_str(&text).expect("list returns JSON");
+                assert_eq!(body["self"], "plugin-store");
+                assert_eq!(body["total"], 1);
+            }
+            _ => panic!("expected a text result"),
+        }
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

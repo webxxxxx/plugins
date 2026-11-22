@@ -95,6 +95,7 @@
   .muted { color: var(--muted); }
   .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--bg); color: var(--muted); font-size: 11px; margin-left: 6px; white-space: nowrap; }
   .badge.cached, .badge.installed { color: var(--ok); background: var(--ok-bg); }
+  .badge.self { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
   .cell-action { text-align: right; white-space: nowrap; }
   .empty { padding: 42px 20px; text-align: center; color: var(--muted); }
   .empty strong { display: block; color: var(--ink); margin-bottom: 6px; }
@@ -217,13 +218,16 @@
     error: '失败',
   };
 
-  const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null };
+  const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null, selfId: null };
   const INSTALLED_TTL_MS = 30000;
   let installedFetchedAt = 0;
   let installedRequest = null;
   let searchTimer = null;
   let pollTimer = null;
   let hideJobFor = null;
+  // Clicking "升级" on the store itself asks for a second click first: the
+  // upgrade replaces this plugin's files and restarts it.
+  let selfConfirm = null;
 
   function text(value) {
     const node = document.createElement('span');
@@ -354,6 +358,7 @@
       ]);
       if (installed) state.installed = installed;
       state.data = data;
+      if (data.self) state.selfId = data.self;
       state.page = data.page || 1;
       if (data.job) {
         updateJob(data.job);
@@ -441,6 +446,14 @@
     name.className = 'name';
     name.textContent = entry.name;
     nameCell.appendChild(name);
+    const isSelf = Boolean(state.selfId) && entry.name === state.selfId;
+    if (isSelf) {
+      const badge = document.createElement('span');
+      badge.className = 'badge self';
+      badge.textContent = '自己';
+      badge.title = '插件商店自己：升级会替换正在运行的版本并重启它';
+      nameCell.appendChild(badge);
+    }
     const installedVersion = state.installed.get(entry.name);
     const isInstalled = installedVersion !== undefined;
     // An unknown installed version is treated as current: without a version
@@ -486,18 +499,23 @@
     const actionCell = document.createElement('td');
     actionCell.className = 'cell-action';
     const button = document.createElement('button');
+    const confirming = isSelf && Boolean(selfConfirm) && selfConfirm.version === entry.version &&
+      Date.now() < selfConfirm.until;
     button.className = upToDate ? 'small' : 'primary small';
     const active = state.job && !state.job.done && state.job.name === entry.name &&
       state.job.version === entry.version && state.job.platform === entry.platform &&
       (state.job.device || '') === (entry.device || '');
-    button.textContent = active ? '处理中…' : upToDate ? '已安装' : canUpgrade ? '升级' : (entry.cached ? '安装' : '下载安装');
+    button.textContent = confirming ? '确认升级' : active ? '处理中…' : upToDate ? '已安装' : canUpgrade ? '升级' : (entry.cached ? '安装' : '下载安装');
     button.disabled = upToDate || Boolean(state.job && !state.job.done);
     if (upToDate) {
       button.title = installedVersion && installedVersion !== entry.version
         ? '已安装版本 ' + installedVersion + '，不低于目录版本'
         : '已安装该版本';
     } else if (canUpgrade) {
-      button.title = '从 ' + installedVersion + ' 升级到 ' + entry.version;
+      button.title = (isSelf ? '升级会重启插件商店，页面随后自动刷新：' : '') +
+        '从 ' + installedVersion + ' 升级到 ' + entry.version;
+    } else if (isSelf) {
+      button.title = '安装插件商店会重启它，页面随后自动刷新';
     }
     button.onclick = () => startInstall(entry);
     actionCell.appendChild(button);
@@ -508,6 +526,23 @@
 
   async function startInstall(entry) {
     if (state.job && !state.job.done) return;
+    const isSelf = Boolean(state.selfId) && entry.name === state.selfId;
+    const confirmed = Boolean(selfConfirm) && selfConfirm.version === entry.version &&
+      Date.now() < selfConfirm.until;
+    if (isSelf && !confirmed) {
+      selfConfirm = { version: entry.version, until: Date.now() + 6000 };
+      clearNotice();
+      showNotice('升级插件商店会重启它并自动刷新页面；再点一次「确认升级」继续', 'warn');
+      render();
+      setTimeout(() => {
+        if (selfConfirm && selfConfirm.version === entry.version) {
+          selfConfirm = null;
+          render();
+        }
+      }, 6500);
+      return;
+    }
+    selfConfirm = null;
     clearNotice();
     try {
       const result = await call('install', {
@@ -518,6 +553,10 @@
       });
       updateJob(result.job);
       if (result.job) startPolling();
+      render();
+      if (isSelf && result.job) {
+        showNotice('正在下载插件商店 ' + entry.version + '，完成后会自动重启并刷新页面', 'warn');
+      }
     } catch (error) {
       showNotice('安装失败：' + (error.message || error), 'bad');
     }
@@ -609,6 +648,9 @@
     if (!state.job || state.job.id !== job.id) return;
     if (state.handoffJob === job.id) return;
     state.handoffJob = job.id;
+    // Polling against the old process would only produce errors once the host
+    // stops it for an upgrade.
+    if (state.selfId && job.name === state.selfId) stopPolling();
     await handoff(job);
   }
 
@@ -616,10 +658,12 @@
   // application/octet-stream. The plugin only prepares the bytes and asks the
   // host to turn the cached file into a blob.
   async function handoff(job) {
+    const isSelf = Boolean(state.selfId) && job.name === state.selfId;
+    let posted = false;
     try {
       updateJob(Object.assign({}, job, {
         phase: 'installing',
-        message: '正在把包交给宿主安装',
+        message: isSelf ? '正在升级插件商店…' : '正在把包交给宿主安装',
       }));
       const prepared = await ui.invokeResult('package_blob', {
         name: job.name,
@@ -647,6 +691,15 @@
       const installed = await installResponse.json();
 
       if (!installed.id) throw new Error('安装响应缺少插件 id');
+
+      // The host has already replaced this plugin's files and stopped the old
+      // process; only the browser can start the new version and reload the page.
+      if (isSelf) {
+        posted = true;
+        await restartSelf(installed);
+        return;
+      }
+
       state.installed.set(job.name, installed.version || '');
       state.installed.set(installed.id, installed.version || '');
       installedFetchedAt = Date.now();
@@ -673,6 +726,13 @@
       await load({ quiet: true });
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
+      if (isSelf && posted) {
+        // The old process is gone, so neither install_result nor load can work;
+        // the page itself still carries the reason.
+        showNotice('升级未完成：' + message, 'bad');
+        jobMessage.textContent = '升级未完成：' + message;
+        return;
+      }
       try {
         await call('install_result', { ok: false, message: message });
       } catch (_) {}
@@ -681,6 +741,44 @@
     } finally {
       state.handoffJob = null;
     }
+  }
+
+  // The host serves this page itself, so it survives the plugin restart. Start
+  // the freshly installed version, wait until it reports the new version, then
+  // reload so the browser runs the new UI.
+  async function restartSelf(installed) {
+    const id = installed.id;
+    jobMessage.textContent = '已换上 ' + (installed.version || '新版本') + '，正在重启插件商店…';
+    if (installed.state !== 'running') {
+      const started = await fetch('/api/v1/services/' + encodeURIComponent(id) + '/start', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Svcd-Csrf': '1' },
+      });
+      if (!started.ok) {
+        throw new Error('新版本启动失败：' + (await responseError(started)));
+      }
+    }
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      try {
+        const response = await fetch('/api/v1/services', { credentials: 'same-origin' });
+        if (!response.ok) continue;
+        const body = await response.json();
+        const service = (body.services || []).find((item) => item && item.id === id);
+        if (service && service.state === 'running' &&
+            (!installed.version || service.version === installed.version)) {
+          jobBar.style.width = '100%';
+          jobMessage.textContent = '已升级到 ' + service.version + '，正在刷新页面…';
+          showNotice('插件商店已升级到 ' + service.version + '，正在刷新页面', 'ok');
+          setTimeout(() => location.reload(), 700);
+          return;
+        }
+      } catch (_) {
+        // The host may briefly refuse connections while it restarts the plugin.
+      }
+    }
+    throw new Error('等待新版本启动超时，请在管理页启动插件商店');
   }
 
   queryInput.addEventListener('input', () => {
