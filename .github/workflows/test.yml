@@ -64,6 +64,15 @@ jobs:
             test -f ".scaffold/smoke-$language/package/manifest.json"
             test -f ".scaffold/smoke-$language/build.json"
             test -f ".scaffold/smoke-$language/.plugin.json"
+            # Generated manifests are already on manifest schema 1 with an ASCII
+            # id; a template that regresses here fails before packaging.
+            manifest=".scaffold/smoke-$language/package/manifest.json"
+            test "$(jq -r '.schema' "$manifest")" = "1"
+            id=$(jq -r '.id // empty' "$manifest")
+            printf '%s' "$id" | grep -Eq '^[a-z0-9][a-z0-9_-]{0,63}$' || {
+              echo "::error::template $language wrote a bad id: $id"
+              exit 1
+            }
           done
           # The web toolkit must have been vendored, not referenced.
           test -f .scaffold/smoke-rust/package/payload/web/plugin-ui.mjs

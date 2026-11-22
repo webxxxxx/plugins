@@ -108,6 +108,39 @@ jobs:
           if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi
           cd "samples/${{ matrix.sample }}"
           "../../$tools" build --platform "${{ matrix.platform }}"
+      - name: Verify the packaged sample
+        shell: bash
+        env:
+          SVCD_PLUGIN_BIN: ${{ github.workspace }}/bin/plugin${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          set -euo pipefail
+          # `verify --json` must say ok, and the display name in the artifact must
+          # still be the Chinese name the sample's manifest declares.
+          expected=$(jq -r '.name' "samples/${{ matrix.sample }}/package/manifest.json")
+          for spk in "samples/${{ matrix.sample }}"/dist/*.spk; do
+            report=$("$SVCD_PLUGIN_BIN" verify "$spk" --json)
+            echo "$report" | jq -e '.ok == true' > /dev/null
+            actual=$(echo "$report" | jq -r '.displayName')
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::displayName \"$actual\" != manifest name \"$expected\" in $spk"
+              exit 1
+            fi
+          done
+
+      - name: Package a freshly scaffolded template
+        if: matrix.sample == 'hello-shell'
+        shell: bash
+        env:
+          SVCD_PLUGIN_BIN: ${{ github.workspace }}/bin/plugin${{ runner.os == 'Windows' && '.exe' || '' }}
+        run: |
+          set -euo pipefail
+          tools="tools/cli/target/release/plugin-tools"
+          if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi
+          "$tools" template smoke-shell --lang shell --platforms "${{ matrix.platform }}" --dir .scaffold
+          spk=".scaffold/smoke-shell/dist/smoke-shell-0.1.0-${{ matrix.platform }}.spk"
+          (cd .scaffold/smoke-shell && "../../$tools" build)
+          "$tools" check "$spk"
+
       - uses: actions/upload-artifact@v7
         with:
           name: spk-${{ matrix.sample }}-${{ matrix.os }}
