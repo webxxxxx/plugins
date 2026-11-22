@@ -7,7 +7,7 @@
 - 设备平台与 device id 来自宿主 GET /api/v1/compat（plugin-manager 的同一份 HostFacts）；
   只显示 platform 精确匹配的包，没有「全部平台」开关。
 - 包名带 device 标识时按 device 过滤：优先解析文件名
-  <name>-<version>-<platform>-<device>.spk 的平台后后缀，也兼容 device 放在包名/文件名
+  <id>-<version>-<platform>-<device>.spk 的平台后后缀（`id` 是插件的 ASCII 身份；`name` 只是显示名），也兼容 device 放在包名/文件名
   version 两侧的写法；只有宿主的 device id 相同才显示，无标识视为该 platform 的通用包。
   当前 docs 生成器也已支持平台后的 device 后缀，避免设备包在列表里被丢掉。
 - 每页固定 50 条；搜索只匹配插件名，输入即筛（250 ms 防抖）。

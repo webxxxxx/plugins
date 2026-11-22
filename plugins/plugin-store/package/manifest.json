@@ -1,6 +1,7 @@
 {
-  "schema": 2,
-  "name": "plugin-store",
+  "schema": 1,
+  "id": "plugin-store",
+  "name": "插件商店",
   "version": "0.1.10",
   "desc": "浏览、搜索并安装插件",
   "protocol": 1,
