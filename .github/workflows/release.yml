@@ -469,13 +469,26 @@ jobs:
             manifest="$tmp/package/manifest.json"
             name=$(jq -r '.name // empty' "$manifest")
             version=$(jq -r '.version // empty' "$manifest")
+            exec_path=$(jq -r '.exec.path // empty' "$manifest")
             platform="${dir#pkg-$name-}"
             if [ -z "$name" ] || [ -z "$version" ] || [ "$platform" = "$dir" ] || [ -z "$platform" ]; then
               echo "::error::bad package artifact $dir (name=$name version=$version platform=$platform)"
               exit 1
             fi
+            if [ -z "$exec_path" ]; then
+              echo "::error::manifest has no exec.path in $dir"
+              exit 1
+            fi
+            if [ ! -f "$tmp/package/$exec_path" ]; then
+              if [ -f "$tmp/package/$exec_path.exe" ]; then
+                exec_path="$exec_path.exe"
+              else
+                echo "::error::exec.path not found in $dir: $exec_path"
+                exit 1
+              fi
+            fi
             out="dist/${name}-${version}-${platform}.spk"
-            bin/plugin bundle "$tmp/package" --platform "$platform" --key "$RUNNER_TEMP/signing.pem" -o "$out"
+            bin/plugin bundle "$tmp/package" --platform "$platform" --exec "$exec_path" --key "$RUNNER_TEMP/signing.pem" -o "$out"
             bin/plugin verify "$out" --pubkey "$RUNNER_TEMP/signing.pub"
             rm -rf "$tmp"
             signed=$((signed + 1))
