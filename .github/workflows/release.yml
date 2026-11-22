@@ -467,12 +467,14 @@ jobs:
             tmp=$(mktemp -d)
             tar -xzf "$archive" -C "$tmp"
             manifest="$tmp/package/manifest.json"
-            name=$(jq -r '.name // empty' "$manifest")
+            # `id` is the identity and names the artifact; `name` is the display
+            # name (any UTF-8) and must never reach a file name.
+            id=$(jq -r '.id // empty' "$manifest")
             version=$(jq -r '.version // empty' "$manifest")
             exec_path=$(jq -r '.exec.path // empty' "$manifest")
-            platform="${dir#pkg-$name-}"
-            if [ -z "$name" ] || [ -z "$version" ] || [ "$platform" = "$dir" ] || [ -z "$platform" ]; then
-              echo "::error::bad package artifact $dir (name=$name version=$version platform=$platform)"
+            platform="${dir#pkg-$id-}"
+            if [ -z "$id" ] || [ -z "$version" ] || [ "$platform" = "$dir" ] || [ -z "$platform" ]; then
+              echo "::error::bad package artifact $dir (id=$id version=$version platform=$platform)"
               exit 1
             fi
             if [ -z "$exec_path" ]; then
@@ -487,8 +489,8 @@ jobs:
                 exit 1
               fi
             fi
-            out="dist/${name}-${version}-${platform}.spk"
-            bin/plugin bundle "$tmp/package" --platform "$platform" --exec "$exec_path" --key "$RUNNER_TEMP/signing.pem" -o "$out"
+            out="dist/${id}-${version}-${platform}.spk"
+            bin/plugin bundle "$tmp/package" --platform "$platform" --id "$id" --exec "$exec_path" --key "$RUNNER_TEMP/signing.pem" -o "$out"
             bin/plugin verify "$out" --pubkey "$RUNNER_TEMP/signing.pub"
             rm -rf "$tmp"
             signed=$((signed + 1))
