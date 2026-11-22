@@ -12,6 +12,7 @@ case "$PLATFORM" in
     export CC_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-gcc
     export CXX_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-g++
     export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc
+    export BINDGEN_EXTRA_CLANG_ARGS="--target=armv7-linux-musleabihf --sysroot=$CROSS/arm-linux-musleabihf"
     TC=${TMPDIR:-/tmp}/svcd-armv7.cmake
     {
       echo "set(CMAKE_SYSTEM_NAME Linux)"
@@ -33,7 +34,8 @@ case "$PLATFORM" in
     export CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++
     export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
     export RANLIB_aarch64_unknown_linux_musl=aarch64-linux-musl-ranlib
-    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc ;;
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+    export BINDGEN_EXTRA_CLANG_ARGS="--target=aarch64-linux-musl --sysroot=$A/aarch64-linux-musl" ;;
   x86_64-unknown-linux-musl)
     X=${X86_64_MUSL_CROSS:-${CROSS_PREFIX:-/usr/soft/x86_64-linux-musl-cross}}
     export PATH="$X/bin:$PATH"
@@ -41,7 +43,8 @@ case "$PLATFORM" in
     export CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
     export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
     export RANLIB_x86_64_unknown_linux_musl=x86_64-linux-musl-ranlib
-    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc ;;
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+    export BINDGEN_EXTRA_CLANG_ARGS="--target=x86_64-linux-musl --sysroot=$X/x86_64-linux-musl" ;;
   x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc|aarch64-apple-darwin|x86_64-apple-darwin) ;;
   *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
 esac
