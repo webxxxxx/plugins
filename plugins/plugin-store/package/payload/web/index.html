@@ -92,7 +92,7 @@
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
   .muted { color: var(--muted); }
   .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--bg); color: var(--muted); font-size: 11px; margin-left: 6px; white-space: nowrap; }
-  .badge.cached { color: var(--ok); background: var(--ok-bg); }
+  .badge.cached, .badge.installed { color: var(--ok); background: var(--ok-bg); }
   .cell-action { text-align: right; white-space: nowrap; }
   .empty { padding: 42px 20px; text-align: center; color: var(--muted); }
   .empty strong { display: block; color: var(--ink); margin-bottom: 6px; }
@@ -215,7 +215,7 @@
     error: '失败',
   };
 
-  const state = { page: 1, query: '', data: null, job: null, loading: false, pending: false, handoffJob: null };
+  const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null };
   let searchTimer = null;
   let pollTimer = null;
   let hideJobFor = null;
@@ -263,6 +263,22 @@
     }
   }
 
+  async function fetchInstalled() {
+    try {
+      const response = await fetch('/api/v1/services', { credentials: 'same-origin' });
+      if (!response.ok) return null;
+      const body = await response.json();
+      const installed = new Map();
+      for (const service of body.services || []) {
+        if (!service || service.kind !== 'plugin' || !service.id) continue;
+        installed.set(service.id, service.version || '');
+      }
+      return installed;
+    } catch (_) {
+      return null;
+    }
+  }
+
   async function load(options) {
     const quiet = options && options.quiet;
     if (state.loading) {
@@ -280,13 +296,17 @@
       rows.firstChild.appendChild(loading);
     }
     try {
-      const data = await call('list', {
-        page: state.page,
-        query: state.query,
-        scope: 'device',
-        platform: HOST.platform || undefined,
-        device: HOST.device || undefined,
-      });
+      const [data, installed] = await Promise.all([
+        call('list', {
+          page: state.page,
+          query: state.query,
+          scope: 'device',
+          platform: HOST.platform || undefined,
+          device: HOST.device || undefined,
+        }),
+        fetchInstalled(),
+      ]);
+      if (installed) state.installed = installed;
       state.data = data;
       state.page = data.page || 1;
       if (data.job) {
@@ -375,7 +395,16 @@
     name.className = 'name';
     name.textContent = entry.name;
     nameCell.appendChild(name);
-    if (entry.cached) {
+    const installedVersion = state.installed.get(entry.name);
+    const isInstalled = installedVersion !== undefined;
+    const sameVersion = isInstalled && (!installedVersion || installedVersion === entry.version);
+    if (isInstalled) {
+      const badge = document.createElement('span');
+      badge.className = 'badge installed';
+      badge.textContent = sameVersion || !installedVersion ? '已安装' : '已安装 ' + installedVersion;
+      badge.title = installedVersion ? '已安装版本 ' + installedVersion : '已安装';
+      nameCell.appendChild(badge);
+    } else if (entry.cached) {
       const badge = document.createElement('span');
       badge.className = 'badge cached';
       badge.textContent = '已缓存';
@@ -403,12 +432,13 @@
     const actionCell = document.createElement('td');
     actionCell.className = 'cell-action';
     const button = document.createElement('button');
-    button.className = 'primary small';
+    button.className = sameVersion ? 'small' : 'primary small';
     const active = state.job && !state.job.done && state.job.name === entry.name &&
       state.job.version === entry.version && state.job.platform === entry.platform &&
       (state.job.device || '') === (entry.device || '');
-    button.textContent = active ? '处理中…' : (entry.cached ? '安装' : '下载并安装');
-    button.disabled = Boolean(state.job && !state.job.done);
+    button.textContent = active ? '处理中…' : sameVersion ? '已安装' : isInstalled ? '升级' : (entry.cached ? '安装' : '下载并安装');
+    button.disabled = sameVersion || Boolean(state.job && !state.job.done);
+    if (sameVersion) button.title = '已安装该版本';
     button.onclick = () => startInstall(entry);
     actionCell.appendChild(button);
 
@@ -436,6 +466,12 @@
   function updateJob(job) {
     state.job = job;
     if (!job) {
+      jobPanel.className = 'job hidden';
+      return;
+    }
+    // A finished success card adds no information once the notice and the
+    // installed badge are visible; failures still need the detail.
+    if (job.done && job.ok) {
       jobPanel.className = 'job hidden';
       return;
     }
@@ -535,6 +571,8 @@
       const installed = await installResponse.json();
 
       if (!installed.id) throw new Error('安装响应缺少插件 id');
+      state.installed.set(job.name, installed.version || '');
+      state.installed.set(installed.id, installed.version || '');
       if (installed.state !== 'running') {
         const startResponse = await fetch(
           '/api/v1/services/' + encodeURIComponent(installed.id) + '/start',
