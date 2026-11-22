@@ -3,6 +3,8 @@
 四种语言的插件模板（Rust / C / Shell / PowerShell）、它们共用的协议壳，以及本地打包与校验的工具。
 插件作者只写核心逻辑，其余在 SDK 里。
 
+插件下载列表：[docs/plugins.md](docs/plugins.md)（CI 在每次发布后自动更新，只列每个插件/平台的最新稳定版）。
+
 ## 结构
 
 ```
@@ -60,7 +62,8 @@ tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代�
 
 - **项目本身**：构建 `plugin-tools`，产出 Linux x86_64 gnu、Windows x86_64 msvc、macOS universal2 三份归档（仅全量发布）；
 - **`plugins/` 下的插件**：自动发现 `plugins/*/.plugin.json`，按 `ci.platforms`（没有就 `platforms`）生成矩阵，逐个平台构建 `.spk`；
-- **发布**：汇总 `.spk`、`plugin-tools` 归档和 `SHA256SUMS`，`gh release create/upload` 到同一个 Release；tag 带 `-`（如 `v1.0.0-rc1`、`hysteria-v1.0.1-rc1`）自动标 prerelease。
+- **发布**：汇总 `.spk`、`plugin-tools` 归档和 `SHA256SUMS`，`gh release create/upload` 到同一个 Release；tag 带 `-`（如 `v1.0.0-rc1`、`hysteria-v1.0.1-rc1`）自动标 prerelease；
+- **插件列表**：发布成功后 `update-plugin-list` job 重新生成 [docs/plugins.md](docs/plugins.md) 并提交到 `main`，只保留每个插件/平台的最新稳定版。
 
 插件构建使用仓库存的 `secrets.PLUGIN_SIGNING_KEY`（Ed25519 PKCS#8 PEM）。没有这个 secret 时 PR 只做未签名构建；tag / 手动发布则直接失败，避免发出未签名包。
 
