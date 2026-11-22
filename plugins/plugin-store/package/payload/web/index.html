@@ -64,6 +64,8 @@
   button:disabled { opacity: .5; cursor: not-allowed; }
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
   button.small { padding: 4px 9px; font-size: 12px; border-radius: 6px; }
+  button.danger { color: var(--bad); }
+  button.danger:hover:not(:disabled) { border-color: var(--bad); }
   .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 16px 0 12px; }
   .search { position: relative; flex: 1 1 320px; }
   .search input {
@@ -101,6 +103,7 @@
   .pager .buttons { display: flex; gap: 8px; align-items: center; }
   .job { margin-top: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
   .job-head { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+  .job-actions { display: flex; gap: 8px; }
   .job-title { font-weight: 650; }
   .job-msg { color: var(--muted); font-size: 13px; margin-top: 4px; overflow-wrap: anywhere; }
   .bar { height: 8px; border-radius: 999px; background: var(--bg); overflow: hidden; margin-top: 10px; }
@@ -166,7 +169,10 @@
   <section id="job" class="job hidden" aria-live="polite">
     <div class="job-head">
       <div class="job-title" id="jobtitle">安装任务</div>
-      <button id="jobclose" class="small" title="收起">收起</button>
+      <div class="job-actions">
+        <button id="jobdelete" class="small danger" title="取消下载并删除已下载的文件">删除</button>
+        <button id="jobclose" class="small" title="收起">收起</button>
+      </div>
     </div>
     <div class="job-msg" id="jobmsg"></div>
     <div class="bar"><i id="jobbar"></i></div>
@@ -195,6 +201,7 @@
   const jobTitle = $('jobtitle');
   const jobMessage = $('jobmsg');
   const jobBar = $('jobbar');
+  const jobDelete = $('jobdelete');
 
   const SOURCE = { network: '在线', cache: '本地缓存', snapshot: '内置快照' };
   // Filled from GET /api/v1/compat, the same facts the management page and
@@ -520,6 +527,7 @@
     state.job = job;
     if (!job) {
       jobPanel.className = 'job hidden';
+      jobDelete.classList.add('hidden');
       return;
     }
     // A finished success card adds no information once the notice and the
@@ -530,6 +538,14 @@
     }
     if (hideJobFor && job.id === hideJobFor) return;
     jobPanel.className = 'job' + (job.done ? (job.ok ? ' done' : ' failed') : '');
+    // The host owns the install from "installing" on; before that deleting the
+    // job cancels the download and clears the temp file.
+    const deletable = job.phase !== 'installing';
+    jobDelete.classList.toggle('hidden', !deletable);
+    jobDelete.disabled = !deletable;
+    jobDelete.title = deletable
+      ? '取消下载并删除已下载的文件'
+      : '安装已经交给宿主，无法删除';
     jobTitle.textContent = (PHASE[job.phase] || job.phase) + ' · ' + job.name + ' ' + job.version;
     let message = job.message || '';
     if (job.phase === 'downloading' && job.total) {
@@ -547,13 +563,18 @@
     pollTimer = setInterval(async () => {
       try {
         const result = await call('install_status', {});
+        if (!result.job) {
+          // The job was deleted (or the plugin restarted): nothing to report.
+          stopPolling();
+          updateJob(null);
+          await load({ quiet: true });
+          return;
+        }
         updateJob(result.job);
-        if (!result.job || result.job.done) {
+        if (result.job.done) {
           stopPolling();
           await load({ quiet: true });
-          if (result.job) {
-            showNotice(result.job.ok ? '安装完成：' + result.job.name : '安装未完成：' + (result.job.message || '未知错误'), result.job.ok ? 'ok' : 'bad');
-          }
+          showNotice(result.job.ok ? '安装完成：' + result.job.name : '安装未完成：' + (result.job.message || '未知错误'), result.job.ok ? 'ok' : 'bad');
         } else if (result.job.phase === 'ready') {
           stopPolling();
           await maybeHandoff(result.job);
@@ -584,6 +605,8 @@
 
   async function maybeHandoff(job) {
     if (!job || job.done || job.phase !== 'ready') return;
+    // A delete may have cleared the job between the event and this call.
+    if (!state.job || state.job.id !== job.id) return;
     if (state.handoffJob === job.id) return;
     state.handoffJob = job.id;
     await handoff(job);
@@ -705,8 +728,35 @@
     jobPanel.className = 'job hidden';
   };
 
+  // Delete is the destructive sibling of "收起": it cancels a running download,
+  // removes the cached .spk, and clears the job on the plugin side.
+  jobDelete.onclick = async () => {
+    jobDelete.disabled = true;
+    try {
+      await call('install_cancel', {}, 15000);
+      stopPolling();
+      state.handoffJob = null;
+      hideJobFor = null;
+      updateJob(null);
+      clearNotice();
+      showNotice('已删除安装任务和下载的文件', 'ok');
+      await load({ quiet: true });
+    } catch (error) {
+      jobDelete.disabled = false;
+      showNotice('删除失败：' + (error.message || error), 'bad');
+    }
+  };
+
   ui.subscribe({
     onMessage(method, params) {
+      if (method === 'plugin-store/install' && params && 'job' in params && !params.job) {
+        // Another tab deleted the job.
+        stopPolling();
+        state.handoffJob = null;
+        updateJob(null);
+        load({ quiet: true });
+        return;
+      }
       if (method === 'plugin-store/install' && params && params.job) {
         updateJob(params.job);
         if (params.job.done) {

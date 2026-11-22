@@ -231,6 +231,11 @@ fn download_one(
         .map_err(|error| format!("{}: {error}", part.display()))?;
     drop(file);
 
+    // The last chunk may complete while the user is deleting the job.
+    if cancelled() {
+        let _ = fs::remove_file(part);
+        return Err("安装已取消".into());
+    }
     if downloaded == 0 {
         let _ = fs::remove_file(part);
         return Err(format!("{url}: 下载到 0 字节"));
@@ -266,7 +271,7 @@ fn looks_like_html(path: &Path) -> bool {
         || head.windows(9).any(|window| window == b"<!doctype")
 }
 
-fn part_path(dest: &Path) -> PathBuf {
+pub(crate) fn part_path(dest: &Path) -> PathBuf {
     PathBuf::from(format!("{}.part", dest.display()))
 }
 

@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "name": "plugin-store",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "desc": "浏览、搜索并安装插件",
   "protocol": 1,
   "exec": {
@@ -61,6 +61,15 @@
     {
       "name": "install_status",
       "desc": "查询当前安装任务的进度",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "install_cancel",
+      "desc": "删除当前下载任务：停止下载并清空已下载的文件与任务状态",
       "inputSchema": {
         "type": "object",
         "properties": {},

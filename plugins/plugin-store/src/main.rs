@@ -76,6 +76,7 @@ impl Plugin for PluginStore {
         "list",
         "install",
         "install_status",
+        "install_cancel",
         "package_blob",
         "install_result",
         "refresh",
@@ -86,6 +87,7 @@ impl Plugin for PluginStore {
             "list" => self.list(arguments),
             "install" => self.start_install(arguments),
             "install_status" => self.install_status(),
+            "install_cancel" => self.cancel_install(),
             "package_blob" => self.package_blob(arguments),
             "install_result" => self.install_result(arguments),
             "refresh" => self.refresh(),
@@ -285,6 +287,40 @@ impl PluginStore {
             Err(_) => return ToolOutcome::error("状态锁不可用"),
         };
         ToolOutcome::text(json!({ "job": state.job.as_ref().map(job_json) }).to_string())
+    }
+
+    /// Delete the current job: stop an in-flight download, remove the cached
+    /// package, and drop the job so the page starts from a clean state. Once
+    /// the bytes are with the host there is nothing left to call back, so the
+    /// installing phase refuses.
+    fn cancel_install(&self) -> ToolOutcome {
+        let job = {
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(_) => return ToolOutcome::error("状态锁不可用"),
+            };
+            let job = match state.job.as_ref() {
+                Some(job) => job.clone(),
+                None => return ToolOutcome::error("没有可删除的安装任务"),
+            };
+            if !can_delete(&job) {
+                return ToolOutcome::error("安装已经交给宿主，无法删除");
+            }
+            state.job = None;
+            job
+        };
+        // Clearing the job is what makes the download thread stop between read
+        // chunks; its handle may take a moment to close on Windows.
+        let package = self.download_dir.join(package_file_parts(
+            &job.name,
+            &job.version,
+            &job.platform,
+            job.device.as_deref(),
+        ));
+        remove_download(&package);
+        remove_download(&net::part_path(&package));
+        svcd_plugin::emit("plugin-store/install", json!({ "job": null }));
+        ToolOutcome::text(json!({ "ok": true }).to_string())
     }
 
     /// Copy the cached package into the host's incoming directory and return it
@@ -518,6 +554,36 @@ fn emit_job(job: &Job) {
     svcd_plugin::emit("plugin-store/install", json!({ "job": job_json(job) }));
 }
 
+/// Once the bytes are with the host the install cannot be called back; before
+/// that a delete cancels the download and removes its files.
+fn can_delete(job: &Job) -> bool {
+    job.phase != "installing"
+}
+
+/// A download belongs to the job the page is showing. Deleting that job clears
+/// `state.job`, which is how the download thread learns to stop.
+fn job_is_current(state: &Arc<Mutex<State>>, id: u64) -> bool {
+    state
+        .lock()
+        .map(|state| state.job.as_ref().map(|job| job.id) == Some(id))
+        .unwrap_or(false)
+}
+
+/// Remove a downloaded package or its `.part`, tolerating a download thread
+/// that is still closing the handle: Windows refuses to unlink an open file.
+fn remove_download(path: &Path) {
+    for attempt in 0..20 {
+        match fs::remove_file(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if attempt == 19 => {
+                log_warn!("删除下载文件 {} 失败: {error}", path.display());
+            }
+            Err(_) => thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
 fn publish_job(state: &Arc<Mutex<State>>, job: &Job) {
     let mut guard = match state.lock() {
         Ok(guard) => guard,
@@ -540,6 +606,7 @@ fn run_install(
 ) {
     let package = download_dir.join(package_file(&entry));
     let mut last_emit = Instant::now() - Duration::from_secs(1);
+    let job_id = job.id;
 
     if !package
         .metadata()
@@ -559,7 +626,7 @@ fn run_install(
                 publish_job(&state, &job);
             }
         };
-        let cancelled = || cancel.is_cancelled();
+        let cancelled = || cancel.is_cancelled() || !job_is_current(&state, job_id);
         if let Err(error) = net::download(
             &entry.url,
             &package,
@@ -567,6 +634,13 @@ fn run_install(
             &mut progress,
             &cancelled,
         ) {
+            if !job_is_current(&state, job_id) {
+                // The page deleted this job while the download was running.
+                // Leave the file gone instead of publishing a stale card.
+                remove_download(&package);
+                remove_download(&net::part_path(&package));
+                return;
+            }
             job.phase = "error".into();
             job.message = error;
             job.done = true;
@@ -574,6 +648,13 @@ fn run_install(
             return;
         }
         job.downloaded = job.total.unwrap_or(entry.size_bytes);
+    }
+
+    // A delete that landed just as the last byte arrived must not resurrect
+    // the job with a "ready" card or leave the package behind.
+    if !job_is_current(&state, job_id) {
+        remove_download(&package);
+        return;
     }
 
     job.phase = "ready".into();
@@ -883,6 +964,129 @@ mod tests {
             package_file(&entry),
             "sshd-1.0.0-x86_64-unknown-linux-gnu-sr6110.spk"
         );
+    }
+
+    fn job(phase: &str) -> Job {
+        Job {
+            id: 1,
+            name: "meow".into(),
+            version: "1.0.1".into(),
+            platform: "x86_64-unknown-linux-gnu".into(),
+            device: None,
+            phase: phase.into(),
+            downloaded: 0,
+            total: None,
+            message: String::new(),
+            done: false,
+            ok: false,
+            started_at: 0,
+        }
+    }
+
+    #[test]
+    fn delete_is_allowed_until_the_host_owns_the_install() {
+        assert!(can_delete(&job("queued")));
+        assert!(can_delete(&job("downloading")));
+        assert!(can_delete(&job("ready")));
+        assert!(can_delete(&job("error")));
+        assert!(can_delete(&job("done")));
+        assert!(!can_delete(&job("installing")));
+    }
+
+    #[test]
+    fn a_download_stops_when_its_job_is_deleted() {
+        let state = Arc::new(Mutex::new(State {
+            entries: Vec::new(),
+            source: "test".into(),
+            fetched_at: None,
+            last_error: None,
+            refreshing: false,
+            job: Some(job("downloading")),
+        }));
+        assert!(job_is_current(&state, 1));
+        state.lock().unwrap().job = None;
+        assert!(!job_is_current(&state, 1));
+    }
+
+    fn store_with(dir: &Path, job: Job) -> PluginStore {
+        PluginStore {
+            state: Arc::new(Mutex::new(State {
+                entries: Vec::new(),
+                source: "test".into(),
+                fetched_at: None,
+                last_error: None,
+                refreshing: false,
+                job: Some(job),
+            })),
+            data_dir: dir.to_path_buf(),
+            download_dir: dir.to_path_buf(),
+            temp_dir: dir.to_path_buf(),
+            own_id: "plugin-store".into(),
+            cancel: Cancel::default(),
+        }
+    }
+
+    #[test]
+    fn cancel_install_clears_the_job_and_its_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-cancel-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = store_with(&dir, job("downloading"));
+        let package = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk");
+        fs::write(&package, b"spk").unwrap();
+        fs::write(net::part_path(&package), b"spk").unwrap();
+
+        match store.cancel_install() {
+            ToolOutcome::Text(text) => assert!(text.contains("\"ok\":true"), "{text}"),
+            _ => panic!("expected a text result"),
+        }
+        assert!(store.state.lock().unwrap().job.is_none());
+        assert!(!package.exists());
+        assert!(!net::part_path(&package).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cancel_install_is_refused_once_the_host_installs() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-installing-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = store_with(&dir, job("installing"));
+
+        match store.cancel_install() {
+            ToolOutcome::Error(text) => assert!(text.contains("无法删除"), "{text}"),
+            _ => panic!("expected an error result"),
+        }
+        assert_eq!(store.state.lock().unwrap().job.as_ref().map(|job| job.id), Some(1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_download_deletes_packages_and_part_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-remove-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let package = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk");
+        fs::write(&package, b"spk").unwrap();
+        let part = net::part_path(&package);
+        fs::write(&part, b"spk").unwrap();
+
+        remove_download(&package);
+        remove_download(&part);
+        assert!(!package.exists());
+        assert!(!part.exists());
+        // Deleting an already-gone file is not an error.
+        remove_download(&package);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
