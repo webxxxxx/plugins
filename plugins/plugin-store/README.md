@@ -11,6 +11,7 @@
   version 两侧的写法；只有宿主的 device id 相同才显示，无标识视为该 platform 的通用包。
   当前 docs 生成器也已支持平台后的 device 后缀，避免设备包在列表里被丢掉。
 - 每页固定 50 条；搜索只匹配插件名，输入即筛（250 ms 防抖）。
+- 已安装版本低于目录版本时，操作列显示「升级」；相同或更高时显示「已安装」并禁用。
 - 列表来自本地缓存或内置快照，启动后先在后台刷新；「刷新列表」只触发后台任务，不会卡住页面。
 - 安装按钮先由插件下载 .spk 到数据目录，再通过宿主现成的 API 安装并启动：
 
@@ -68,4 +69,12 @@ cargo run --release --manifest-path plugins/plugin-store/Cargo.toml -- download
 - platform 与文件名 device 后缀是列表侧过滤；manifest 里完整的 compat.devices 仍会在安装时由 svcd 再次校验。
 - 安装包必须已签名并被宿主的 trust.d 信任；未签名包需要开发机的 allow_insecure_install = on。
   发布包的签名 keyId 是 `signing`，所以公钥文件要叫 `signing.pub`（内容同 `docs/signing.pub`）。
+- 商店把 `docs/signing.pub` 编进二进制。页面启动时读 `GET /api/v1/trust`；发现没有
+  `signing` 就显示“导入发布公钥”。点安装时也会先确认，然后 `POST /api/v1/trust?key_id=signing`
+  写入宿主 trust.d，之后照常安装。已有商店的机器因此不需要再手动 `svc trust add`。
+- 这不能解决商店自己的首装：宿主先验签、再解包、最后才运行 hook，包内带自己的信任根
+  也过不了这一步。商店首次安装仍需先信任 `signing`（或临时开 allow_insecure_install）；
+  要从根本上免掉这一步，需要宿主内置 store 公钥。
+- 首次安装的过渡办法：临时在 svcd.conf 打开 `allow_insecure_install = on`，装好本版商店，
+  打开页面点一次「导入发布公钥」，再关掉开关并重启 svcd。之后所有安装都走严格验签。
 - 插件不能更新自己（页面会拒绝 plugin-store 自身的安装），避免安装过程中把自己重启掉。

@@ -81,6 +81,7 @@
   .notice.warn { color: var(--warn); background: var(--warn-bg); }
   .notice.bad { color: var(--bad); background: var(--bad-bg); }
   .notice.ok { color: var(--ok); background: var(--ok-bg); }
+  .notice button { margin-left: 8px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; min-width: 720px; }
@@ -128,6 +129,11 @@
       <button id="refresh" title="重新获取 docs/plugins.md">刷新列表</button>
     </div>
   </header>
+
+  <div id="trust" class="notice warn hidden" role="status" aria-live="polite">
+    <span id="trustmsg"></span>
+    <button id="trustbtn" class="small">导入发布公钥</button>
+  </div>
 
   <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
 
@@ -184,6 +190,9 @@
   const $ = (id) => document.getElementById(id);
   const rows = $('rows');
   const notice = $('notice');
+  const trustBar = $('trust');
+  const trustMessage = $('trustmsg');
+  const trustButton = $('trustbtn');
   const queryInput = $('query');
   const refreshButton = $('refresh');
   const prevButton = $('prev');
@@ -210,7 +219,8 @@
     error: '失败',
   };
 
-  const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null };
+  const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null, trusted: null, trustBusy: false };
+  const TRUST_KEY_ID = 'signing';
   const INSTALLED_TTL_MS = 30000;
   let installedFetchedAt = 0;
   let installedRequest = null;
@@ -232,6 +242,112 @@
   function clearNotice() {
     notice.className = 'notice hidden';
     notice.textContent = '';
+  }
+
+  async function fetchTrustedKeys() {
+    try {
+      const response = await fetch('/api/v1/trust', { credentials: 'same-origin' });
+      if (!response.ok) return null;
+      const body = await response.json();
+      return new Set((body.keys || []).filter((key) => typeof key === 'string'));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function renderTrust() {
+    if (!state.trusted || state.trusted.has(TRUST_KEY_ID)) {
+      trustBar.className = 'notice warn hidden';
+      return;
+    }
+    trustBar.className = 'notice warn';
+    trustMessage.textContent = '宿主还没有信任发布公钥 ' + TRUST_KEY_ID + '；安装前需要先导入。';
+    trustButton.disabled = state.trustBusy;
+    trustButton.textContent = state.trustBusy ? '导入中…' : '导入发布公钥';
+  }
+
+  // The key is embedded in this plugin, so the host can be provisioned without
+  // asking the user to copy a .pub file into trust.d by hand. The import is an
+  // explicit action: it changes the host's trust roots for every package signed
+  // by this key.
+  async function importTrustKey(options) {
+    if (state.trusted && state.trusted.has(TRUST_KEY_ID)) return true;
+    if (state.trustBusy) throw new Error('正在导入发布公钥，请稍候');
+    const ask = !options || options.confirm !== false;
+    if (ask && !confirm(
+      '宿主还没有信任发布公钥 ' + TRUST_KEY_ID + '。\n\n' +
+      '导入后，所有由该公钥签名的插件都会被信任。现在导入？'
+    )) {
+      return false;
+    }
+    state.trustBusy = true;
+    renderTrust();
+    try {
+      const info = await call('trust_key', {}, 10000);
+      if (!info || typeof info.pem !== 'string' || typeof info.keyId !== 'string') {
+        throw new Error('插件没有返回发布公钥');
+      }
+      const response = await fetch('/api/v1/trust?key_id=' + encodeURIComponent(info.keyId), {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Svcd-Csrf': '1',
+        },
+        body: info.pem,
+      });
+      if (!response.ok) throw new Error(await responseError(response));
+      state.trusted = state.trusted || new Set();
+      state.trusted.add(info.keyId);
+      showNotice('已信任发布公钥 ' + info.keyId + '，现在可以安装插件', 'ok');
+      return true;
+    } finally {
+      state.trustBusy = false;
+      renderTrust();
+    }
+  }
+
+  async function ensureTrust() {
+    if (!state.trusted) {
+      state.trusted = await fetchTrustedKeys();
+      renderTrust();
+    }
+    if (state.trusted && state.trusted.has(TRUST_KEY_ID)) return true;
+    return importTrustKey({ confirm: true });
+  }
+
+  async function loadTrust() {
+    state.trusted = await fetchTrustedKeys();
+    renderTrust();
+  }
+
+  // Compare catalog versions without pulling in a semver library. Build
+  // metadata is ignored; a prerelease sorts before its release.
+  function parseVersion(value) {
+    const text = String(value || '').trim().replace(/^v/i, '').split('+')[0];
+    const dash = text.indexOf('-');
+    const core = dash >= 0 ? text.slice(0, dash) : text;
+    const pre = dash >= 0 ? text.slice(dash + 1) : '';
+    const numbers = core.split('.').map((part) => {
+      const match = /^\d+/.exec(part);
+      return match ? Number(match[0]) : 0;
+    });
+    return { numbers, pre };
+  }
+
+  function compareVersions(leftValue, rightValue) {
+    const left = parseVersion(leftValue);
+    const right = parseVersion(rightValue);
+    const length = Math.max(left.numbers.length, right.numbers.length);
+    for (let index = 0; index < length; index += 1) {
+      const a = left.numbers[index] || 0;
+      const b = right.numbers[index] || 0;
+      if (a !== b) return a < b ? -1 : 1;
+    }
+    if (!left.pre && !right.pre) return 0;
+    if (!left.pre) return 1;
+    if (!right.pre) return -1;
+    return left.pre.localeCompare(right.pre, undefined, { numeric: true });
   }
 
   function fmtBytes(value) {
@@ -407,12 +523,20 @@
     nameCell.appendChild(name);
     const installedVersion = state.installed.get(entry.name);
     const isInstalled = installedVersion !== undefined;
-    const sameVersion = isInstalled && (!installedVersion || installedVersion === entry.version);
+    // An unknown installed version is treated as current: without a version
+    // there is no honest way to offer an upgrade. A known but older version
+    // is the only case that gets the upgrade action.
+    const upToDate = isInstalled && (!installedVersion || compareVersions(installedVersion, entry.version) >= 0);
+    const canUpgrade = isInstalled && Boolean(installedVersion) && compareVersions(installedVersion, entry.version) < 0;
     if (isInstalled) {
       const badge = document.createElement('span');
       badge.className = 'badge installed';
-      badge.textContent = sameVersion || !installedVersion ? '已安装' : '已安装 ' + installedVersion;
-      badge.title = installedVersion ? '已安装版本 ' + installedVersion : '已安装';
+      badge.textContent = installedVersion && installedVersion !== entry.version
+        ? '已安装 ' + installedVersion
+        : '已安装';
+      badge.title = installedVersion
+        ? (canUpgrade ? '已安装 ' + installedVersion + '，可升级到 ' + entry.version : '已安装版本 ' + installedVersion)
+        : '已安装';
       nameCell.appendChild(badge);
     } else if (entry.cached) {
       const badge = document.createElement('span');
@@ -442,13 +566,19 @@
     const actionCell = document.createElement('td');
     actionCell.className = 'cell-action';
     const button = document.createElement('button');
-    button.className = sameVersion ? 'small' : 'primary small';
+    button.className = upToDate ? 'small' : 'primary small';
     const active = state.job && !state.job.done && state.job.name === entry.name &&
       state.job.version === entry.version && state.job.platform === entry.platform &&
       (state.job.device || '') === (entry.device || '');
-    button.textContent = active ? '处理中…' : sameVersion ? '已安装' : isInstalled ? '升级' : (entry.cached ? '安装' : '下载安装');
-    button.disabled = sameVersion || Boolean(state.job && !state.job.done);
-    if (sameVersion) button.title = '已安装该版本';
+    button.textContent = active ? '处理中…' : upToDate ? '已安装' : canUpgrade ? '升级' : (entry.cached ? '安装' : '下载安装');
+    button.disabled = upToDate || Boolean(state.job && !state.job.done);
+    if (upToDate) {
+      button.title = installedVersion && installedVersion !== entry.version
+        ? '已安装版本 ' + installedVersion + '，不低于目录版本'
+        : '已安装该版本';
+    } else if (canUpgrade) {
+      button.title = '从 ' + installedVersion + ' 升级到 ' + entry.version;
+    }
     button.onclick = () => startInstall(entry);
     actionCell.appendChild(button);
 
@@ -460,6 +590,11 @@
     if (state.job && !state.job.done) return;
     clearNotice();
     try {
+      const trusted = await ensureTrust();
+      if (!trusted) {
+        showNotice('已取消安装：需要先信任发布公钥 ' + TRUST_KEY_ID, 'warn');
+        return;
+      }
       const result = await call('install', {
         name: entry.name,
         version: entry.version,
@@ -639,9 +774,18 @@
     }
   };
 
+  trustButton.onclick = async () => {
+    try {
+      await importTrustKey({ confirm: false });
+    } catch (error) {
+      showNotice('导入发布公钥失败：' + (error.message || error), 'bad');
+    }
+  };
+
   refreshButton.onclick = async () => {
     refreshButton.disabled = true;
     clearNotice();
+    loadTrust();
     try {
       const result = await call('refresh', {}, 10000);
       if (result.started) {
@@ -706,6 +850,7 @@
     }
   }
 
+  loadTrust();
   loadCompat().then(() => load());
 </script>
 </body>
