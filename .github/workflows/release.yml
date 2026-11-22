@@ -317,8 +317,11 @@ jobs:
           file="$dir.tgz"
           tgz="$RUNNER_TEMP/$file"
           ok=0
-          # musl.cc 在 GitHub runner 上会超时，优先用 more.musl.cc 镜像，失败再回退主站。
-          for base in https://more.musl.cc/11.2.1/x86_64-linux-musl https://musl.cc; do
+          # musl.cc 在 GitHub runner 上不可达，优先用 GitHub Release 镜像，最后回退主站。
+          for base in \
+            https://github.com/musl-cc/musl.cc/releases/download/v0.0.1 \
+            https://github.com/tsl0922/musl-toolchains/releases/download/2021-11-23 \
+            https://musl.cc; do
             if curl -fL --connect-timeout 10 --max-time 300 --retry 2 --retry-delay 3 -o "$tgz" "$base/$file" \
               && tar tzf "$tgz" >/dev/null 2>&1; then
               ok=1
