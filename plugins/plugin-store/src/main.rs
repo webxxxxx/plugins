@@ -6,6 +6,7 @@
 // checks stay in the daemon.
 
 mod catalog;
+mod download;
 mod net;
 
 use std::fs;
@@ -751,6 +752,15 @@ fn system_secs(time: SystemTime) -> Option<u64> {
 }
 
 fn main() -> Exit {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("download") {
+        if let Err(error) = download::run(&args[1..]) {
+            eprintln!("plugin-store download: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let context = Context::from_env();
     let own_id = OWN_ID.to_string();
     let data_root = context

@@ -5,6 +5,28 @@
 
 插件下载列表：[docs/plugins.md](docs/plugins.md)（CI 在每次发布后自动更新，只列每个插件/平台的最新稳定版）。
 
+## 下载全部发布包
+
+插件商店自带一个批量下载子命令，复用安装时那条下载路径（代理、GitHub 资产 DNS 被污染时的 DoH 回退、`PLUGIN_STORE_MIRROR` 镜像都生效）：
+
+```bash
+cargo run --release --manifest-path plugins/plugin-store/Cargo.toml -- download
+```
+
+默认读取 `docs/plugins.md`，把其中每个 `.spk` 下载到 `dist/`。已存在的文件默认跳过；`--force` 重新下载，`--dry-run` 只打印清单，`--manifest` / `--output` 换输入和目录。下载先写临时文件再改名，中断不会留下半个包；`dist/` 已在 `.gitignore` 里。
+
+只下某个插件或单个包：
+
+```powershell
+# 这个插件的所有平台
+.\plugin-store.exe download --only meow
+
+# 精确到一个包
+.\plugin-store.exe download --only plugin-store-0.1.0-x86_64-pc-windows-msvc
+```
+
+`--only` 不区分大小写，可重复；匹配插件名、版本、平台、设备或文件名。
+
 ## 结构
 
 ```

@@ -40,6 +40,16 @@
 
 下载完成后仍由宿主验签，第三方镜像无法绕过签名。
 
+### 命令行批量下载
+
+同一个二进制也能把 `docs/plugins.md` 里的包全部拉到 `dist/`，供本地安装或归档：
+
+```bash
+cargo run --release --manifest-path plugins/plugin-store/Cargo.toml -- download
+```
+
+它直接调用上面的 `net::download`，所以代理、DoH 回退和 `PLUGIN_STORE_MIRROR` 都会生效。默认读 `docs/plugins.md`、写 `dist/`；已存在文件跳过，`--force` 重下，`--dry-run` 只看清单，`--manifest` / `--output` 可换路径。`--only meow` 只下这个插件的包，`--only <完整文件名>` 只下一个包；不区分大小写，可重复。
+
 ## 构建
 
     # 仓库根目录；需要宿主 plugin 在 PATH，或设置 SVCD_PLUGIN_BIN

@@ -418,6 +418,56 @@ mod tests {
     }
 
     #[test]
+    fn downloads_an_http_file_atomically() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = b"spk-payload".to_vec();
+        let server_body = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_body.len()
+            )
+            .unwrap();
+            stream.write_all(&server_body).unwrap();
+        });
+
+        let dest = std::env::temp_dir().join(format!(
+            "plugin-store-download-{}-{}.spk",
+            std::process::id(),
+            address.port()
+        ));
+        let _ = fs::remove_file(&dest);
+        let part = part_path(&dest);
+        let _ = fs::remove_file(&part);
+
+        let mut progress = |_, _| {};
+        let cancelled = || false;
+        let size = download(
+            &format!("http://{address}/package.spk"),
+            &dest,
+            0,
+            &mut progress,
+            &cancelled,
+        )
+        .unwrap();
+        assert_eq!(size, body.len() as u64);
+        assert_eq!(fs::read(&dest).unwrap(), body);
+        assert!(!part.exists());
+
+        let _ = fs::remove_file(dest);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn recognises_an_html_error_page() {
         let path =
             std::env::temp_dir().join(format!("plugin-store-html-{}.tmp", std::process::id()));
