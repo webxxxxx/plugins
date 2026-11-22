@@ -502,10 +502,31 @@ fn required<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("缺少参数 {key}"))
 }
 
-/// The host installs plugins under <data>/plugins/<id>. Both the persistent
-/// catalog cache and transient downloads live there, not beside the data root.
-fn plugin_root(data_root: &Path, id: &str) -> PathBuf {
-    data_root.join("plugins").join(id)
+/// The host installs a package as <data>/plugins/<id>/<version>/payload/bin/<exe>.
+/// svcd does not export SVCD_DATA_DIR to plugins, so the install path is the
+/// reliable way to find the plugin root; the exported data root is the backup,
+/// and a hand-run binary falls back to the system temp directory.
+fn plugin_data_dir(exe: Option<&Path>, data_root: Option<&Path>, id: &str) -> PathBuf {
+    if let Some(root) = exe.and_then(installed_plugin_root) {
+        if root.file_name().and_then(|name| name.to_str()) == Some(id) {
+            return root;
+        }
+    }
+    if let Some(root) = data_root {
+        return root.join("plugins").join(id);
+    }
+    std::env::temp_dir().join(id)
+}
+
+/// `<data>/plugins/<id>` from the running payload's path.
+fn installed_plugin_root(exe: &Path) -> Option<PathBuf> {
+    let bin = exe.parent()?;
+    let payload = bin.parent()?;
+    let version = payload.parent()?;
+    if bin.file_name()? != "bin" || payload.file_name()? != "payload" {
+        return None;
+    }
+    version.parent().map(Path::to_path_buf)
 }
 
 fn entry_json(entry: &catalog::Entry, download_dir: &Path) -> Value {
@@ -874,11 +895,9 @@ fn main() -> Exit {
 
     let context = Context::from_env();
     let own_id = OWN_ID.to_string();
+    let exe = std::env::current_exe().ok();
     let data_root = context.data_dir().map(PathBuf::from);
-    let data_dir = data_root
-        .as_ref()
-        .map(|root| plugin_root(root, OWN_ID))
-        .unwrap_or_else(|| std::env::temp_dir().join("plugin-store"));
+    let data_dir = plugin_data_dir(exe.as_deref(), data_root.as_deref(), OWN_ID);
     // The catalog cache sits at the plugin root; downloads use its temp dir.
     let download_dir = data_dir.join("temp");
     let state = Arc::new(Mutex::new(initial_state(&data_dir)));
@@ -935,10 +954,21 @@ mod tests {
 
     #[test]
     fn data_lives_under_the_plugin_root() {
-        let root = Path::new("data");
+        // The installed payload path is <data>/plugins/<id>/<version>/payload/bin.
+        let installed = Path::new("/data/plugins/plugin-store/0.1.8/payload/bin/plugin-store");
         assert_eq!(
-            plugin_root(root, "plugin-store"),
-            root.join("plugins").join("plugin-store")
+            plugin_data_dir(Some(installed), None, "plugin-store"),
+            Path::new("/data/plugins").join("plugin-store")
+        );
+        // A binary built by hand is not inside a package; use the exported root.
+        let hand_built = Path::new("/repo/target/release/plugin-store");
+        assert_eq!(
+            plugin_data_dir(Some(hand_built), Some(Path::new("/data")), "plugin-store"),
+            Path::new("/data").join("plugins").join("plugin-store")
+        );
+        assert_eq!(
+            plugin_data_dir(None, None, "plugin-store"),
+            std::env::temp_dir().join("plugin-store")
         );
     }
 
