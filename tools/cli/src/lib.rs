@@ -114,12 +114,7 @@ pub fn read_manifest(root: &Path) -> Result<Manifest, String> {
 /// file names, `<id>.<capability>` tool names and `/plugin-ui/<id>/`, so it must
 /// stay ASCII; the display name (`name`) is what may be Chinese.
 pub fn plugin_id(root: &Path, manifest: &Manifest) -> Result<String, String> {
-    let id = match manifest
-        .id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
+    let id = match manifest.id.as_deref() {
         Some(id) => id.to_string(),
         None => root
             .file_name()
@@ -784,6 +779,12 @@ mod tests {
         let root = plugin_dir("id-bad", &manifest_with(r#","id":"示例","name":"x""#));
         let error = plugin_id(&root, &read_manifest(&root).unwrap()).unwrap_err();
         assert!(error.contains("示例"), "{error}");
+
+        // An authored-but-empty id is an author mistake, not an absent id: the
+        // host rejects it too, so falling back to the directory name would
+        // silently package a plugin under a name its manifest did not choose.
+        let root = plugin_dir("id-empty", &manifest_with(r#","id":"" "#));
+        assert!(plugin_id(&root, &read_manifest(&root).unwrap()).is_err());
 
         let root = plugin_dir("id-reserved", &manifest_with(r#","id":"svc""#));
         let error = plugin_id(&root, &read_manifest(&root).unwrap()).unwrap_err();
