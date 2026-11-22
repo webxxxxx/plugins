@@ -85,7 +85,7 @@ def render(repo: str, latest: dict[tuple[str, str, str], dict[str, object]]) -> 
         "> 本文件由 CI 自动生成，请勿手改。只列每个插件/平台/设备的最新稳定版；"
         f"预发布和历史版本见 [Releases]({release_url})。",
         ">",
-        "> 安装前先信任发布公钥：[docs/release-key.pub](release-key.pub)。",
+        "> 安装前先信任发布公钥：[docs/signing.pub](signing.pub)。",
         "",
         f"最后更新：{updated} · 共 {len(rows)} 个包",
         "",

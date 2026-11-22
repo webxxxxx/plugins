@@ -92,13 +92,15 @@ tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代�
 
 私钥只存在于 GitHub Actions Secret（建议放 `release` environment secret）和发布机，仓库里只有公钥。建议给 `release` environment 配 required reviewers；构建 job 不注入 secret，没有它时 PR 只做未签名构建，tag / 手动发布会在 `sign` job 直接失败，避免发出未签名包。
 
-发布公钥在 [docs/release-key.pub](docs/release-key.pub)（SHA-256 指纹
+发布公钥在 [docs/signing.pub](docs/signing.pub)（SHA-256 指纹
 `af7c736c946e2340e48cac641177514792daec9539cdbc6a8998b2a8a8e91cf6`）。
 安装发布包前先信任它：
 
 ```bash
-svc trust add docs/release-key.pub
+svc trust add docs/signing.pub
 ```
+
+`svc trust add` 会把公钥按文件名放进 trust.d；发布包的签名 keyId 是 `signing`，所以公钥文件必须命名为 `signing.pub`。`docs/release-key.pub` 只是旧链接的兼容别名。
 
 私钥只保存在发布机上（`~/.svcd-release/release.pem`）和 GitHub Actions Secret，不要提交；轮换时同时更新
 GitHub secret 和这个公钥文件。

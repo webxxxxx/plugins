@@ -534,6 +534,12 @@ jobs:
       - name: Add the release public key
         shell: bash
         run: |
+          # keyId comes from the file stem; packages are signed with
+          # signing.pem, so new downloads must expose signing.pub.
+          if [ -f docs/signing.pub ]; then
+            cp docs/signing.pub dist/
+          fi
+          # Keep the old asset name for links in already-published releases.
           if [ -f docs/release-key.pub ]; then
             cp docs/release-key.pub dist/
           fi

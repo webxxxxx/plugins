@@ -67,4 +67,5 @@ cargo run --release --manifest-path plugins/plugin-store/Cargo.toml -- download
 - 目录里没有 Windows 包时，Windows 上的默认页是空的，这是正确结果。
 - platform 与文件名 device 后缀是列表侧过滤；manifest 里完整的 compat.devices 仍会在安装时由 svcd 再次校验。
 - 安装包必须已签名并被宿主的 trust.d 信任；未签名包需要开发机的 allow_insecure_install = on。
+  发布包的签名 keyId 是 `signing`，所以公钥文件要叫 `signing.pub`（内容同 `docs/signing.pub`）。
 - 插件不能更新自己（页面会拒绝 plugin-store 自身的安装），避免安装过程中把自己重启掉。

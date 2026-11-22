@@ -2,7 +2,7 @@
 
 > 本文件由 CI 自动生成，请勿手改。只列每个插件/平台/设备的最新稳定版；预发布和历史版本见 [Releases](https://github.com/webxxxxx/plugins/releases)。
 >
-> 安装前先信任发布公钥：[docs/release-key.pub](release-key.pub)。
+> 安装前先信任发布公钥：[docs/signing.pub](signing.pub)。
 
 最后更新：2026-11-22 · 共 23 个包
 
