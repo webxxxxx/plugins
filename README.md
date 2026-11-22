@@ -102,7 +102,7 @@ svc trust add docs/signing.pub
 
 `svc trust add` 会把公钥按文件名放进 trust.d；发布包的签名 keyId 是 `signing`，所以公钥文件必须命名为 `signing.pub`。`docs/release-key.pub` 只是旧链接的兼容别名。
 
-已经装好插件商店的机器可以在商店页面点「导入发布公钥」，由它调用 `POST /api/v1/trust` 写入，不必手动执行上面的命令。商店自己的首装仍要先信任一次（或临时开 `allow_insecure_install`），因为宿主在运行任何安装 hook 之前就验签。
+`svcd --install` 会把发布公钥写到 `<config>/trust.d/signing.pub`；只有已经装好、但还没跑过安装步骤的机器才需要手动 `svc trust add` 一次。
 
 私钥只保存在发布机上（`~/.svcd-release/release.pem`）和 GitHub Actions Secret，不要提交；轮换时同时更新
 GitHub secret 和这个公钥文件。

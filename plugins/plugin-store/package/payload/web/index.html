@@ -81,7 +81,6 @@
   .notice.warn { color: var(--warn); background: var(--warn-bg); }
   .notice.bad { color: var(--bad); background: var(--bad-bg); }
   .notice.ok { color: var(--ok); background: var(--ok-bg); }
-  .notice button { margin-left: 8px; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; min-width: 720px; }
@@ -129,11 +128,6 @@
       <button id="refresh" title="重新获取 docs/plugins.md">刷新列表</button>
     </div>
   </header>
-
-  <div id="trust" class="notice warn hidden" role="status" aria-live="polite">
-    <span id="trustmsg"></span>
-    <button id="trustbtn" class="small">导入发布公钥</button>
-  </div>
 
   <div id="notice" class="notice hidden" role="status" aria-live="polite"></div>
 
@@ -190,9 +184,6 @@
   const $ = (id) => document.getElementById(id);
   const rows = $('rows');
   const notice = $('notice');
-  const trustBar = $('trust');
-  const trustMessage = $('trustmsg');
-  const trustButton = $('trustbtn');
   const queryInput = $('query');
   const refreshButton = $('refresh');
   const prevButton = $('prev');
@@ -219,8 +210,7 @@
     error: '失败',
   };
 
-  const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null, trusted: null, trustBusy: false };
-  const TRUST_KEY_ID = 'signing';
+  const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null };
   const INSTALLED_TTL_MS = 30000;
   let installedFetchedAt = 0;
   let installedRequest = null;
@@ -242,83 +232,6 @@
   function clearNotice() {
     notice.className = 'notice hidden';
     notice.textContent = '';
-  }
-
-  async function fetchTrustedKeys() {
-    try {
-      const response = await fetch('/api/v1/trust', { credentials: 'same-origin' });
-      if (!response.ok) return null;
-      const body = await response.json();
-      return new Set((body.keys || []).filter((key) => typeof key === 'string'));
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function renderTrust() {
-    if (!state.trusted || state.trusted.has(TRUST_KEY_ID)) {
-      trustBar.className = 'notice warn hidden';
-      return;
-    }
-    trustBar.className = 'notice warn';
-    trustMessage.textContent = '宿主还没有信任发布公钥 ' + TRUST_KEY_ID + '；安装前需要先导入。';
-    trustButton.disabled = state.trustBusy;
-    trustButton.textContent = state.trustBusy ? '导入中…' : '导入发布公钥';
-  }
-
-  // The key is embedded in this plugin, so the host can be provisioned without
-  // asking the user to copy a .pub file into trust.d by hand. The import is an
-  // explicit action: it changes the host's trust roots for every package signed
-  // by this key.
-  async function importTrustKey(options) {
-    if (state.trusted && state.trusted.has(TRUST_KEY_ID)) return true;
-    if (state.trustBusy) throw new Error('正在导入发布公钥，请稍候');
-    const ask = !options || options.confirm !== false;
-    if (ask && !confirm(
-      '宿主还没有信任发布公钥 ' + TRUST_KEY_ID + '。\n\n' +
-      '导入后，所有由该公钥签名的插件都会被信任。现在导入？'
-    )) {
-      return false;
-    }
-    state.trustBusy = true;
-    renderTrust();
-    try {
-      const info = await call('trust_key', {}, 10000);
-      if (!info || typeof info.pem !== 'string' || typeof info.keyId !== 'string') {
-        throw new Error('插件没有返回发布公钥');
-      }
-      const response = await fetch('/api/v1/trust?key_id=' + encodeURIComponent(info.keyId), {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'X-Svcd-Csrf': '1',
-        },
-        body: info.pem,
-      });
-      if (!response.ok) throw new Error(await responseError(response));
-      state.trusted = state.trusted || new Set();
-      state.trusted.add(info.keyId);
-      showNotice('已信任发布公钥 ' + info.keyId + '，现在可以安装插件', 'ok');
-      return true;
-    } finally {
-      state.trustBusy = false;
-      renderTrust();
-    }
-  }
-
-  async function ensureTrust() {
-    if (!state.trusted) {
-      state.trusted = await fetchTrustedKeys();
-      renderTrust();
-    }
-    if (state.trusted && state.trusted.has(TRUST_KEY_ID)) return true;
-    return importTrustKey({ confirm: true });
-  }
-
-  async function loadTrust() {
-    state.trusted = await fetchTrustedKeys();
-    renderTrust();
   }
 
   // Compare catalog versions without pulling in a semver library. Build
@@ -590,11 +503,6 @@
     if (state.job && !state.job.done) return;
     clearNotice();
     try {
-      const trusted = await ensureTrust();
-      if (!trusted) {
-        showNotice('已取消安装：需要先信任发布公钥 ' + TRUST_KEY_ID, 'warn');
-        return;
-      }
       const result = await call('install', {
         name: entry.name,
         version: entry.version,
@@ -774,18 +682,9 @@
     }
   };
 
-  trustButton.onclick = async () => {
-    try {
-      await importTrustKey({ confirm: false });
-    } catch (error) {
-      showNotice('导入发布公钥失败：' + (error.message || error), 'bad');
-    }
-  };
-
   refreshButton.onclick = async () => {
     refreshButton.disabled = true;
     clearNotice();
-    loadTrust();
     try {
       const result = await call('refresh', {}, 10000);
       if (result.started) {
@@ -850,7 +749,6 @@
     }
   }
 
-  loadTrust();
   loadCompat().then(() => load());
 </script>
 </body>

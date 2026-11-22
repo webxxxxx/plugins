@@ -34,11 +34,6 @@ const TARGET: &str = match option_env!("SVCD_PLUGIN_TARGET") {
 /// same string the manifest is built with, and is stable across hosts.
 const OWN_ID: &str = env!("CARGO_PKG_NAME");
 const SNAPSHOT: &str = include_str!(concat!(env!("OUT_DIR"), "/catalog_snapshot.md"));
-/// The release key that signs every package in the catalog. It is embedded
-/// here so the store can offer a one-click trust import instead of asking the
-/// user to copy a `.pub` file into the host config directory by hand.
-const TRUST_KEY_ID: &str = "signing";
-const TRUST_KEY_PEM: &str = include_str!("../../../docs/signing.pub");
 
 #[derive(Clone)]
 struct Job {
@@ -81,7 +76,6 @@ impl Plugin for PluginStore {
         "package_blob",
         "install_result",
         "refresh",
-        "trust_key",
     ];
 
     fn call(&mut self, name: &str, arguments: &Value) -> ToolOutcome {
@@ -92,7 +86,6 @@ impl Plugin for PluginStore {
             "package_blob" => self.package_blob(arguments),
             "install_result" => self.install_result(arguments),
             "refresh" => self.refresh(),
-            "trust_key" => self.trust_key(),
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }
@@ -419,21 +412,6 @@ impl PluginStore {
             }
         }
         ToolOutcome::text(json!({ "job": job_json(&job) }).to_string())
-    }
-
-    /// The public key is public data, not a secret: the browser posts it to
-    /// the host trust API after the user approves the import.
-    fn trust_key(&self) -> ToolOutcome {
-        if !TRUST_KEY_PEM.starts_with("-----BEGIN PUBLIC KEY-----") {
-            return ToolOutcome::error("内置发布公钥格式不正确");
-        }
-        ToolOutcome::text(
-            json!({
-                "keyId": TRUST_KEY_ID,
-                "pem": TRUST_KEY_PEM,
-            })
-            .to_string(),
-        )
     }
 
     fn refresh(&self) -> ToolOutcome {
@@ -860,13 +838,6 @@ mod tests {
             declared, implemented,
             "manifest and code disagree on capabilities"
         );
-    }
-
-    #[test]
-    fn embedded_trust_key_is_a_public_key() {
-        assert!(TRUST_KEY_PEM.starts_with("-----BEGIN PUBLIC KEY-----"));
-        assert!(TRUST_KEY_PEM.contains("-----END PUBLIC KEY-----"));
-        assert_eq!(TRUST_KEY_ID, "signing");
     }
 
     #[test]
