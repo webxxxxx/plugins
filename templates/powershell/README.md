@@ -6,7 +6,7 @@
 
 ```
 package/
-├── manifest.json          ← interpreter 由工具按目标平台写，不写 version
+├── manifest.json          ← schema 1；id 是 ASCII 身份、name 是显示名；interpreter 由工具写
 └── payload/{bin,lib,web}/
 ```
 

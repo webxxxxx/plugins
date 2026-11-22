@@ -6,11 +6,21 @@
 
 ```
 package/                  ← 打包根。里面有什么，包里就有什么（packer 不做过滤）
-├── manifest.json         ← 手写；不写 platform / files[] / signature.json
+├── manifest.json         ← 手写；schema 为 1，id 是 ASCII 身份，name 是显示名
 ├── payload/bin/          ← cargo 产物落到这里（git 忽略）
 └── payload/web/          ← 可选 UI，宿主反代到 /plugin-ui/<id>/
 src/main.rs               ← 你的代码
 ```
+
+`manifest.json` 的字段分工，记这一条就够：
+
+- `id` 是身份：`[a-z0-9][a-z0-9_-]{0,63}`，不能是 `svc`。安装目录、日志、`<id>.<能力>` 工具名、
+  `/plugin-ui/<id>/` 都用它，所以只能 ASCII；模板里默认就是项目名，不写时打包器也取项目目录名。
+- `name` 只是显示名：任意 UTF-8，想写中文就写中文，留空则等于 `id`。
+- `capabilities[].outputSchema` 可选：只做声明与 MCP `tools/list` 投影，不做运行期校验
+  （不写 = 未声明，`{}` = 任意）。本模板的 `stats` 返回 JSON，所以给了一个真实的对象 schema。
+- `icons` 可选：`{"png"|"ico"|"icns": "<包内路径>"}`；`plugin-tools build` 会先校验文件存在且非空。
+- `platform` / `files[]` / `signature.json` 由打包器盖章，源清单里不要写。
 
 源码必须留在 `package/` 之外。`plugin bundle` 会无差别递归整个目录，放进去的
 `src/`、`Cargo.toml`、`target/` 都会被打进 `.spk`。
@@ -26,7 +36,7 @@ plugin-tools build                                 # 构建 + 打包（默认本
 plugin-tools build --platform aarch64-unknown-linux-musl
 plugin-tools build --key ~/.svcd-dev/dev.pem       # 打成签名包
 plugin-tools dev                    # 打包 + 安装 + 启动
-plugin-tools check dist/<name>-<version>-<triple>.spk
+plugin-tools check dist/<id>-<version>-<triple>.spk
 cargo test                                   # 清单与代码的能力清单是否一致
 ```
 

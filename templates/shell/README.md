@@ -6,7 +6,7 @@
 
 ```
 package/                        ← 打包根：里面有什么，包里就有什么
-├── manifest.json
+├── manifest.json                 ← schema 1；id 是 ASCII 身份（缺省=项目名），name 是显示名
 └── payload/
     ├── bin/__NAME__.sh         ← 你的代码（提交）
     └── lib/svcd-plugin.sh      ← 协议壳（由 sdk/shell 同步，勿手改）

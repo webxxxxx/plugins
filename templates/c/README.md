@@ -6,7 +6,7 @@
 
 ```
 package/                  ← 打包根，里面有什么包里就有什么
-├── manifest.json
+├── manifest.json       ← schema 1；id 是 ASCII 身份（缺省=项目名），name 是显示名
 └── payload/{bin,web}/
 src/main.c                ← 你的代码
 src/svcd_plugin.h         ← 协议壳（由 sdk/c 同步，勿手改）

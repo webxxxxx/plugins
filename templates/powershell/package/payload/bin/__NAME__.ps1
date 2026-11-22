@@ -23,10 +23,12 @@ function Invoke-SvcdCapability {
         }
         'info' {
             $edition = if ($PSVersionTable.PSEdition) { $PSVersionTable.PSEdition } else { 'Desktop' }
-            return @{
-                Text  = "PowerShell $($PSVersionTable.PSVersion) ($edition)"
-                Error = $false
+            # JSON, so `info.outputSchema` in the manifest has something to describe.
+            $body = [ordered]@{
+                edition = [string]$edition
+                version = [string]$PSVersionTable.PSVersion
             }
+            return @{ Text = ($body | ConvertTo-Json -Compress); Error = $false }
         }
         default {
             return @{ Text = "unknown tool: $Name"; Error = $true }

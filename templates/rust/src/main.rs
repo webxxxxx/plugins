@@ -27,11 +27,15 @@ impl Plugin for __NAME_PASCAL__ {
                     .unwrap_or("(no message)");
                 ToolOutcome::text(message)
             }
-            "stats" => ToolOutcome::text(format!(
-                "ticks={} pid={}",
-                self.ticks.load(Ordering::SeqCst),
-                std::process::id()
-            )),
+            // JSON, so `stats.outputSchema` in the manifest has something to
+            // describe: undeclared outputs stay text and are passed through.
+            "stats" => ToolOutcome::text(
+                json!({
+                    "ticks": self.ticks.load(Ordering::SeqCst),
+                    "pid": std::process::id(),
+                })
+                .to_string(),
+            ),
             other => ToolOutcome::error(format!("unknown tool: {other}")),
         }
     }

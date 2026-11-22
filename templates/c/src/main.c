@@ -24,7 +24,8 @@ static svcd_outcome handle(const char *name, const char *args_json, void *user) 
         return outcome;
     }
     if (strcmp(name, "info") == 0) {
-        return svcd_text("c plugin: header-only protocol shell, no shared library");
+        /* JSON, so `info.outputSchema` in the manifest has something to describe. */
+        return svcd_text("{\"implementation\":\"c\",\"header_only\":true}");
     }
     return svcd_error("unknown tool");
 }

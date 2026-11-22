@@ -1,5 +1,6 @@
 {
-  "schema": 2,
+  "schema": 1,
+  "id": "__NAME__",
   "name": "__NAME__",
   "version": "0.1.0",
   "desc": "__DESC__",
@@ -32,6 +33,14 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "implementation": { "type": "string" },
+          "header_only": { "type": "boolean" }
+        },
+        "required": ["implementation", "header_only"]
       }
     }
   ]

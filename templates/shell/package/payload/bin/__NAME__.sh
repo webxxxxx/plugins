@@ -16,7 +16,8 @@ handle() {
         uname -a
         ;;
     date)
-        date -u
+        # JSON, so `date.outputSchema` in the manifest has something to describe.
+        printf '{"utc":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         ;;
     *)
         echo "unknown tool: $1" >&2
