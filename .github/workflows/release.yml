@@ -378,55 +378,102 @@ jobs:
           echo "AARCH64_CROSS=$RUNNER_TEMP/cross/aarch64-linux-musl-cross" >> "$GITHUB_ENV"
           echo "X86_64_MUSL_CROSS=$RUNNER_TEMP/cross/x86_64-linux-musl-cross" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/cross/$dir/bin" >> "$GITHUB_PATH"
-      - name: Build .spk
+      - name: Build unsigned .spk
         shell: bash
-        env:
-          # 只在可信的 tag / 手动 release 构建里注入；同仓库 PR 也拿不到发布钥。
-          PLUGIN_SIGNING_KEY: ${{ (startsWith(github.ref, 'refs/tags/') || github.event.inputs.release == 'true') && secrets.PLUGIN_SIGNING_KEY || '' }}
         run: |
           set -euo pipefail
-          require_signing="${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.release == 'true' }}"
-          args=()
-          if [ -n "${PLUGIN_SIGNING_KEY:-}" ]; then
-            printf '%s' "$PLUGIN_SIGNING_KEY" > "$RUNNER_TEMP/signing.pem"
-            chmod 600 "$RUNNER_TEMP/signing.pem"
-            args+=(--key "$RUNNER_TEMP/signing.pem")
-          elif [ "$require_signing" = "true" ]; then
+          cd "${{ matrix.dir }}"
+          plugin-tools build --platform "${{ matrix.platform }}"
+      - name: Package the unsigned payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -C "${{ matrix.dir }}" -czf "$RUNNER_TEMP/pkg.tgz" package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-${{ matrix.plugin }}-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pkg.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    name: sign release
+    needs: [preflight, host, plugins]
+    if: |
+      !cancelled()
+      && needs.preflight.outputs.has_plugins == 'true'
+      && needs.plugins.result == 'success'
+      && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.release == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # 建议在仓库 Settings -> Environments 里给 release 配 required reviewers。
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: host-ubuntu-24.04
+          path: bin
+      - uses: actions/download-artifact@v5
+        with:
+          path: pkgs
+          pattern: pkg-*
+      - name: Sign and verify .spk
+        env:
+          # 只有这个 job 的这一步能看到发布钥；上面的构建 job 完全没有。
+          PLUGIN_SIGNING_KEY: ${{ secrets.PLUGIN_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PLUGIN_SIGNING_KEY:-}" ]; then
             echo "::error::PLUGIN_SIGNING_KEY is required for a release build"
             exit 1
           fi
-          cd "${{ matrix.dir }}"
-          plugin-tools build --platform "${{ matrix.platform }}" "${args[@]}"
-      - name: Verify .spk
-        shell: bash
-        run: |
-          set -euo pipefail
-          args=()
-          if [ -f "$RUNNER_TEMP/signing.pem" ]; then
-            openssl pkey -in "$RUNNER_TEMP/signing.pem" -pubout -out "$RUNNER_TEMP/signing.pub"
-            args+=(--pubkey "$RUNNER_TEMP/signing.pub")
-          fi
-          found=0
-          for spk in "${{ matrix.dir }}/dist/"*.spk; do
-            [ -f "$spk" ] || continue
-            found=1
-            plugin verify "$spk" "${args[@]}"
+          chmod +x bin/plugin
+          umask 077
+          printf '%s' "$PLUGIN_SIGNING_KEY" > "$RUNNER_TEMP/signing.pem"
+          trap 'rm -f "$RUNNER_TEMP/signing.pem" "$RUNNER_TEMP/signing.pub"' EXIT
+          openssl pkey -in "$RUNNER_TEMP/signing.pem" -pubout -out "$RUNNER_TEMP/signing.pub"
+          mkdir -p dist
+          signed=0
+          for archive in pkgs/*/pkg.tgz; do
+            [ -f "$archive" ] || continue
+            dir=$(basename "$(dirname "$archive")")
+            tmp=$(mktemp -d)
+            tar -xzf "$archive" -C "$tmp"
+            manifest="$tmp/package/manifest.json"
+            name=$(jq -r '.name // empty' "$manifest")
+            version=$(jq -r '.version // empty' "$manifest")
+            platform="${dir#pkg-$name-}"
+            if [ -z "$name" ] || [ -z "$version" ] || [ "$platform" = "$dir" ] || [ -z "$platform" ]; then
+              echo "::error::bad package artifact $dir (name=$name version=$version platform=$platform)"
+              exit 1
+            fi
+            out="dist/${name}-${version}-${platform}.spk"
+            bin/plugin bundle "$tmp/package" --platform "$platform" --key "$RUNNER_TEMP/signing.pem" -o "$out"
+            bin/plugin verify "$out" --pubkey "$RUNNER_TEMP/signing.pub"
+            rm -rf "$tmp"
+            signed=$((signed + 1))
           done
-          [ "$found" = "1" ] || { echo "::error::no .spk was produced"; exit 1; }
+          if [ "$signed" -lt 1 ]; then
+            echo "::error::no packages were signed"
+            exit 1
+          fi
+          ls -lh dist
       - uses: actions/upload-artifact@v7
         with:
-          name: spk-${{ matrix.plugin }}-${{ matrix.platform }}
-          path: ${{ matrix.dir }}/dist/*.spk
+          name: spk-signed
+          path: dist/*.spk
           if-no-files-found: error
           retention-days: 7
 
   publish:
     name: publish release
-    needs: [preflight, plugins, project]
+    needs: [preflight, sign, project]
     if: |
       !cancelled()
       && needs.preflight.result == 'success'
-      && needs.plugins.result == 'success'
+      && needs.sign.result == 'success'
       && (needs.project.result == 'success' || needs.project.result == 'skipped')
       && (startsWith(github.ref, 'refs/tags/') || github.event.inputs.release == 'true')
     runs-on: ubuntu-24.04

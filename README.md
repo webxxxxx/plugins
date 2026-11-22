@@ -63,11 +63,12 @@ tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代�
 每次发布：
 
 - **项目本身**：构建 `plugin-tools`，产出 Linux x86_64 gnu、Windows x86_64 msvc、macOS universal2 三份归档（仅全量发布）；
-- **`plugins/` 下的插件**：自动发现 `plugins/*/.plugin.json`，按 `ci.platforms`（没有就 `platforms`）生成矩阵，逐个平台构建 `.spk`；
-- **发布**：汇总 `.spk`、`plugin-tools` 归档和 `SHA256SUMS`，`gh release create/upload` 到同一个 Release；tag 的**版本部分**带 `-`（如 `v1.0.0-rc1`、`hysteria-v1.0.1-rc1`）自动标 prerelease，`hysteria-v1.0.1` 这类单插件稳定版不标；
+- **`plugins/` 下的插件**：自动发现 `plugins/*/.plugin.json`，按 `ci.platforms`（没有就 `platforms`）生成矩阵，逐个平台构建未签名 package；
+- **签名**：`sign` job 只下载上一步的 package，在 `release` environment 里用 `secrets.PLUGIN_SIGNING_KEY` 重新 `plugin bundle --key` 并 `plugin verify`；构建脚本接触不到私钥；
+- **发布**：汇总已签名的 `.spk`、`plugin-tools` 归档和 `SHA256SUMS`，`gh release create/upload` 到同一个 Release；tag 的**版本部分**带 `-`（如 `v1.0.0-rc1`、`hysteria-v1.0.1-rc1`）自动标 prerelease，`hysteria-v1.0.1` 这类单插件稳定版不标；
 - **插件列表**：发布成功后 `update-plugin-list` job 重新生成 [docs/plugins.md](docs/plugins.md) 并提交到 `main`，只保留每个插件/平台的最新稳定版。
 
-插件构建使用仓库存的 `secrets.PLUGIN_SIGNING_KEY`（Ed25519 PKCS#8 PEM）。没有这个 secret 时 PR 只做未签名构建；tag / 手动发布则直接失败，避免发出未签名包。
+私钥只存在于 GitHub Actions Secret（建议放 `release` environment secret）和发布机，仓库里只有公钥。建议给 `release` environment 配 required reviewers；构建 job 不注入 secret，没有它时 PR 只做未签名构建，tag / 手动发布会在 `sign` job 直接失败，避免发出未签名包。
 
 发布公钥在 [docs/release-key.pub](docs/release-key.pub)（SHA-256 指纹
 `af7c736c946e2340e48cac641177514792daec9539cdbc6a8998b2a8a8e91cf6`）。
@@ -77,7 +78,7 @@ tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代�
 svc trust add docs/release-key.pub
 ```
 
-私钥只保存在发布机上（`~/.svcd-release/release.pem`），不要提交；轮换时同时更新
+私钥只保存在发布机上（`~/.svcd-release/release.pem`）和 GitHub Actions Secret，不要提交；轮换时同时更新
 GitHub secret 和这个公钥文件。
 
 ### CI 平台覆盖
