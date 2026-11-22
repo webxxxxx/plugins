@@ -64,3 +64,5 @@ POSIX sh 包装。
 
 发布流水线按 `.plugin.json` 的 6 个平台构建；Linux musl 三个目标用
 musl cross 工具链编译 BoringSSL，macOS 目标用宿主 Xcode 工具链。
+
+<!-- changed-matrix smoke test -->
