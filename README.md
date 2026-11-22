@@ -39,6 +39,8 @@ cd tools/cli && cargo build --release
 
 `.github/workflows/test.yml` 在两个操作系统上跑 SDK、工具链与 Rust 样例的测试，并给四种语言各脚手架一次；`.github/workflows/build.yml` 先构建宿主的 `plugin` CLI，再用它打包每份样例并 `verify`，产物作为 artifact 上传。没有 Node、没有 daemon，跑的全是 `plugin bundle` 的本地路径。
 
+发布工作流的 PR 构建只跑改动过的插件：`plugins/<name>/**` 命中谁就构建谁；改了 `sdk/`、`templates/` 或 `tools/cli/` 时回退到全部插件。
+
 ## 发布
 
 `.github/workflows/release.yml` 处理发布。两种 tag：
