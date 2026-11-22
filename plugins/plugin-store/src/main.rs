@@ -466,10 +466,10 @@ fn required<'a>(arguments: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("缺少参数 {key}"))
 }
 
-/// Downloads are transient and belong under the installed plugin's root, not
-/// in a sibling of the host's data root.
-fn plugin_temp_dir(data_root: &Path, id: &str) -> PathBuf {
-    data_root.join("plugins").join(id).join("temp")
+/// The host installs plugins under <data>/plugins/<id>. Both the persistent
+/// catalog cache and transient downloads live there, not beside the data root.
+fn plugin_root(data_root: &Path, id: &str) -> PathBuf {
+    data_root.join("plugins").join(id)
 }
 
 fn entry_json(entry: &catalog::Entry, download_dir: &Path) -> Value {
@@ -796,14 +796,10 @@ fn main() -> Exit {
     let data_root = context.data_dir().map(PathBuf::from);
     let data_dir = data_root
         .as_ref()
-        .map(|root| root.join(OWN_ID))
+        .map(|root| plugin_root(root, OWN_ID))
         .unwrap_or_else(|| std::env::temp_dir().join("plugin-store"));
-    // The host keeps installed plugins under <data>/plugins/<id>; downloads
-    // belong in that root's temp directory, not next to the data root.
-    let download_dir = data_root
-        .as_ref()
-        .map(|root| plugin_temp_dir(root, OWN_ID))
-        .unwrap_or_else(|| data_dir.join("temp"));
+    // The catalog cache sits at the plugin root; downloads use its temp dir.
+    let download_dir = data_dir.join("temp");
     let state = Arc::new(Mutex::new(initial_state(&data_dir)));
     log_info!(
         "plugin-store 启动: target={TARGET}, 内置/缓存 {} 个包, data={}, downloads={}",
@@ -857,11 +853,11 @@ mod tests {
     }
 
     #[test]
-    fn downloads_live_under_the_plugin_root() {
+    fn data_lives_under_the_plugin_root() {
         let root = Path::new("data");
         assert_eq!(
-            plugin_temp_dir(root, "plugin-store"),
-            root.join("plugins").join("plugin-store").join("temp")
+            plugin_root(root, "plugin-store"),
+            root.join("plugins").join("plugin-store")
         );
     }
 
