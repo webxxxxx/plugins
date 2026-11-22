@@ -398,6 +398,19 @@ impl PluginStore {
         let job = job.clone();
         drop(state);
         emit_job(&job);
+        if ok {
+            let cached = self.data_dir.join("downloads").join(package_file_parts(
+                &job.name,
+                &job.version,
+                &job.platform,
+                job.device.as_deref(),
+            ));
+            match fs::remove_file(&cached) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => log_warn!("删除缓存包 {} 失败: {error}", cached.display()),
+            }
+        }
         ToolOutcome::text(json!({ "job": job_json(&job) }).to_string())
     }
 
@@ -566,13 +579,22 @@ fn run_install(
 }
 
 fn package_file(entry: &catalog::Entry) -> String {
+    package_file_parts(
+        &entry.name,
+        &entry.version,
+        &entry.platform,
+        entry.device.as_deref(),
+    )
+}
+
+fn package_file_parts(name: &str, version: &str, platform: &str, device: Option<&str>) -> String {
     let mut file = format!(
         "{}-{}-{}",
-        safe_part(&entry.name),
-        safe_part(&entry.version),
-        safe_part(&entry.platform)
+        safe_part(name),
+        safe_part(version),
+        safe_part(platform)
     );
-    if let Some(device) = entry.device.as_deref() {
+    if let Some(device) = device {
         file.push('-');
         file.push_str(&safe_part(device));
     }

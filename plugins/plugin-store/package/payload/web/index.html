@@ -121,7 +121,7 @@
   <header>
     <div>
       <h1>插件商店</h1>
-      <p class="sub">只显示当前设备可用的包 · 每页 50 个 · 安装由 svcd 校验签名与平台</p>
+      <p class="sub">只显示当前设备可用的包 · 安装由 svcd 校验签名与平台</p>
       <p class="sub">设备 <code id="target">读取中…</code> · 列表 <span id="source">…</span></p>
     </div>
     <div class="actions">
@@ -174,11 +174,6 @@
 
   <footer>
     数据源：<a href="https://github.com/webxxxxx/plugins/blob/main/docs/plugins.md" target="_blank" rel="noreferrer">docs/plugins.md</a>。
-    列表与下载的包会缓存在插件数据目录，重复安装无需重新下载。
-    安装走宿主现成的 <code>POST /api/v1/plugins</code>（与 plugin-manager 管理页相同）；
-    设备平台与 device id 来自宿主 <code>GET /api/v1/compat</code>，只列出平台匹配的包；
-    带 device 限制的包还会在安装时由 svcd 再次校验。
-    外网访问慢或 GitHub 资源域名被劫持时，客户端会先尝试 CDN，再走 DNS-over-HTTPS 回退。
   </footer>
 </main>
 
@@ -216,6 +211,9 @@
   };
 
   const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null };
+  const INSTALLED_TTL_MS = 30000;
+  let installedFetchedAt = 0;
+  let installedRequest = null;
   let searchTimer = null;
   let pollTimer = null;
   let hideJobFor = null;
@@ -263,24 +261,36 @@
     }
   }
 
-  async function fetchInstalled() {
-    try {
-      const response = await fetch('/api/v1/services', { credentials: 'same-origin' });
-      if (!response.ok) return null;
-      const body = await response.json();
-      const installed = new Map();
-      for (const service of body.services || []) {
-        if (!service || service.kind !== 'plugin' || !service.id) continue;
-        installed.set(service.id, service.version || '');
-      }
-      return installed;
-    } catch (_) {
+  async function fetchInstalled(force) {
+    const now = Date.now();
+    if (!force && installedFetchedAt && now - installedFetchedAt < INSTALLED_TTL_MS) {
       return null;
     }
+    if (installedRequest) return installedRequest;
+    installedRequest = (async () => {
+      try {
+        const response = await fetch('/api/v1/services', { credentials: 'same-origin' });
+        if (!response.ok) return null;
+        const body = await response.json();
+        const installed = new Map();
+        for (const service of body.services || []) {
+          if (!service || service.kind !== 'plugin' || !service.id) continue;
+          installed.set(service.id, service.version || '');
+        }
+        installedFetchedAt = Date.now();
+        return installed;
+      } catch (_) {
+        return null;
+      } finally {
+        installedRequest = null;
+      }
+    })();
+    return installedRequest;
   }
 
   async function load(options) {
     const quiet = options && options.quiet;
+    const refreshInstalled = Boolean(options && options.refreshInstalled);
     if (state.loading) {
       state.pending = true;
       return;
@@ -304,7 +314,7 @@
           platform: HOST.platform || undefined,
           device: HOST.device || undefined,
         }),
-        fetchInstalled(),
+        fetchInstalled(refreshInstalled),
       ]);
       if (installed) state.installed = installed;
       state.data = data;
@@ -436,7 +446,7 @@
     const active = state.job && !state.job.done && state.job.name === entry.name &&
       state.job.version === entry.version && state.job.platform === entry.platform &&
       (state.job.device || '') === (entry.device || '');
-    button.textContent = active ? '处理中…' : sameVersion ? '已安装' : isInstalled ? '升级' : (entry.cached ? '安装' : '下载并安装');
+    button.textContent = active ? '处理中…' : sameVersion ? '已安装' : isInstalled ? '升级' : (entry.cached ? '安装' : '下载安装');
     button.disabled = sameVersion || Boolean(state.job && !state.job.done);
     if (sameVersion) button.title = '已安装该版本';
     button.onclick = () => startInstall(entry);
@@ -573,6 +583,7 @@
       if (!installed.id) throw new Error('安装响应缺少插件 id');
       state.installed.set(job.name, installed.version || '');
       state.installed.set(installed.id, installed.version || '');
+      installedFetchedAt = Date.now();
       if (installed.state !== 'running') {
         const startResponse = await fetch(
           '/api/v1/services/' + encodeURIComponent(installed.id) + '/start',
@@ -635,10 +646,10 @@
       const result = await call('refresh', {}, 10000);
       if (result.started) {
         showNotice('正在后台刷新插件列表…', 'warn');
-        setTimeout(() => load({ quiet: true }), 800);
+        setTimeout(() => load({ quiet: true, refreshInstalled: true }), 800);
       } else {
         showNotice('已有刷新任务在运行，完成后列表会自动更新', 'warn');
-        setTimeout(() => load({ quiet: true }), 1200);
+        setTimeout(() => load({ quiet: true, refreshInstalled: true }), 1200);
       }
     } catch (error) {
       showNotice('刷新失败：' + (error.message || error), 'bad');
