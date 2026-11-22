@@ -62,6 +62,5 @@ Rust 1.98.1（vendor 里的 `rust-toolchain.toml`）和 cmake/C++ 是构建依�
 BoringSSL 由 meow-rs 自己静态链接。Windows 不在平台列表里：插件入口是
 POSIX sh 包装。
 
-`.plugin.json` 的 `ci.platforms` 是发布流水线实际构建的子集：Linux x86_64
-gnu + macOS 两种架构。Linux musl / armv7 需要额外的 BoringSSL 交叉链，
-本地可以用 `plugin-tools build --platform ...` 自行尝试。
+发布流水线按 `.plugin.json` 的 6 个平台构建；Linux musl 三个目标用
+musl cross 工具链编译 BoringSSL，macOS 目标用宿主 Xcode 工具链。

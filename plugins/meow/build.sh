@@ -30,8 +30,19 @@ case "$PLATFORM" in
     A=${AARCH64_CROSS:-/usr/soft/aarch64-linux-musl-cross}
     export PATH="$A/bin:$PATH"
     export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
+    export CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++
+    export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
+    export RANLIB_aarch64_unknown_linux_musl=aarch64-linux-musl-ranlib
     export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc ;;
-  x86_64-unknown-linux-musl|x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc|aarch64-apple-darwin|x86_64-apple-darwin) ;;
+  x86_64-unknown-linux-musl)
+    X=${X86_64_MUSL_CROSS:-${CROSS_PREFIX:-/usr/soft/x86_64-linux-musl-cross}}
+    export PATH="$X/bin:$PATH"
+    export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+    export CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
+    export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
+    export RANLIB_x86_64_unknown_linux_musl=x86_64-linux-musl-ranlib
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc ;;
+  x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc|aarch64-apple-darwin|x86_64-apple-darwin) ;;
   *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
 esac
 cd "$HERE/vendor/meow-rs"
@@ -39,5 +50,5 @@ cd "$HERE/vendor/meow-rs"
 # 不要移动 rust-toolchain.toml：它决定工具链，移走会让构建版本漂移。
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/svcd-meow-target}
 JOBS=${JOBS:-4}
-cargo build --release --locked -j "$JOBS" --target "$PLATFORM"
+cargo build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow
 cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow" "$HERE/out/$NAME"

@@ -297,8 +297,8 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: brew install cmake
-      - name: Install musl cross toolchains (sshd)
-        if: runner.os == 'Linux' && matrix.plugin == 'sshd' && (matrix.platform == 'aarch64-unknown-linux-musl' || matrix.platform == 'armv7-unknown-linux-musleabihf' || matrix.platform == 'x86_64-unknown-linux-musl')
+      - name: Install musl cross toolchains (sshd/meow)
+        if: runner.os == 'Linux' && (matrix.plugin == 'sshd' || matrix.plugin == 'meow') && (matrix.platform == 'aarch64-unknown-linux-musl' || matrix.platform == 'armv7-unknown-linux-musleabihf' || matrix.platform == 'x86_64-unknown-linux-musl')
         shell: bash
         run: |
           set -euo pipefail

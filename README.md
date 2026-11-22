@@ -80,7 +80,7 @@ GitHub secret 和这个公钥文件。
 
 ### CI 平台覆盖
 
-每个插件的 `.plugin.json` 可以写 `ci.platforms` 覆盖发布矩阵；meow 因 BoringSSL 交叉链目前只覆盖 Linux x86_64 gnu + 两种 macOS。完整的 `platforms` 仍可用于本地构建。
+每个插件的 `.plugin.json` 可以写 `ci.platforms` 覆盖发布矩阵；不写就按 `platforms` 全量构建。meow 的 Linux musl 目标用 musl cross 工具链编译 BoringSSL。
 
 ## 两条命令
 
