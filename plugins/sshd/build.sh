@@ -47,7 +47,7 @@ fi
 
 cd "$HERE/vendor/dropbear-2022.83"
 # Windows 检出可能丢掉可执行位，configure 会依赖 config.guess/config.sub 可直接执行。
-chmod +x configure config.guess config.sub install-sh 2>/dev/null || true
+chmod +x configure config.guess config.sub install-sh ifndef_wrapper.sh 2>/dev/null || true
 make distclean >/dev/null 2>&1 || true
 # 不写死 sftp 路径：运行时 sshd.sh 通过 SVCD_SFTP_SERVER 传入包内相对路径。
 rm -f localoptions.h
@@ -62,6 +62,8 @@ cp dropbearmulti "$HERE/out/$NAME"
 cd "$HERE/vendor/openssh-9.9p2"
 chmod +x configure config.guess config.sub install-sh mkinstalldirs 2>/dev/null || true
 make distclean >/dev/null 2>&1 || true
+# configure 会拒绝比它新的 m4/openssh.m4；git 检出时 mtime 相同会导致误判。
+touch configure
 ./configure --host=$HOST --disable-shared --enable-static --without-openssl --without-zlib \
   CFLAGS="-O2 -fno-pie $EXTRA" LDFLAGS="-static -no-pie"
 make -j"$(nproc)" sftp-server || true
