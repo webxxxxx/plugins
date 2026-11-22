@@ -1,7 +1,7 @@
 {
   "schema": 2,
   "name": "meow",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "desc": "meow 代理：mihomo 兼容内核，带 yacd 面板",
   "protocol": 1,
   "interpreter": {
