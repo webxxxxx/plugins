@@ -2,7 +2,7 @@
 
 use plugin_tools::{
     build_from_recipe, devkey, host_triple, instantiate, pack, pascal, read_manifest, read_recipe,
-    sync, valid_name, vendor_sdk, write_project, Project, Repo, LANGUAGES, PLATFORMS,
+    sync, valid_name, vendor_sdk, write_project, Package, Project, Repo, LANGUAGES, PLATFORMS,
 };
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -83,6 +83,8 @@ fn usage() {
       --no-verify         跳过 plugin verify
 
   不给 --platform 时按插件声明的 platforms 打；.plugin.json 没写 platforms 就打全部 7 个。
+  产物名是 <id>-<version>-<platform>.spk：id 取 manifest.json 的 id，缺省用目录名；
+  显示名（manifest 的 name）可以是中文，但只给人看，不进文件名。
 
   dev [options]     打包 + 安装 + 启动（首装不自启，这里代做）
   devkey            生成机器级开发钥（~/.svcd-dev）
@@ -401,46 +403,55 @@ fn find_plugin_root(dir: Option<&str>) -> Result<PathBuf, String> {
     }
 }
 
+/// What one `build`/`dev` run produced.
+struct Packed {
+    spks: Vec<PathBuf>,
+    id: String,
+    signed: bool,
+}
+
 fn build(args: &[String]) -> Result<(), String> {
-    let (spks, _manifest, signed) = pack_plugin(args)?;
-    for spk in &spks {
+    let packed = pack_plugin(args)?;
+    for spk in &packed.spks {
         println!(
             "\npacked {}{}",
             spk.display(),
-            if signed { "" } else { "  (unsigned)" }
+            if packed.signed { "" } else { "  (unsigned)" }
         );
     }
-    if !signed {
+    if !packed.signed {
         println!("host needs: allow_insecure_install = on   (restart svcd after changing it)");
     }
     println!(
         "next: plugin install \"{}\" && plugin start {}",
-        spks[0].display(),
-        _manifest.name
+        packed.spks[0].display(),
+        packed.id
     );
     Ok(())
 }
 
 /// Pack the plugin and install + start it: the local development loop.
 fn dev(args: &[String]) -> Result<(), String> {
-    let (spks, manifest, _signed) = pack_plugin(args)?;
+    let packed = pack_plugin(args)?;
     let host = host_triple().ok();
     let spk = host
         .and_then(|triple| {
-            spks.iter().find(|path| {
+            packed.spks.iter().find(|path| {
                 path.file_name()
                     .and_then(|name| name.to_str())
                     .map(|name| name.contains(triple))
                     .unwrap_or(false)
             })
         })
-        .unwrap_or(&spks[0]);
+        .unwrap_or(&packed.spks[0]);
     let bin = std::env::var("SVCD_PLUGIN_BIN").unwrap_or_else(|_| "plugin".to_string());
     for verb in ["install", "start"] {
+        // The host's commands take the id: the display name is not an identity
+        // and may even be Chinese.
         let target = if verb == "install" {
             spk.display().to_string()
         } else {
-            manifest.name.clone()
+            packed.id.clone()
         };
         let status = std::process::Command::new(&bin)
             .args([verb, target.as_str()])
@@ -453,13 +464,15 @@ fn dev(args: &[String]) -> Result<(), String> {
             ));
         }
     }
-    println!("started {}", manifest.name);
+    println!("started {}", packed.id);
     Ok(())
 }
 
-fn pack_plugin(args: &[String]) -> Result<(Vec<PathBuf>, plugin_tools::Manifest, bool), String> {
+fn pack_plugin(args: &[String]) -> Result<Packed, String> {
     let root = find_plugin_root(flag(args, "--dir"))?;
     let manifest = read_manifest(&root)?;
+    let id = plugin_tools::plugin_id(&root, &manifest)?;
+    plugin_tools::assert_icons(&root, &manifest)?;
     let recipe = read_recipe(&root)?;
     let platforms = plugin_tools::resolve_platforms(&root, flag(args, "--platform"))?;
     let key = flag(args, "--key").map(PathBuf::from);
@@ -481,12 +494,16 @@ fn pack_plugin(args: &[String]) -> Result<(Vec<PathBuf>, plugin_tools::Manifest,
     for platform in &platforms {
         // The recipe decides how to reach a platform; `{platform}` is available to
         // it, so `cargo build --target {platform}` is a one-line change.
-        let exec = build_from_recipe(&root, &manifest, recipe.as_ref(), platform)?;
+        let exec = build_from_recipe(&root, &manifest, &id, recipe.as_ref(), platform)?;
         plugin_tools::assert_payload(&root)?;
+        let package = Package {
+            id: &id,
+            version: &manifest.version,
+            platform,
+        };
         let spk = pack(
             &root,
-            &manifest,
-            platform,
+            &package,
             key.as_deref(),
             if platforms.len() == 1 {
                 out.as_deref()
@@ -503,7 +520,11 @@ fn pack_plugin(args: &[String]) -> Result<(Vec<PathBuf>, plugin_tools::Manifest,
         }
         spks.push(spk);
     }
-    Ok((spks, manifest, key.is_some()))
+    Ok(Packed {
+        spks,
+        id,
+        signed: key.is_some(),
+    })
 }
 
 fn check(args: &[String]) -> Result<(), String> {

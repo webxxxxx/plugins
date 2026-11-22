@@ -13,7 +13,7 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -76,11 +76,19 @@ impl Repo {
 }
 
 /// The fields of `package/manifest.json` this toolchain needs.
+///
+/// `name` is deliberately absent: it is the display name (any UTF-8) and only
+/// the host's bundler consumes it. The identity is `id`, which falls back to the
+/// project directory name; `icons` is checked here because a missing icon file
+/// is a packaging error, not something to discover at install time.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
-    pub name: String,
     pub version: String,
     pub exec: Exec,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub icons: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,10 +96,70 @@ pub struct Exec {
     pub path: String,
 }
 
+/// The icon formats a package may declare (`icons: {png?, ico?, icns?}`).
+const ICON_FORMATS: &[&str] = &["png", "ico", "icns"];
+
+/// The id the host keeps for its own service registry.
+const RESERVED_IDS: &[&str] = &["svc"];
+
 pub fn read_manifest(root: &Path) -> Result<Manifest, String> {
     let path = root.join("package").join("manifest.json");
     let bytes = fs::read(&path).map_err(|error| format!("read {}: {}", path.display(), error))?;
     serde_json::from_slice(&bytes).map_err(|error| format!("parse {}: {}", path.display(), error))
+}
+
+/// The plugin's identity: manifest `id`, else the project directory name.
+///
+/// Same rule the host's bundler applies. The id ends up in directory names, log
+/// file names, `<id>.<capability>` tool names and `/plugin-ui/<id>/`, so it must
+/// stay ASCII; the display name (`name`) is what may be Chinese.
+pub fn plugin_id(root: &Path, manifest: &Manifest) -> Result<String, String> {
+    let id = match manifest
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => id.to_string(),
+        None => root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string(),
+    };
+    if !valid_name(&id) {
+        return Err(format!(
+            "invalid plugin id \"{id}\": expected [a-z0-9][a-z0-9_-]{{0,63}} in manifest.json's \"id\" (or in the project directory name)"
+        ));
+    }
+    if RESERVED_IDS.contains(&id.as_str()) {
+        return Err(format!(
+            "id \"{id}\" is reserved: the host keeps it for its own service registry"
+        ));
+    }
+    Ok(id)
+}
+
+/// Fail before the bundler does when a declared icon is not a real package file.
+pub fn assert_icons(root: &Path, manifest: &Manifest) -> Result<(), String> {
+    for (format, path) in &manifest.icons {
+        if !ICON_FORMATS.contains(&format.as_str()) {
+            return Err(format!(
+                "manifest.json: icons.{format} is not a supported format ({}); got \"{path}\"",
+                ICON_FORMATS.join(", ")
+            ));
+        }
+        let file = root.join("package").join(path);
+        let metadata = fs::metadata(&file)
+            .map_err(|error| format!("icons.{format}: {} is missing ({error})", path))?;
+        if !metadata.is_file() {
+            return Err(format!("icons.{format}: {} is not a file", path));
+        }
+        if metadata.len() == 0 {
+            return Err(format!("icons.{format}: {} is empty", path));
+        }
+    }
+    Ok(())
 }
 
 /// `build.json` beside `package/`; absent means the payload is already source.
@@ -121,9 +189,12 @@ pub fn read_recipe(root: &Path) -> Result<Option<Recipe>, String> {
 }
 
 /// Expand `{name}`, `{version}` and `{platform}` in a recipe string.
-pub fn expand(value: &str, name: &str, version: &str, platform: &str) -> String {
+///
+/// `{name}` is the plugin id (see [`plugin_id`]): recipes name files, and the
+/// display name may be Chinese.
+pub fn expand(value: &str, id: &str, version: &str, platform: &str) -> String {
     value
-        .replace("{name}", name)
+        .replace("{name}", id)
         .replace("{version}", version)
         .replace("{platform}", platform)
 }
@@ -132,9 +203,13 @@ pub fn expand(value: &str, name: &str, version: &str, platform: &str) -> String 
 ///
 /// Returns the exec path the packaged manifest should use — on Windows the
 /// artifact keeps its `.exe` suffix, and `CreateProcess` does not guess it.
+///
+/// `{name}` in the recipe expands to the plugin id, never to the display name:
+/// it names files, and a display name may be Chinese.
 pub fn build_from_recipe(
     root: &Path,
     manifest: &Manifest,
+    id: &str,
     recipe: Option<&Recipe>,
     platform: &str,
 ) -> Result<Option<String>, String> {
@@ -148,24 +223,24 @@ pub fn build_from_recipe(
         return Err("build.json: build.artifact is required".into());
     }
 
-    let artifact = expand(&spec.artifact, &manifest.name, &manifest.version, platform);
+    let artifact = expand(&spec.artifact, id, &manifest.version, platform);
     let artifact_path = root.join(&artifact);
     if let Some(parent) = artifact_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {}", parent.display(), error))?;
     }
 
-    let program = expand(&spec.command[0], &manifest.name, &manifest.version, platform);
+    let program = expand(&spec.command[0], id, &manifest.version, platform);
     let args: Vec<String> = spec.command[1..]
         .iter()
-        .map(|part| expand(part, &manifest.name, &manifest.version, platform))
+        .map(|part| expand(part, id, &manifest.version, platform))
         .collect();
 
     let mut command = Command::new(&program);
     command.args(&args).current_dir(root);
     for layer in [spec.env.get("*"), spec.env.get(platform)].into_iter().flatten() {
         for (key, value) in layer {
-            command.env(key, expand(value, &manifest.name, &manifest.version, platform));
+            command.env(key, expand(value, id, &manifest.version, platform));
         }
     }
     println!("$ {program} {}", args.join(" "));
@@ -242,19 +317,33 @@ fn count_files(dir: &Path) -> Result<usize, String> {
     Ok(count)
 }
 
+/// One package to build: identity, version and the target triple.
+pub struct Package<'a> {
+    pub id: &'a str,
+    pub version: &'a str,
+    pub platform: &'a str,
+}
+
+/// Where a package lands: the host names artifacts `<id>-<version>-<platform>.spk`
+/// because the display name may be Chinese and must not reach a file name.
+fn spk_path(root: &Path, package: &Package, out: Option<&Path>) -> PathBuf {
+    out.map(Path::to_path_buf).unwrap_or_else(|| {
+        root.join("dist").join(format!(
+            "{}-{}-{}.spk",
+            package.id, package.version, package.platform
+        ))
+    })
+}
+
 /// Pack `package/` with the host's `plugin bundle`.
 pub fn pack(
     root: &Path,
-    manifest: &Manifest,
-    platform: &str,
+    package: &Package,
     key: Option<&Path>,
     out: Option<&Path>,
     exec: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let spk = out.map(Path::to_path_buf).unwrap_or_else(|| {
-        root.join("dist")
-            .join(format!("{}-{}-{}.spk", manifest.name, manifest.version, platform))
-    });
+    let spk = spk_path(root, package, out);
     if let Some(parent) = spk.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {}", parent.display(), error))?;
@@ -265,7 +354,12 @@ pub fn pack(
         "bundle".into(),
         root.join("package").display().to_string(),
         "--platform".into(),
-        platform.into(),
+        package.platform.into(),
+        // Pass the resolved id explicitly: the toolchain already decided between
+        // `manifest.json`'s `id` and the directory name, and the host must not
+        // re-derive it from a directory that may be called anything.
+        "--id".into(),
+        package.id.into(),
         "-o".into(),
         spk.display().to_string(),
     ];
@@ -649,5 +743,103 @@ mod tests {
         let _ = fs::create_dir_all(&root);
         assert!(read_recipe(&root).unwrap().is_none());
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A throwaway plugin root with a `package/manifest.json`.
+    fn plugin_dir(tag: &str, manifest: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("plugin-tools-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("package")).unwrap();
+        fs::write(root.join("package/manifest.json"), manifest).unwrap();
+        root
+    }
+
+    fn manifest_with(extra: &str) -> String {
+        format!(r#"{{"schema":1,"version":"1.0.0","exec":{{"path":"payload/bin/demo"}}{extra}}}"#)
+    }
+
+    #[test]
+    fn plugin_id_comes_from_the_manifest_then_the_directory() {
+        let root = plugin_dir(
+            "id-manifest",
+            &manifest_with(r#","id":"demo","name":"示例插件""#),
+        );
+        assert_eq!(
+            plugin_id(&root, &read_manifest(&root).unwrap()).unwrap(),
+            "demo"
+        );
+
+        // No `id` in the manifest: the directory name is the identity, the same
+        // rule the host's bundler applies.
+        let root = plugin_dir("id-dir", &manifest_with(r#","name":"显示名""#));
+        assert_eq!(
+            plugin_id(&root, &read_manifest(&root).unwrap()).unwrap(),
+            root.file_name().unwrap().to_str().unwrap()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugin_id_rejects_what_the_host_would_reject() {
+        let root = plugin_dir("id-bad", &manifest_with(r#","id":"示例","name":"x""#));
+        let error = plugin_id(&root, &read_manifest(&root).unwrap()).unwrap_err();
+        assert!(error.contains("示例"), "{error}");
+
+        let root = plugin_dir("id-reserved", &manifest_with(r#","id":"svc""#));
+        let error = plugin_id(&root, &read_manifest(&root).unwrap()).unwrap_err();
+        assert!(error.contains("svc"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn icons_must_exist_and_not_be_empty() {
+        let root = plugin_dir(
+            "icons",
+            &manifest_with(r#","icons":{"png":"payload/icons/icon.png"}"#),
+        );
+        fs::create_dir_all(root.join("package/payload/icons")).unwrap();
+
+        let error = assert_icons(&root, &read_manifest(&root).unwrap()).unwrap_err();
+        assert!(error.contains("payload/icons/icon.png"), "{error}");
+
+        fs::write(root.join("package/payload/icons/icon.png"), b"").unwrap();
+        let error = assert_icons(&root, &read_manifest(&root).unwrap()).unwrap_err();
+        assert!(error.contains("empty"), "{error}");
+
+        fs::write(root.join("package/payload/icons/icon.png"), b"\x89PNG").unwrap();
+        assert_icons(&root, &read_manifest(&root).unwrap()).unwrap();
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn icon_formats_are_the_three_the_host_accepts() {
+        let root = plugin_dir(
+            "icons-key",
+            &manifest_with(r#","icons":{"svg":"payload/icons/icon.svg"}"#),
+        );
+        fs::create_dir_all(root.join("package/payload/icons")).unwrap();
+        fs::write(root.join("package/payload/icons/icon.svg"), b"<svg/>").unwrap();
+
+        let error = assert_icons(&root, &read_manifest(&root).unwrap()).unwrap_err();
+        assert!(error.contains("svg"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_package_is_named_after_the_id_not_the_display_name() {
+        let package = Package {
+            id: "demo",
+            version: "1.0.0",
+            platform: "x86_64-unknown-linux-musl",
+        };
+        assert_eq!(
+            spk_path(Path::new("/w/plugins/demo"), &package, None),
+            Path::new("/w/plugins/demo/dist/demo-1.0.0-x86_64-unknown-linux-musl.spk")
+        );
+        let explicit = Path::new("/w/out.spk");
+        assert_eq!(
+            spk_path(Path::new("/w/plugins/demo"), &package, Some(explicit)),
+            explicit
+        );
     }
 }
