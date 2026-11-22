@@ -306,18 +306,32 @@ jobs:
           case "${{ matrix.platform }}" in
             aarch64-unknown-linux-musl)
               dir=aarch64-linux-musl-cross
-              url=https://musl.cc/aarch64-linux-musl-cross.tgz
               ;;
             armv7-unknown-linux-musleabihf)
               dir=arm-linux-musleabihf-cross
-              url=https://musl.cc/arm-linux-musleabihf-cross.tgz
               ;;
             x86_64-unknown-linux-musl)
               dir=x86_64-linux-musl-cross
-              url=https://musl.cc/x86_64-linux-musl-cross.tgz
               ;;
           esac
-          curl -fsSL "$url" | tar xz -C "$RUNNER_TEMP/cross"
+          file="$dir.tgz"
+          tgz="$RUNNER_TEMP/$file"
+          ok=0
+          # musl.cc 在 GitHub runner 上会超时，优先用 more.musl.cc 镜像，失败再回退主站。
+          for base in https://more.musl.cc/11.2.1/x86_64-linux-musl https://musl.cc; do
+            if curl -fL --connect-timeout 10 --max-time 300 --retry 2 --retry-delay 3 -o "$tgz" "$base/$file" \
+              && tar tzf "$tgz" >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            rm -f "$tgz"
+          done
+          if [ "$ok" != 1 ]; then
+            echo "::error::could not download $file"
+            exit 1
+          fi
+          tar xzf "$tgz" -C "$RUNNER_TEMP/cross"
+          rm -f "$tgz"
           echo "CROSS_PREFIX=$RUNNER_TEMP/cross/$dir" >> "$GITHUB_ENV"
           echo "AARCH64_CROSS=$RUNNER_TEMP/cross/aarch64-linux-musl-cross" >> "$GITHUB_ENV"
           echo "X86_64_MUSL_CROSS=$RUNNER_TEMP/cross/x86_64-linux-musl-cross" >> "$GITHUB_ENV"
