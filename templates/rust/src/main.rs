@@ -53,9 +53,8 @@ impl Plugin for __NAME_PASCAL__ {
 /// Protocol 3 only: a raw frame arrived on `stream` (>= 1).
 impl RawPlugin for __NAME_PASCAL__ {
     fn raw(&mut self, stream: u32, payload: &[u8], out: &Streams) {
-        // One request, a short burst back. The landed host has no "this stream
-        // closed" notification, so a producer that pushed forever would keep
-        // pushing into a dead subscriber: produce per request instead.
+        // One request, a short burst back, then close: the host turns the close
+        // into a clean WebSocket close (1000) for this stream's /raw subscriber.
         let text = String::from_utf8_lossy(payload);
         for step in 1..=3 {
             let frame = format!("tick {step}/3 on stream {stream}: {text}");
@@ -64,14 +63,13 @@ impl RawPlugin for __NAME_PASCAL__ {
                 break;
             }
         }
-        // Best effort: the host ignores this until it implements the frame.
         if let Err(error) = out.close(stream) {
             log_warn!("raw stream {stream}: {error}");
         }
     }
 
     fn raw_closed(&mut self, stream: u32) {
-        // Only fires once the host sends `svcd.stream.closed`.
+        // The /raw subscriber left: stop producing for that stream.
         log_info!("host closed raw stream {stream}");
     }
 }

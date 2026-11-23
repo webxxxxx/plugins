@@ -48,13 +48,10 @@ src/main.rs               ← 你的代码
 上限：stream 0 是 1 MiB（宿主 `CALL_FRAME_MAX`）；raw 默认 1 MiB（`ws_raw_max_bytes`），
 宿主调大过就用 `multiplex::serve_with(..., Limits { raw_frame_max, .. })`。
 
-**关流目前是单向的。** 宿主还没实现 `svcd.stream.closed`，订阅者走了插件不会收到通知，
-往死流写的帧被宿主静默丢掉。所以模板按请求生产（收到一帧回三帧），不要写「一直在推」的
-后台循环。
-
-模板最后调 `Streams::close(stream)`：本地立刻把这条流标成已关（后续 `send` 返回
-`SendError::Closed`），并发 `svcd.stream.close` 给宿主；宿主还没实现这条通知，
-所以订阅者那边不会因此断开。`raw_closed` 只在宿主发 `svcd.stream.closed` 时触发。
+**关流走控制流。** stream `0xFFFFFFFF` 带 `{"op":"close","stream":N}`：订阅者离开时宿主发给
+插件（`raw_closed`），插件也能用 `Streams::close(stream)` 主动结束一条流——模板收完一帧、
+回完三帧后就 close，页面的 WebSocket 会收到 1000 关闭。close 之后这条流立刻拒后续帧，
+往死流写的迟到数据会被宿主回一个 close，而不是静默丢掉。
 
 C / shell / PowerShell 模板仍只支持协议 1 的 JSON 线；raw 只有 Rust SDK 有。
 

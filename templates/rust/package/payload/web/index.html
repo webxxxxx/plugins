@@ -67,14 +67,11 @@
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const socket = new WebSocket(url);
     socket.binaryType = 'arraybuffer';
-    let frames = 0;
     rawfeed.textContent = '';
     socket.onopen = () => socket.send(new TextEncoder().encode('hello raw'));
-    socket.onmessage = (event) => {
-      frames += 1;
-      rawfeed.textContent += `${new TextDecoder().decode(event.data)}\n`;
-      if (frames >= 3) socket.close();
-    };
+    socket.onmessage = (event) => { rawfeed.textContent += `${new TextDecoder().decode(event.data)}\n`; };
+    // 插件回完三帧就 close(stream)，宿主把这个 WebSocket 干净关闭。
+    socket.onclose = (event) => { rawfeed.textContent += `（流已关闭，code ${event.code}）\n`; };
     socket.onerror = () => { rawfeed.textContent = 'raw 连接失败：插件不是协议 3？'; };
   };
 
