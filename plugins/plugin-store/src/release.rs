@@ -463,15 +463,26 @@ mod tests {
     #[test]
     #[ignore = "hits api.github.com; run by hand when the network is available"]
     fn finds_the_latest_stable_release_of_the_daemon() {
-        let release = fetch_at(API, DEFAULT_REPO, &|url| {
-            crate::net::fetch_json(url, None, None)
-        })
-        .expect("latest release");
+        // Same path the plugin uses: an optional token (env or data_dir) and
+        // the ETag cache. Run with GITHUB_TOKEN set to exercise the 5000/hour
+        // branch; without it, this needs anonymous quota to be available.
+        let dir = std::env::temp_dir().join("plugin-store-live-release");
+        let _ = std::fs::remove_dir_all(&dir);
+        let token = crate::net::github_token(&dir);
+        let transport = |url: &str| crate::net::fetch_json(url, token.as_deref(), Some(&dir));
+        let release = fetch_at(API, DEFAULT_REPO, &transport).expect("latest release");
 
         let value = release_json(&release);
 
         assert_eq!(value["sumsAsset"], SUMS_ASSET);
         assert!(value["assets"].as_array().unwrap().len() > 1);
         assert!(!release.tag.is_empty());
+
+        // The second call must be answered from the cached body: GitHub sends
+        // 304 for the same ETag, and 304 does not consume quota.
+        let cached = fetch_at(API, DEFAULT_REPO, &transport).expect("cached release");
+        assert_eq!(cached.tag, release.tag);
+        assert!(dir.join("release-cache.json").is_file());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

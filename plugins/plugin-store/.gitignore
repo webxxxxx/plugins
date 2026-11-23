@@ -5,3 +5,7 @@
 
 # A template pins no lockfile; the scaffolded project generates its own.
 /Cargo.lock
+
+# Local credentials: never commit a GitHub token. The runtime copy lives in the
+# plugin data directory as `github-token`; this one is for dev-only runs.
+/src/pat
