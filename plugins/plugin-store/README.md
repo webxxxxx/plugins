@@ -27,11 +27,17 @@
 
 列表地址按顺序尝试：
 
-1. https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md （通常最快）
-2. https://raw.githubusercontent.com/webxxxxx/plugins/main/docs/plugins.md
-3. https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md
+1. https://raw.githubusercontent.com/webxxxxx/plugins/main/docs/plugins.md
+2. https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md
+3. https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md
 
-成功结果写到插件根目录的 <data_dir>/plugins/plugin-store/catalog.md，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。插件根目录从运行中的 payload 路径推出（<data>/plugins/<id>/<version>/payload/bin/<exe> 往上四级）——svcd 不给插件注入 SVCD_DATA_DIR；手动运行二进制时才退回 SVCD_DATA_DIR，再退回系统临时目录。
+raw 排第一是因为它给的就是分支当前内容；jsDelivr 的分支地址按 `max-age=604800` 缓存
+（一周），查过一次就会一直发旧表 —— 曾经出现过「已安装 0.1.10、列表里却是 0.1.6」。
+它留在最后只作备用：GitHub raw 被墙时还能拿到一份旧表。另外两道保险：请求带
+`Cache-Control: no-cache`，且抓回来的表如果每一行都不比手里这份新（`catalog::is_older`），
+就丢弃并记一条「返回的列表比当前这份旧」。
+
+成功结果写到插件根目录的 <data_dir>/plugins/plugin-store/catalog.md，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。插件根目录从运行中的 payload 路径推出（<data>/plugins/<id>/<version>/payload/bin/<exe> 往上四级）——svcd 不给插件注入 SVCD_DATA_DIR；手动运行二进制时才退回 SVCD_DATA_DIR，再退回系统临时目录。页面顶部的「列表」会显示这条在线结果来自哪个域名。
 
 下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/；安装成功后删除，失败时保留以便重试。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk（含 .part 临时文件）并清空任务状态；已经交给宿主安装（installing）后不能删除。下载顺序：
 

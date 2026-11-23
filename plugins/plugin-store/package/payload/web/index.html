@@ -398,6 +398,10 @@
     targetLabel.textContent = target;
     const source = SOURCE[data.source] || data.source || '未知';
     let sourceText = source;
+    // Which mirror answered: a stale mirror is invisible without this.
+    if (data.source_url) {
+      try { sourceText += ' · ' + new URL(data.source_url).host; } catch (_) {}
+    }
     if (data.fetched_at) sourceText += ' · ' + fmtTime(data.fetched_at);
     if (data.stale) sourceText += data.refreshing ? ' · 正在后台刷新' : ' · 可能过期';
     sourceLabel.textContent = sourceText;

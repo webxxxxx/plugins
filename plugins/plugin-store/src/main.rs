@@ -22,10 +22,18 @@ use svcd_plugin::{log_error, log_info, log_warn, Cancel, Context, Exit, Plugin, 
 
 const PAGE_SIZE: usize = catalog::PAGE_SIZE;
 const REFRESH_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
+/// Where the generated catalog is fetched from, in order.
+///
+/// `raw.githubusercontent.com` comes first: it serves the branch as it is. The
+/// jsDelivr mirror sits last on purpose — its branch URLs are cached for a
+/// week (`Cache-Control: max-age=604800`), and a week-old catalog showed
+/// plugin-store 0.1.6 next to an installed 0.1.10. A stale mirror is still
+/// better than nothing when GitHub raw is blocked, and `catalog::is_older`
+/// keeps it from overwriting a newer list either way.
 const CATALOG_URLS: &[&str] = &[
-    "https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
     "https://raw.githubusercontent.com/webxxxxx/plugins/main/docs/plugins.md",
     "https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md",
+    "https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
 ];
 const TARGET: &str = match option_env!("SVCD_PLUGIN_TARGET") {
     Some(target) => target,
@@ -56,6 +64,8 @@ struct Job {
 struct State {
     entries: Vec<catalog::Entry>,
     source: String,
+    /// The URL the current entries came from; `None` for cache and snapshot.
+    source_url: Option<String>,
     fetched_at: Option<u64>,
     last_error: Option<String>,
     refreshing: bool,
@@ -180,6 +190,7 @@ impl PluginStore {
             "device": device,
             "scope": scope,
             "source": state.source.clone(),
+            "source_url": state.source_url.clone(),
             "fetched_at": state.fetched_at,
             "stale": stale,
             "refreshing": state.refreshing,
@@ -822,6 +833,7 @@ fn initial_state(data_dir: &Path) -> State {
                 return State {
                     entries,
                     source: "cache".into(),
+                    source_url: None,
                     fetched_at,
                     last_error: None,
                     refreshing: false,
@@ -840,6 +852,7 @@ fn initial_state(data_dir: &Path) -> State {
     State {
         entries,
         source: "snapshot".into(),
+        source_url: None,
         fetched_at: None,
         last_error: None,
         refreshing: false,
@@ -885,20 +898,29 @@ fn refresh_once(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, Str
 
 /// Fetch and apply a refresh. The caller already owns the refreshing flag.
 fn do_refresh(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, String> {
-    let fetched = fetch_catalog().map(|(entries, text, url)| {
-        if let Err(error) = write_cache(data_dir, &text) {
-            log_warn!("写入 catalog 缓存失败: {error}");
-        }
-        (entries, url)
-    });
+    let fetched = fetch_catalog();
 
     let mut guard = state.lock().map_err(|_| "状态锁不可用".to_string())?;
     guard.refreshing = false;
     match fetched {
-        Ok((entries, url)) => {
+        Ok((entries, text, url)) => {
+            // A mirror may answer with an older file than the one already in
+            // hand (jsDelivr caches a branch for a week). Keep the newer list
+            // and say so instead of letting the UI walk backwards.
+            if catalog::is_older(&entries, &guard.entries) {
+                let error = format!("{url} 返回的列表比当前这份旧，已忽略");
+                guard.last_error = Some(error.clone());
+                drop(guard);
+                log_warn!("{error}");
+                return Err(error);
+            }
+            if let Err(error) = write_cache(data_dir, &text) {
+                log_warn!("写入 catalog 缓存失败: {error}");
+            }
             let count = entries.len();
             guard.entries = entries;
             guard.source = "network".into();
+            guard.source_url = Some(url.clone());
             guard.fetched_at = Some(now_secs());
             guard.last_error = None;
             drop(guard);
@@ -1108,6 +1130,7 @@ mod tests {
         let state = Arc::new(Mutex::new(State {
             entries: Vec::new(),
             source: "test".into(),
+            source_url: None,
             fetched_at: None,
             last_error: None,
             refreshing: false,
@@ -1123,6 +1146,7 @@ mod tests {
             state: Arc::new(Mutex::new(State {
                 entries: Vec::new(),
                 source: "test".into(),
+                source_url: None,
                 fetched_at: None,
                 last_error: None,
                 refreshing: false,

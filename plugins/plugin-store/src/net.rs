@@ -86,6 +86,10 @@ pub fn fetch_text(urls: &[&str]) -> Result<(String, String), String> {
 fn text_from(agent: &ureq::Agent, url: &str) -> Result<String, String> {
     let response = agent
         .get(url)
+        // A mirror may cache a branch for days (jsDelivr: seven). Ask every
+        // edge to revalidate; the catalog is small and correctness beats it.
+        .set("Cache-Control", "no-cache")
+        .set("Pragma", "no-cache")
         .set("Accept", "text/plain, text/markdown, */*")
         .call()
         .map_err(|error| format!("{url}: {error}"))?;

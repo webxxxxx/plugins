@@ -202,6 +202,71 @@ fn parse_size(text: &str) -> Option<u64> {
     (bytes.is_finite() && bytes >= 0.0).then_some(bytes as u64)
 }
 
+/// True when `fetched` is strictly older than `current` for every row they
+/// share: the mirror answered with a file that predates what is already in
+/// hand, so applying it would move the UI backwards.
+///
+/// A row the current list does not have (a plugin released since) means the
+/// fetched file is newer, and an unparsable version is treated as equal — the
+/// guard only fires when the evidence is unambiguous.
+pub fn is_older(fetched: &[Entry], current: &[Entry]) -> bool {
+    if current.is_empty() || fetched.is_empty() {
+        return false;
+    }
+    let key = |entry: &Entry| {
+        (
+            entry.name.clone(),
+            entry.platform.clone(),
+            entry.device.clone().unwrap_or_default(),
+        )
+    };
+    let mut known: BTreeMap<_, &str> = BTreeMap::new();
+    for entry in current {
+        known.insert(key(entry), entry.version.as_str());
+    }
+
+    let mut strictly_older = false;
+    for entry in fetched {
+        let Some(existing) = known.get(&key(entry)) else {
+            return false;
+        };
+        match compare_versions(&entry.version, existing) {
+            std::cmp::Ordering::Greater => return false,
+            std::cmp::Ordering::Less => strictly_older = true,
+            std::cmp::Ordering::Equal => {}
+        }
+    }
+    strictly_older
+}
+
+/// Compare two `x.y.z[-pre]` versions numerically; anything unparsable
+/// compares equal, which keeps [`is_older`] from guessing.
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    match (numeric_core(left), numeric_core(right)) {
+        (Some(left_core), Some(right_core)) => {
+            let ordering = left_core.cmp(&right_core);
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+            // Same core: a pre-release sorts below the release.
+            let pre = |version: &str| version.contains('-');
+            pre(right).cmp(&pre(left))
+        }
+        _ => Ordering::Equal,
+    }
+}
+
+fn numeric_core(version: &str) -> Option<Vec<u64>> {
+    version
+        .split(['-', '+'])
+        .next()?
+        .split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
 /// Filter by platform and (when the asset name carries one) device, search,
 /// and cut one 50-row page. A device-suffixed asset is only visible on that
 /// exact host device; no suffix means universal for the platform. page is
@@ -407,5 +472,56 @@ mod tests {
         assert_eq!(parse_size("2.7 MiB"), Some(2_831_155));
         assert_eq!(parse_size("512 B"), Some(512));
         assert_eq!(parse_size("nope"), None);
+    }
+
+    fn entry(name: &str, version: &str, platform: &str) -> Entry {
+        Entry {
+            name: name.into(),
+            version: version.into(),
+            platform: platform.into(),
+            size: "1 MiB".into(),
+            size_bytes: 1024 * 1024,
+            url: "https://example.invalid/x.spk".into(),
+            device: None,
+        }
+    }
+
+    /// The mirror that answered with last week's file must not replace a list
+    /// that already knows about a newer release.
+    #[test]
+    fn an_older_catalog_is_recognised() {
+        let gnu = "x86_64-unknown-linux-gnu";
+        let current = vec![
+            entry("plugin-store", "0.1.10", gnu),
+            entry("meow", "1.0.1", gnu),
+        ];
+
+        // Same rows, older version: stale.
+        assert!(is_older(
+            &[
+                entry("plugin-store", "0.1.6", gnu),
+                entry("meow", "1.0.1", gnu)
+            ],
+            &current
+        ));
+        // Numeric order, not lexical: 0.1.10 is newer than 0.1.9.
+        assert!(is_older(&[entry("plugin-store", "0.1.9", gnu)], &current));
+        assert!(!is_older(&[entry("plugin-store", "0.1.11", gnu)], &current));
+        // Identical rows are not older — a rebuilt package keeps its version.
+        assert!(!is_older(&current, &current));
+        // A row the current list does not know about means a new release.
+        assert!(!is_older(
+            &[
+                entry("plugin-store", "0.1.6", gnu),
+                entry("new", "0.1.0", gnu)
+            ],
+            &current
+        ));
+        // Ambiguous input never fires the guard.
+        assert!(!is_older(&[], &current));
+        assert!(!is_older(
+            &[entry("plugin-store", "nightly", gnu)],
+            &current
+        ));
     }
 }
