@@ -1,5 +1,5 @@
 {
-  "name": "hello",
+  "name": "hello-rust",
   "language": "rust",
   "platforms": [
     "x86_64-unknown-linux-musl",
