@@ -13,6 +13,7 @@
 | 五种能力 + 错误处理 | `impl Plugin for Hello` |
 | 后台任务 + 取消令牌 | `cancel.ticker(...)` |
 | 推送事件给 UI | `svcd_plugin::emit` |
+| **raw 流**（协议 3 的 stream ≥ 1） | `impl RawPlugin for Hello` + UI 的 raw 面板 |
 | **blob 输入**（≤512 MiB，流式） | `count_text` + `blob_argument` |
 | **file 包输入**（≤16 GiB，按 part 流式） | `get_file_info` + `file_argument` / `FileArg::open` |
 | **blob 输出** | `create_report` + `BlobWriter` |
@@ -73,6 +74,26 @@ await ui.downloadBlob(r.structuredContent.$blob, { filename: 'report.txt' });
 `Range` / `HEAD` / 条件请求；临时文件默认 2 小时 TTL。`$file` 不是 `$blob` 的别名，
 它们是两个不同的层级。
 
+## 协议 3：调用、推送与 raw 共用一条管道
+
+`manifest.json` 写 `"protocol": 3`，`main` 用 `multiplex::serve`。帧是
+`u32 len | u32 stream_id | payload`：
+
+- **stream 0** 上跑的还是那套 JSON-RPC：五种能力、`notifications/*`、宿主发来的 ping。
+- **stream ≥ 1** 是不透明字节，宿主按 stream 配对给 `/raw` 的 WebSocket 订阅者。
+  插件只知道「帧是从哪条 stream 来的」，回帧就用同一条。
+
+写侧有界、不阻塞读循环：`Streams::send(stream, bytes)` 满了返回 `SendError::Busy`，
+超限的帧在写头之前就被拒。本样例每收到一帧 raw，就在同一条 stream 上回一帧，并推一条
+`{"type":"raw"}` 通知（UI 的 raw 面板能同时看到两者）。
+
+**关流目前是单向的**：宿主还没实现 `svcd.stream.closed`，订阅者走了插件不会收到通知，
+往死流写的帧被宿主静默丢掉。所以样例按请求回帧，不写持续推流的后台循环。
+
+插件侧若主动关流，用 `Streams::close(stream)`：本地立刻拒后续帧，并尽力发
+`svcd.stream.close` 通知宿主（宿主未实现，忽略）。`raw_closed` 同理，只在宿主发
+`svcd.stream.closed` 时触发。
+
 ## 它演示了宿主哪些能力
 
 | 宿主能力 | 在这个样例里怎么触发 |
@@ -83,6 +104,7 @@ await ui.downloadBlob(r.structuredContent.$blob, { filename: 'report.txt' });
 | 文件下载（`$blobPath`） | `create_report`：写 `SVCD_TEMP_DIR/incoming/` → 宿主落 blob → UI GET |
 | SSE | 每次能力调用推一条 `notifications/message`，UI 的 `./events` 上能看到 |
 | WebSocket | 同一批通知；`./ws` 上还可以直接发 `tools/call` |
+| raw 流（协议 3） | UI 的 raw 面板 → `/raw` WebSocket → stream ≥ 1 的二进制往返 |
 | 日志 | 每次调用写一行 stderr，宿主落到 `<logs>/<id>.log` 并轮转 |
 
 也就是说：**能力（capabilities）只有一种形状**（`tools/call`），文件上传/下载是它携带

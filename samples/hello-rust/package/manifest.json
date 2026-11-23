@@ -4,7 +4,7 @@
   "name": "Rust 示例插件",
   "version": "1.0.0",
   "desc": "Reference plugin: capabilities, notifications, chunked file transfer",
-  "protocol": 1,
+  "protocol": 3,
   "icons": { "png": "payload/icons/icon.png" },
   "exec": {
     "path": "payload/bin/hello-rust",

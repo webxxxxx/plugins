@@ -8,7 +8,8 @@
 //!   producing a **blob output** (see `plugin-manager/docs/plugin-blob.md`);
 //! * a background worker that observes the cancellation token, so `plugin stop`
 //!   ends it inside the stop budget instead of leaking it until SIGKILL;
-//! * notifications pushed to the UI over SSE / WebSocket.
+//! * notifications pushed to the UI over SSE / WebSocket;
+//! * protocol 3: the same pipe also carries raw streams for `/raw` subscribers.
 //!
 //! Copy it, delete the parts you do not need, keep the shape.
 
@@ -20,6 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use svcd_plugin::blob::{blob_argument, BlobWriter};
 use svcd_plugin::file::file_argument;
+use svcd_plugin::multiplex::{self, RawPlugin, Streams};
 use svcd_plugin::{log_info, log_warn, Context, Exit, Plugin, ToolOutcome};
 
 /// Refuse to summarize a blob larger than this; the point is to stream, not to
@@ -31,6 +33,8 @@ struct Hello {
     calls: Arc<AtomicU64>,
     ticks: Arc<AtomicU64>,
     greeting: String,
+    /// Raw frames answered over the protocol-3 streams.
+    raw_frames: u64,
     /// `$SVCD_TEMP_DIR`, captured once: blob results must land in `incoming/`.
     temp: Option<PathBuf>,
 }
@@ -57,6 +61,7 @@ impl Hello {
             calls: Arc::new(AtomicU64::new(0)),
             ticks: Arc::new(AtomicU64::new(0)),
             greeting,
+            raw_frames: 0,
             temp: context.temp_dir().map(PathBuf::from),
         }
     }
@@ -210,11 +215,33 @@ impl Plugin for Hello {
 
     fn status(&self) -> Option<String> {
         Some(format!(
-            "calls={} ticks={} uptime={}s",
+            "calls={} ticks={} raw={} uptime={}s",
             self.calls.load(Ordering::SeqCst),
             self.ticks.load(Ordering::SeqCst),
+            self.raw_frames,
             self.started.elapsed().as_secs()
         ))
+    }
+}
+
+/// Protocol 3 only: one raw frame in, one out on the same stream.
+impl RawPlugin for Hello {
+    fn raw(&mut self, stream: u32, payload: &[u8], out: &Streams) {
+        self.raw_frames += 1;
+        let text = String::from_utf8_lossy(payload);
+        let frame = format!("hello raw #{} on stream {stream}: {text}", self.raw_frames);
+        if let Err(error) = out.send(stream, frame.as_bytes()) {
+            log_warn!("raw stream {stream}: {error}");
+        }
+        svcd_plugin::emit(
+            "notifications/message",
+            json!({ "type": "raw", "stream": stream, "frames": self.raw_frames }),
+        );
+    }
+
+    fn raw_closed(&mut self, stream: u32) {
+        // Only fires once the host implements `svcd.stream.closed`.
+        log_info!("host closed raw stream {stream}");
     }
 }
 
@@ -249,7 +276,7 @@ fn main() -> Exit {
             log_info!("ticker stopped");
         });
 
-    svcd_plugin::serve(context, plugin)
+    multiplex::serve(context, plugin)
 }
 
 #[cfg(test)]

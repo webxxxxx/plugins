@@ -53,6 +53,17 @@
   <pre id="feed">（等待 tick）</pre>
 </section>
 
+<section>
+  <h2>raw 流（协议 3）</h2>
+  <p class="muted">同一条管道上的第二条通道：浏览器发二进制帧，插件在同一个 stream 上回帧。
+  宿主还没实现「流关闭」通知，所以这里按请求回一帧，不持续推。</p>
+  <div class="row">
+    <input id="rawmessage" type="text" value="hello raw" size="24">
+    <button id="raw">发一帧 raw</button>
+  </div>
+  <pre id="rawfeed">（等待 raw 帧）</pre>
+</section>
+
 <script type="module">
   import { pluginUI } from './plugin-ui.mjs';
 
@@ -131,6 +142,20 @@
     if (socket) { socket.close(); socket = null; return; }
     socket = ui.subscribeWebSocket({ onMessage, onClose: (ms) => { feed.textContent = `${ms} ms 后重连`; } });
     feed.textContent = 'WebSocket 已连接';
+  };
+
+  const rawfeed = document.getElementById('rawfeed');
+  let rawSocket = null;
+  document.getElementById('raw').onclick = () => {
+    const send = () => rawSocket.send(new TextEncoder().encode(document.getElementById('rawmessage').value));
+    if (rawSocket && rawSocket.readyState === WebSocket.OPEN) { send(); return; }
+    const url = new URL('./raw', location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    rawSocket = new WebSocket(url);
+    rawSocket.binaryType = 'arraybuffer';
+    rawSocket.onopen = send;
+    rawSocket.onmessage = (event) => { rawfeed.textContent = new TextDecoder().decode(event.data); };
+    rawSocket.onerror = () => { rawfeed.textContent = 'raw 连接失败：插件不是协议 3？'; };
   };
 
   show(ui.invoke('get_stats'));
