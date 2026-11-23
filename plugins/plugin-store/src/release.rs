@@ -99,6 +99,82 @@ fn parse_value(value: Value) -> Result<Release, String> {
     })
 }
 
+/// Build the daemon's release from the mirror's `index.json`.
+///
+/// The mirror does not invent facts: it lists the same archives under `svcd[]`
+/// and advertises the root checksum list. Everything the host consumes — tag,
+/// version, asset names, `sumsAsset` — is reconstructed from that, so the
+/// capability's answer keeps its shape whichever source produced it. A mirror
+/// without an `svcd` section is an error, not an empty release: the caller
+/// falls back to GitHub, where the daemon actually lives.
+pub fn from_index(body: &str) -> Result<Release, String> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|error| format!("index.json 不是合法 JSON: {error}"))?;
+    let entries = value
+        .get("svcd")
+        .and_then(Value::as_array)
+        .ok_or("index.json 没有 svcd 小节：镜像还没同步 svcd")?;
+    if entries.is_empty() {
+        return Err("index.json 的 svcd 小节是空的：镜像还没同步 svcd".into());
+    }
+
+    let mut version: Option<String> = None;
+    let mut assets = Vec::with_capacity(entries.len() + 1);
+    for (index, entry) in entries.iter().enumerate() {
+        let line = index + 1;
+        let file = entry
+            .get("file")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("index.json 的 svcd 第 {line} 项没有 file"))?;
+        let url = entry
+            .get("url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+            .ok_or_else(|| format!("index.json 的 svcd 第 {line} 项没有 http(s) 下载地址"))?;
+        let size = entry.get("size").and_then(Value::as_u64).unwrap_or(0);
+        if version.is_none() {
+            version = entry
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+        }
+        assets.push(Asset {
+            name: file.to_string(),
+            size,
+            url: url.to_string(),
+        });
+    }
+
+    let version = version.ok_or("index.json 的 svcd 项没有 version")?;
+    if version.contains('-') {
+        return Err(format!("镜像里的 svcd {version} 是预发布，不用来自动升级"));
+    }
+
+    if let Some(url) = value
+        .get("svcd_sums_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+    {
+        assets.push(Asset {
+            name: SUMS_ASSET.to_string(),
+            size: 0,
+            url: url.to_string(),
+        });
+    }
+
+    Ok(Release {
+        tag: format!("v{version}"),
+        version,
+        assets,
+    })
+}
+
 /// The daemon this capability exists for. `repo` may be passed explicitly, but
 /// svcd's own upgrade never has to name it.
 pub const DEFAULT_REPO: &str = "webxxxxx/plugin-manager";
@@ -276,6 +352,80 @@ mod tests {
         let release = parse(r#"{"tag_name": "0.1.5", "assets": []}"#).unwrap();
 
         assert_eq!(release.version, "0.1.5");
+    }
+
+    const INDEX: &str = r#"{
+      "schema": 1,
+      "base_url": "https://dl.example.com",
+      "svcd_sums_url": "https://dl.example.com/SHA256SUMS",
+      "svcd": [
+        {
+          "version": "0.1.5",
+          "target": "x86_64-pc-windows-msvc",
+          "file": "svcd-0.1.5-x86_64-pc-windows-msvc.zip",
+          "size": 1234567,
+          "sha256": "aa",
+          "url": "https://dl.example.com/svcd-0.1.5-x86_64-pc-windows-msvc.zip"
+        },
+        {
+          "version": "0.1.5",
+          "target": "x86_64-unknown-linux-gnu",
+          "file": "svcd-0.1.5-x86_64-unknown-linux-gnu.tar.gz",
+          "size": 7654321,
+          "sha256": "bb",
+          "url": "https://dl.example.com/svcd-0.1.5-x86_64-unknown-linux-gnu.tar.gz"
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn the_mirror_index_becomes_the_release_the_host_expects() {
+        let release = from_index(INDEX).unwrap();
+
+        assert_eq!(release.tag, "v0.1.5");
+        assert_eq!(release.version, "0.1.5");
+        assert_eq!(release.assets.len(), 3);
+        assert_eq!(
+            release.assets[1].name,
+            "svcd-0.1.5-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        assert_eq!(release.assets[1].size, 7_654_321);
+        assert_eq!(
+            release_json(&release)["sumsAsset"],
+            "SHA256SUMS"
+        );
+    }
+
+    #[test]
+    fn a_mirror_without_svcd_is_an_error_not_an_empty_release() {
+        assert!(from_index(r#"{"schema": 1, "packages": []}"#)
+            .unwrap_err()
+            .contains("svcd"));
+        assert!(from_index(r#"{"schema": 1, "svcd": []}"#)
+            .unwrap_err()
+            .contains("空的"));
+        assert!(from_index("{").unwrap_err().contains("JSON"));
+    }
+
+    #[test]
+    fn a_mirrored_prerelease_is_refused_like_a_github_one() {
+        let body = r#"{"schema":1,"svcd":[{"version":"0.2.0-rc1","file":"a.zip",
+            "url":"https://dl.example.com/a.zip"}]}"#;
+        assert!(from_index(body).unwrap_err().contains("预发布"));
+    }
+
+    #[test]
+    fn a_mirror_entry_needs_a_name_and_an_http_address() {
+        let no_file = r#"{"schema":1,"svcd":[{"version":"0.1.5",
+            "url":"https://dl.example.com/a.zip"}]}"#;
+        assert!(from_index(no_file).unwrap_err().contains("file"));
+
+        let no_url = r#"{"schema":1,"svcd":[{"version":"0.1.5","file":"a.zip"}]}"#;
+        assert!(from_index(no_url).unwrap_err().contains("下载地址"));
+
+        let ftp = r#"{"schema":1,"svcd":[{"version":"0.1.5","file":"a.zip",
+            "url":"ftp://dl.example.com/a.zip"}]}"#;
+        assert!(from_index(ftp).unwrap_err().contains("下载地址"));
     }
 
     #[test]

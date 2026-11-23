@@ -629,15 +629,7 @@ impl PluginStore {
             None
         };
 
-        // A read-only token lifts the anonymous 60/hour to 5000/hour, and the
-        // cache answers a repeat from disk: within the window no request is
-        // made at all, after it the ETag turns the check into a free 304.
-        let token = net::github_token(self.settings.github_token.as_deref(), &self.data_dir);
-        let data_dir = self.data_dir.as_path();
-        let ttl = self.settings.cache_ttl;
-        let release = match release::fetch_at(&self.api_base, repo, &|url| {
-            net::fetch_json(url, token.as_deref(), Some(data_dir), ttl)
-        }) {
+        let release = match self.daemon_release(repo) {
             Ok(release) => release,
             Err(error) => return ToolOutcome::error(error),
         };
@@ -658,6 +650,64 @@ impl PluginStore {
             },
             Err(error) => ToolOutcome::error(error),
         }
+    }
+}
+
+impl PluginStore {
+    /// svcd's release, from whichever source the user configured.
+    ///
+    /// A mirror is preferred when `catalog_source` picks it, but never blindly:
+    /// a mirror without an `svcd` section falls back to GitHub, and the fallback
+    /// is logged — the two sources can disagree about what is newest, and that
+    /// disagreement is exactly what a user needs to see.
+    fn daemon_release(&self, repo: &str) -> Result<release::Release, String> {
+        let mirror = self.settings.catalog_source == settings::CatalogSource::Qiniu
+            && self.settings.qiniu_base.is_some();
+        if mirror && repo == release::DEFAULT_REPO {
+            match self.mirrored_svcd() {
+                Ok(release) => {
+                    log_info!(
+                        "svcd {} 来自镜像（{}）；宿主仍按同源 SHA256SUMS 校验字节",
+                        release.version,
+                        self.settings.qiniu_base.as_deref().unwrap_or_default()
+                    );
+                    return Ok(release);
+                }
+                Err(error) => log_warn!("镜像里取不到 svcd（{error}），改用 GitHub"),
+            }
+        }
+        self.github_svcd(repo)
+    }
+
+    /// The mirror's `index.json`, parsed into the release the host understands.
+    ///
+    /// No GitHub token is attached: this host is not GitHub, and a PAT must not
+    /// travel to a mirror.
+    fn mirrored_svcd(&self) -> Result<release::Release, String> {
+        let base = self
+            .settings
+            .qiniu_base
+            .as_deref()
+            .ok_or("没有配置 qiniu_base")?;
+        let url = format!("{}/index.json", base.trim_end_matches('/'));
+        let body = net::fetch_json(
+            &url,
+            None,
+            Some(self.data_dir.as_path()),
+            self.settings.cache_ttl,
+        )?;
+        release::from_index(&body)
+    }
+
+    /// A read-only token lifts the anonymous 60/hour to 5000/hour, and the cache
+    /// answers a repeat from disk: within the window no request is made at all,
+    /// after it the ETag turns the check into a free 304.
+    fn github_svcd(&self, repo: &str) -> Result<release::Release, String> {
+        let token = net::github_token(self.settings.github_token.as_deref(), &self.data_dir);
+        let ttl = self.settings.cache_ttl;
+        release::fetch_at(&self.api_base, repo, &|url| {
+            net::fetch_json(url, token.as_deref(), Some(self.data_dir.as_path()), ttl)
+        })
     }
 }
 
@@ -1103,6 +1153,10 @@ fn fetch_from(current: &[catalog::Entry], sources: &[Source]) -> Result<Fetched,
                         continue;
                     }
                     if catalog::is_older(&entries, current) {
+                        // Worth a line of its own: a stale mirror is why the
+                        // configured source loses to the fallback, and that is
+                        // invisible when the fallback succeeds.
+                        log_warn!("{url}: 返回的列表比当前这份旧，换下一个源");
                         errors.push(format!("{url}: 返回的列表比当前这份旧，换下一个源"));
                         continue;
                     }
@@ -1664,6 +1718,178 @@ mod tests {
             }
         }
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_asset_can_read_the_daemon_from_the_mirror() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let archive = b"svcd-zip-payload".to_vec();
+        let sums = b"aa11  svcd-0.1.5-x86_64-pc-windows-msvc.zip\n".to_vec();
+        let index = json!({
+            "schema": 1,
+            "svcd_sums_url": format!("http://{address}/SHA256SUMS"),
+            "svcd": [{
+                "version": "0.1.5",
+                "target": "x86_64-pc-windows-msvc",
+                "file": "svcd-0.1.5-x86_64-pc-windows-msvc.zip",
+                "size": archive.len(),
+                "url": format!("http://{address}/archive.zip")
+            }]
+        })
+        .to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let (server_archive, server_sums, server_index) = (archive.clone(), sums.clone(), index.clone());
+        let server = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !server_stop.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                };
+                let mut request = [0u8; 2048];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let body = if path.ends_with("/index.json") {
+                    server_index.clone().into_bytes()
+                } else if path.ends_with("/SHA256SUMS") {
+                    server_sums.clone()
+                } else {
+                    server_archive.clone()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-mirror-svcd-{}-{}",
+            std::process::id(),
+            address.port()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = PluginStore {
+            settings: settings::Settings {
+                catalog_source: settings::CatalogSource::Qiniu,
+                qiniu_base: Some(format!("http://{address}")),
+                ..settings::Settings::default()
+            },
+            ..store_with(&dir, job("done"))
+        };
+
+        match store.release_asset(&json!({})) {
+            ToolOutcome::Text(text) => {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(value["tag"], "v0.1.5");
+                assert_eq!(value["version"], "0.1.5");
+                assert_eq!(value["sumsAsset"], "SHA256SUMS");
+                assert_eq!(value["assets"].as_array().unwrap().len(), 2);
+            }
+            _ => panic!("the metadata call must answer with JSON text"),
+        }
+
+        match store.release_asset(&json!({"download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zip"})) {
+            ToolOutcome::Blob { path, name, .. } => {
+                assert_eq!(name, "svcd-0.1.5-x86_64-pc-windows-msvc.zip");
+                assert_eq!(fs::read(path).unwrap(), archive);
+            }
+            _ => panic!("download must answer with a blob"),
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_mirror_without_svcd_falls_back_to_github() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let index = json!({"schema": 1, "packages": [], "svcd": []}).to_string();
+        let github = json!({
+            "tag_name": "v0.2.0",
+            "draft": false,
+            "prerelease": false,
+            "assets": [{
+                "name": "svcd-0.2.0-x86_64-pc-windows-msvc.zip",
+                "size": 10,
+                "browser_download_url": format!("http://{address}/a.zip")
+            }]
+        })
+        .to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let (server_index, server_github) = (index.clone(), github.clone());
+        let server = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !server_stop.load(Ordering::SeqCst) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                };
+                let mut request = [0u8; 2048];
+                let read = stream.read(&mut request).unwrap_or(0);
+                let request = String::from_utf8_lossy(&request[..read]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let body = if path.ends_with("/index.json") {
+                    server_index.clone().into_bytes()
+                } else {
+                    server_github.clone().into_bytes()
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-mirror-fallback-{}-{}",
+            std::process::id(),
+            address.port()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let store = PluginStore {
+            settings: settings::Settings {
+                catalog_source: settings::CatalogSource::Qiniu,
+                qiniu_base: Some(format!("http://{address}")),
+                ..settings::Settings::default()
+            },
+            api_base: format!("http://{address}"),
+            ..store_with(&dir, job("done"))
+        };
+
+        match store.release_asset(&json!({})) {
+            ToolOutcome::Text(text) => {
+                let value: Value = serde_json::from_str(&text).unwrap();
+                // The mirror had nothing, so the answer came from GitHub.
+                assert_eq!(value["tag"], "v0.2.0");
+                assert_eq!(value["assets"][0]["name"], "svcd-0.2.0-x86_64-pc-windows-msvc.zip");
+            }
+            _ => panic!("the metadata call must answer with JSON text"),
+        }
+
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -125,8 +125,13 @@ plugin restart plugin-store
 ## 自升级查询：release_asset
 
 svcd 自己不链 TLS，检查与下载 svcd 本体由 plugin-store 代劳。`release_asset`
-查 GitHub 仓库的最新**稳定** release（`/releases/latest`，prerelease/draft 直接拒绝），
-`repo` 省略时默认 `webxxxxx/plugin-manager`：
+查的是 `webxxxxx/plugin-manager` 的最新**稳定** release（prerelease/draft 直接拒绝），
+`repo` 省略时就用它。
+
+来源跟着 `catalog_source` 走：配成 `qiniu` 时先读七牛 `index.json` 的 `svcd[]`
+（`svcd_sums_url` 指向根目录的 `SHA256SUMS`），镜像里没有 `svcd` 小节才退回 GitHub，
+退回会记一条 `log_warn!`。镜像这一路不带 `github_token`——那不是 GitHub 的域名，
+PAT 不该出现在那里。
 
 ```jsonc
 // 1) 只查：返回全部资产与校验清单是否存在，不产生下载流量
@@ -165,8 +170,10 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   （按 URL 区分）。`release_cache_minutes`（默认 15 分钟）内的重复查询**不发请求**，直接从
   磁盘回；超出窗口才带 `If-None-Match`，GitHub 的 304 不计配额。窗口设 0 表示每次都校验。
   `download: true` 不读缓存，永远取最新字节。
-- 下载复用直连 + DoH 回退与代理，但**不走** `PLUGIN_STORE_MIRROR`：镜像可以决定插件包，
-  不能决定 svcd 本体的字节。版本不缓存，每次升级都重新查、重新下；失败时清掉 `.part`。
+- 下载复用直连 + DoH 回退与代理，但**不走** `PLUGIN_STORE_MIRROR`：那个前缀代理可以决定插件包，
+  不该再无条件决定 svcd 的字节。走七牛那条是显式选择（`catalog_source`），代价见下：镜像同时
+  提供字节和 `SHA256SUMS`，它能决定「升到哪一版」，伪造不了字节。版本不缓存，每次升级都重新查、
+  重新下；失败时清掉 `.part`。
 - 不做签名；校验链由宿主用 `SHA256SUMS` 的 sha256 完成，插件只负责把字节交回。
 
 本地手测（2026-11-23，Windows）：
