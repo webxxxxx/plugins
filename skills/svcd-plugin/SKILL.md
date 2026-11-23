@@ -5,7 +5,7 @@ description: 新增或修改 svcd 插件前读：支持哪两种语言、SDK 与
 
 # 写 svcd 插件
 
-插件是一个**常驻进程**：stdout 上跑 NDJSON JSON-RPC，向宿主暴露若干「能力」；浏览器 UI 由宿主反代，插件自己不开端口。你的工作只有一件事——实现能力逻辑，其余由 SDK 承担。
+插件是一个**常驻进程**：stdout 上跑 JSON-RPC，向宿主暴露若干「能力」；浏览器 UI 由宿主反代，插件自己不开端口。你的工作只有一件事——实现能力逻辑，其余由 SDK 承担。协议 1 是一帧一行 JSON；协议 3 是 `u32 len | u32 stream_id | payload` 的多路复用帧，只有它同时具备 raw 流。
 
 ## 三步走
 
@@ -95,10 +95,11 @@ SSE、WebSocket、日志——以及它们分别由哪个能力触发。SDK 提�
 
 | 项 | 值 |
 |---|---|
-| 通道 | stdout（协议）+ stderr（日志），一帧一行 |
+| 通道 | stdout（协议）+ stderr（日志）；协议 1 一帧一行，协议 3 见下 |
+| 协议 | `protocol: 1` 换行 JSON-RPC；`protocol: 3` stream 0 是同一套 JSON-RPC，stream ≥ 1 是 raw |
 | 方法 | `svcd.ping`、`svcd.status`、`svcd.shutdown`、`tools/call` |
 | 结果形状 | `{"content":[{"type":"text","text":"…"}],"isError":false}` |
-| 帧上限 | 1 MiB；无握手；`protocol: 1` |
+| 帧上限 | stream 0 / JSON 1 MiB；raw 默认 1 MiB（`ws_raw_max_bytes`）；无握手 |
 | 错误码 | `-32700` 解析、`-32601` 方法不存在、`-32602` 未知能力、`-32603` 过载 |
 | 推送 | `emit(method, params)` → 宿主转成 SSE / WebSocket 给 UI |
 | 宿主注入 | `SVCD_PLUGIN_ID`、`SVCD_PLUGIN_VERSION`、`SVCD_CONFIG`、`SVCD_DATA_DIR`、`SVCD_LOG_DIR`、`SVCD_HTTP_PORT`、`SVCD_TARGET` |
@@ -111,7 +112,11 @@ SSE、WebSocket、日志——以及它们分别由哪个能力触发。SDK 提�
 
 | API | 作用 |
 |---|---|
-| `svcd_plugin::serve(Context::from_env(), plugin)` | 协议循环、有界工作池、取消、按 id 乱序回复 |
+| `svcd_plugin::serve(Context::from_env(), plugin)` | 协议 1 循环、有界工作池、取消、按 id 乱序回复 |
+| `multiplex::serve(ctx, plugin)` | 协议 3：stream 0 的 JSON-RPC + raw 流，一条管道 |
+| `multiplex::RawPlugin::{raw, raw_closed}` | raw 帧回调（`stream`、`payload`、`&Streams`）与关流钩子 |
+| `Streams::send / close` | 往 raw 流写帧（有界、非阻塞）；`close` 立刻让这条流拒后续帧，并尽力通知宿主 |
+| `Streams::send_json(value)` | 从 raw 回调里往 stream 0 发一条 JSON-RPC（一般是通知/进度） |
 | `Plugin::call(&mut self, name, args)` | 你的能力实现 |
 | `Plugin::status(&self)` | `svc status` 的一行摘要 |
 | `ToolOutcome::text / error` | 结果；`error` 对应 `isError: true` |
@@ -124,6 +129,29 @@ SSE、WebSocket、日志——以及它们分别由哪个能力触发。SDK 提�
 | `file::file_argument(args, "input")` → `FileArg::open()` | 取 `$file` 文件包，按 part 顺序流式读 |
 | `BlobWriter::create(&ctx, name, mime)` | 把大结果写进 `incoming/`，`finish()` 返回 `ToolOutcome::Blob` |
 | `FileStore` | 插件**自己的**持久文件（`data_dir` 下），不是传输通道 |
+
+### 协议 3（只有 Rust）
+
+manifest 写 `"protocol": 3`，`main` 用 `multiplex::serve`。帧是
+`u32 payload_len | u32 stream_id | payload`：
+
+- **stream 0**：还是上面那套 JSON-RPC（ping、`tools/call`、`notifications/*`）。宿主在
+  stream 0 上发 `svcd.ping`，SDK 自动回，回完才算启动成功。
+- **stream ≥ 1**：不透明字节，宿主按 stream 配给 `/raw` 的 WebSocket 订阅者。插件不知道
+  谁在订阅，只知道帧从哪条 stream 来——回帧就用同一条 stream。
+
+写侧不阻塞读循环：`Streams::send` 进有界队列，满时返回 `SendError::Busy`；超过上限的帧
+在写头之前就拒，不会出现半帧。反过来，宿主发来的 raw 帧在插件 raw 线程落后超过 64 帧时会被
+丢掉（读循环不能被一条慢流拖住）——raw 本来就不保证送达，需要可靠就自己带序号重传。上限用 `multiplex::serve_with(..., Limits { raw_frame_max, .. })`
+跟宿主的 `ws_raw_max_bytes` 对齐。
+
+**关流是单向的。** 宿主还没实现 `svcd.stream.closed`，订阅者走了插件不会收到通知，
+往死流写的帧被宿主丢掉。所以按请求生产（收到一帧回一批），别写「一直在推」的后台循环。
+
+插件侧主动关流用 `Streams::close(stream)`：本地立刻把这条流标成已关（之后的 `send`
+返回 `SendError::Closed`），并发一条 `svcd.stream.close` 通知；宿主还没实现这条通知，
+所以订阅者那边不会因此断开——它是给宿主落地后准备的。`RawPlugin::raw_closed` 同理：
+只有宿主发 `svcd.stream.closed` 时才会触发。
 
 ### Shell（`sdk/shell`，随包拷贝）
 
@@ -226,6 +254,10 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **依赖保持最小。** Rust 只用 `serde` / `serde_json`；shell 只用 POSIX。SDK 不提供 HTTP 客户端、数据库或调度器——需要就自己加，但先确认体积可接受。
 
+**raw 只在协议 3 里。** `protocol: 1` 的插件没有 `/raw`（宿主回 `raw_unavailable`）；要同时有
+调用、推送与 raw，就用 `multiplex::serve` 并把清单改成 `protocol: 3`。C / shell / PowerShell
+SDK 没有 raw 实现。
+
 **大对象走 blob，不走 JSON。** 参数传 `{"$blob": id}`，结果返回 `$blobPath`；1 MiB 帧只装小 JSON。
 
 **vendored 副本别手改。** `package/payload/lib/svcd-plugin.sh` 和 `payload/web/plugin-ui.mjs` 是 `sdk/` 的副本；改完 `sdk/` 后跑 `plugin-tools sync`。
@@ -251,3 +283,5 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 | 装不上，提示重打包 | 包不是 `schema: 1` 或没有 `id`——用新版 `plugin-tools build` 重打 |
 | 目录名变成中文/乱码 | 把显示名写进了 `id`；中文只能放 `name` |
 | 改了 SDK 但插件没变 | vendored 副本没同步（`plugin-tools sync`） |
+| UI 的 `/raw` 连不上（`raw_unavailable`） | 插件不是 `protocol: 3`，或还在用协议 1 的 `serve` |
+| raw 帧发出去没人收 | 订阅者已经关了这条 stream；宿主不通知插件，按请求生产 |

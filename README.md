@@ -166,15 +166,31 @@ svcd_plugin_serve handle
 
 就绪探针、关闭请求、帧上限、并发调度、取消令牌、MCP 结果形状都在 SDK 里。
 
-## 浏览器侧四个通道
+协议 3 再加一条通道，仍然只写两个 trait：
 
-插件不自起 HTTP。静态资源与下面三条都在 `/plugin-ui/<id>/` 下，由 svcd 反代：
+```rust
+impl RawPlugin for MyPlugin {
+    fn raw(&mut self, stream: u32, payload: &[u8], out: &Streams) {
+        out.send(stream, payload).ok();   // 同一条 stream 原样回帧
+    }
+}
+fn main() { svcd_plugin::multiplex::serve(Context::from_env(), MyPlugin) }
+```
+
+清单写 `"protocol": 3`：stream 0 还是上面那套 JSON-RPC，stream ≥ 1 是 `/raw` 订阅者的不透明
+字节。写侧有界、不阻塞读循环，满了返回 `SendError::Busy`；超过上限的帧在写头之前就被拒。
+C / shell / PowerShell SDK 仍然只有协议 1。
+
+## 浏览器侧五个通道
+
+插件不自起 HTTP。静态资源与下面四条都在 `/plugin-ui/<id>/` 下，由 svcd 反代：
 
 | 通道 | 路径 | 用途 |
 |---|---|---|
 | method invoke | `POST ./rpc` | JSON-RPC `tools/call` |
 | SSE | `./events` | 服务端推送，`id:<seq>` + `event: message`，另有 `event: reset` |
 | WebSocket | `./ws` | 同一路推送的另一种承载，**不是**请求通道 |
+| raw 流 | `./raw` | 协议 3 才有：二进制帧按 stream 配对，与上面三条共用同一个插件进程 |
 | 静态资源 | `./` | 包内 `payload/web/` |
 
 ```js

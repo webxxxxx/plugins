@@ -37,6 +37,27 @@ _Avoid_: 返回值校验、结果 schema
 魔数与大小，不做转格式或转尺寸。
 _Avoid_: 图标资源、logo
 
+**协议 3（Protocol 3）**:
+宿主与插件之间的一种传输：`u32 payload_len | u32 stream_id | payload` 帧；stream 0 承载 JSON-RPC
+（能力调用、通知、ping），stream ≥ 1 是不透明字节，配给 `/raw` 的 WebSocket 订阅者。一条管道
+同时跑调用、推送与 raw，替代"要么 JSON 要么 raw"的互斥模式。
+_Avoid_: 二进制协议、raw 协议（协议 3 不止 raw）
+
+**stream 0**:
+协议 3 里承载 JSON-RPC 的那条流，语义与协议 1 的换行 JSON 相同；单帧上限 1 MiB（宿主 `CALL_FRAME_MAX`）。
+_Avoid_: 控制流、主通道
+
+**raw 流（Raw stream）**:
+协议 3 里 stream ≥ 1 的通道：插件按 stream 写不透明字节，宿主转给该 stream 的 `/raw` 订阅者。
+关流对插件目前不可见（见「关流通知」），往死流写的帧被丢弃。
+_Avoid_: 二进制通道、WebSocket 直连
+
+**关流通知（svcd.stream.close / svcd.stream.closed）**:
+协议 3 预留的一对 stream 0 通知。插件发 `svcd.stream.close` 表示这条流不再生产：本地立刻拒
+后续帧，宿主侧的订阅者要等宿主实现后才会断开；宿主发 `svcd.stream.closed` 表示订阅者走了，
+SDK 触发 `RawPlugin::raw_closed`。宿主两半都还没实现，所以目前是尽力而为。
+_Avoid_: 断流、结束帧
+
 **发布钥（Release key）**:
 仓库 CI 独占的 Ed25519 私钥，是打进 catalog 的唯一签发者；贡献者的自签钥只用于本地自测。
 _Avoid_: 签名证书、管理员密钥
