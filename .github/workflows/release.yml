@@ -562,18 +562,31 @@ jobs:
           python3 .github/scripts/update_plugin_list.py docs/plugins.md
           if git diff --quiet -- docs/plugins.md; then
             echo "docs/plugins.md is up to date"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/plugins.md
-          git commit -m "docs: update plugin list"
-          for attempt in 1 2 3; do
-            git pull --rebase origin main
-            if git push origin HEAD:main; then
-              exit 0
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add docs/plugins.md
+            git commit -m "docs: update plugin list"
+            pushed=0
+            for attempt in 1 2 3; do
+              git pull --rebase origin main
+              if git push origin HEAD:main; then
+                pushed=1
+                break
+              fi
+              sleep 3
+            done
+            if [ "$pushed" != 1 ]; then
+              echo "::error::failed to push docs/plugins.md"
+              exit 1
             fi
-            sleep 3
-          done
-          echo "::error::failed to push docs/plugins.md"
-          exit 1
+          fi
+          # The store's mirror is jsDelivr, whose branch URLs are cached for a
+          # week (max-age=604800). Purge it after every rewrite so a plugin
+          # released today is not listed as last week's version there.
+          if curl -fsS --max-time 60 \
+              "https://purge.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md" >/dev/null; then
+            echo "purged the jsDelivr cache for docs/plugins.md"
+          else
+            echo "::warning::jsDelivr purge failed; the mirror may serve a stale catalog until it expires"
+          fi

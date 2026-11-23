@@ -24,16 +24,23 @@ const PAGE_SIZE: usize = catalog::PAGE_SIZE;
 const REFRESH_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 /// Where the generated catalog is fetched from, in order.
 ///
-/// `raw.githubusercontent.com` comes first: it serves the branch as it is. The
-/// jsDelivr mirror sits last on purpose — its branch URLs are cached for a
-/// week (`Cache-Control: max-age=604800`), and a week-old catalog showed
-/// plugin-store 0.1.6 next to an installed 0.1.10. A stale mirror is still
-/// better than nothing when GitHub raw is blocked, and `catalog::is_older`
-/// keeps it from overwriting a newer list either way.
+/// GitHub raw first: it serves the branch as it is, with no quota. The jsDelivr
+/// mirrors follow because they are the ones that answer from mainland China;
+/// their branch URLs are cached for a week (`max-age=604800`), which is why the
+/// release workflow purges them right after it rewrites `docs/plugins.md`
+/// (`https://purge.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md`).
+/// Even without that purge the catalog never walks backwards: a source whose
+/// rows are all older than what we already have is skipped, not installed.
+///
+/// The GitHub REST API is deliberately not a source: it is the same network as
+/// raw (so it does not add reachability), it caps unauthenticated callers at 60
+/// requests an hour per IP, and the Markdown file is generated from it anyway.
 const CATALOG_URLS: &[&str] = &[
     "https://raw.githubusercontent.com/webxxxxx/plugins/main/docs/plugins.md",
-    "https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md",
     "https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
+    "https://fastly.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
+    "https://gcore.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
+    "https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md",
 ];
 const TARGET: &str = match option_env!("SVCD_PLUGIN_TARGET") {
     Some(target) => target,
@@ -898,15 +905,17 @@ fn refresh_once(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, Str
 
 /// Fetch and apply a refresh. The caller already owns the refreshing flag.
 fn do_refresh(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, String> {
-    let fetched = fetch_catalog();
+    let current = match state.lock() {
+        Ok(guard) => guard.entries.clone(),
+        Err(_) => return Err("状态锁不可用".into()),
+    };
+    let fetched = fetch_catalog(&current);
 
     let mut guard = state.lock().map_err(|_| "状态锁不可用".to_string())?;
     guard.refreshing = false;
     match fetched {
         Ok((entries, text, url)) => {
-            // A mirror may answer with an older file than the one already in
-            // hand (jsDelivr caches a branch for a week). Keep the newer list
-            // and say so instead of letting the UI walk backwards.
+            // The list may have been replaced while this fetch was in flight.
             if catalog::is_older(&entries, &guard.entries) {
                 let error = format!("{url} 返回的列表比当前这份旧，已忽略");
                 guard.last_error = Some(error.clone());
@@ -940,12 +949,25 @@ fn do_refresh(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, Strin
     }
 }
 
-fn fetch_catalog() -> Result<(Vec<catalog::Entry>, String, String), String> {
+/// First source that answers with a list at least as new as `current`.
+///
+/// A mirror can serve a week-old copy (jsDelivr caches a branch for that long),
+/// so a stale answer is not a failure to install — it is a reason to ask the
+/// next source instead of stopping here.
+fn fetch_catalog(
+    current: &[catalog::Entry],
+) -> Result<(Vec<catalog::Entry>, String, String), String> {
     let mut errors = Vec::new();
     for url in CATALOG_URLS {
         match net::fetch_text(&[url]) {
             Ok((text, source)) => match catalog::parse(&text) {
-                Ok(entries) => return Ok((entries, text, source)),
+                Ok(entries) => {
+                    if catalog::is_older(&entries, current) {
+                        errors.push(format!("{source}: 返回的列表比当前这份旧，换下一个源"));
+                        continue;
+                    }
+                    return Ok((entries, text, source));
+                }
                 Err(error) => errors.push(format!("{url}: {error}")),
             },
             Err(error) => errors.push(error),
