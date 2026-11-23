@@ -132,10 +132,12 @@ svcd-<版本>-<目标>.zip|tar.gz       守护进程本体（从 plugin-manager 
 signing.pub, release-key.pub        发布公钥
 SHA256SUMS                          本次发布这些文件的校验和
 index.json                          导航文件：根目录每个包的版本、大小、sha256、下载地址
-history/<版本>/<文件名>              被本版替换掉的旧文件
+history/<发布 tag>/<文件名>         被本版替换掉的旧文件
 ```
 
 对象类型按内容给：`.spk` 存成 `application/octet-stream`、`index.json` 是 `application/json`、`SHA256SUMS` 是 `text/plain`——上传凭证带 `detectMime: -1`，否则七牛会把 `.spk` 按扩展名猜成 `application/x-tar`（`detectMime: 0` 时 `application/octet-stream` 会被刻意忽略，照样去侦测）。
+
+`history/` 只有一种目录命名：**每次发布一个 tag 目录**，里面放这次被替换掉的包，以及这次发布的 `SHA256SUMS`。按版本分目录在这里行不通——一次全量发布里各插件带的版本号互不相同，没有单一的"版本"可以当目录名。
 
 三条规则保证这个形状不会歪：根目录只放"该身份（插件/平台/设备，工具链是目标三元组）的最新版"；旧文件只有在本版带来**同一身份且不低于**的版本时才移进 `history/`，所以单个插件的发布会保留其它插件的当前包；`index.json` 是**按空间实际列表重算**的，不是按本地目录拼的，因此不会出现"索引里有、空间里没有"。
 

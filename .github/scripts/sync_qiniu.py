@@ -109,11 +109,15 @@ def version_key(version: str) -> tuple[tuple[int, ...], int, str]:
     return (numbers, 0 if prerelease else 1, prerelease)
 
 
-def plan_moves(root_keys: list[str], uploads: list[dict]) -> tuple[list[tuple[str, str]], list[str]]:
+def plan_moves(
+    root_keys: list[str], uploads: list[dict], tag: str
+) -> tuple[list[tuple[str, str]], list[str]]:
     """Decide which root files the uploads replace.
 
     Returns (moves, leftovers): moves is a list of (source key, history key),
-    leftovers is every root key the uploads do not touch.
+    leftovers is every root key the uploads do not touch. History is keyed by
+    the release that replaced the file, so every directory under `history/` is
+    one tag — the same shape as the `SHA256SUMS` archived beside it.
     """
     incoming: dict[tuple[str, ...], str] = {}
     for upload in uploads:
@@ -142,7 +146,7 @@ def plan_moves(root_keys: list[str], uploads: list[dict]) -> tuple[list[tuple[st
             # A stale release is being re-run; keep what the root already has.
             leftovers.append(key)
             continue
-        moves.append((key, history_key(key)))
+        moves.append((key, history_key(key, tag)))
     return moves, leftovers
 
 
@@ -175,8 +179,14 @@ def parse_version(key: str) -> str:
     return svcd.group("version") if svcd is not None else "0.0.0"
 
 
-def history_key(key: str) -> str:
-    return f"{HISTORY_PREFIX}{parse_version(key)}/{key}"
+def history_key(key: str, tag: str) -> str:
+    """`history/<发布 tag>/<原文件名>`.
+
+    Keying by tag keeps one scheme: the files a release replaced sit beside that
+    release's `SHA256SUMS`, and a full release — whose plugins carry different
+    versions — still gets exactly one directory.
+    """
+    return f"{HISTORY_PREFIX}{tag}/{key}"
 
 
 def render_index(
@@ -551,7 +561,9 @@ def main(argv: list[str] | None = None) -> int:
         root_items = kodo.list_root()
         previous = index_digests(json.loads(kodo.fetch(f"{domain}/{INDEX_KEY}") or "{}"))
 
-    moves, leftovers = plan_moves([str(item.get("key") or "") for item in root_items], uploads)
+    moves, leftovers = plan_moves(
+        [str(item.get("key") or "") for item in root_items], uploads, args.tag
+    )
     for warning in stale_uploads([str(item.get("key") or "") for item in root_items], uploads):
         print(f"::warning::{warning}", file=sys.stderr)
 
