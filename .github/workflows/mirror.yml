@@ -1,18 +1,14 @@
 name: mirror
 
 # svcd is built in another repository, so its releases never reach this workflow
-# on their own. This job polls the newest stable one and re-syncs the mirror;
-# `repository_dispatch` (type `svcd-released`) makes that instant when the other
-# repository is wired to send it.
+# on their own. plugin-manager's release workflow sends `repository_dispatch`
+# (type `svcd-released`, payload `tag`) right after it publishes, which is what
+# normally triggers this job; `workflow_dispatch` is the manual retry.
 #
-# The release pipeline mirrors svcd too, so this job's usual answer is "already
-# current" and it exits without touching the bucket.
+# The release pipeline mirrors svcd too, so a run that arrives when the bucket
+# is already current does nothing.
 
 on:
-  schedule:
-    # Every six hours. A daemon release is rare; six hours is the worst case a
-    # user on the mirror spends on a stale version.
-    - cron: "17 */6 * * *"
   workflow_dispatch:
   repository_dispatch:
     types: [svcd-released]
@@ -34,20 +30,26 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Find the newest stable daemon release
+      - name: Resolve the release to mirror
         id: release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          # The dispatch carries the tag that triggered it, so the run mirrors
+          # exactly that release even if a newer one lands a second later.
+          DISPATCH_TAG: ${{ github.event.client_payload.tag }}
         run: |
           set -euo pipefail
           repo="webxxxxx/plugin-manager"
-          # `release view` returns the newest release even when it is a
-          # prerelease, so list with prereleases excluded.
-          tag=$(gh release list --repo "$repo" --exclude-pre-releases --limit 1 \
-                  --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          tag="${DISPATCH_TAG:-}"
+          if [ -z "$tag" ]; then
+            # `release view` returns the newest release even when it is a
+            # prerelease, so list with prereleases excluded.
+            tag=$(gh release list --repo "$repo" --exclude-pre-releases --limit 1 \
+                    --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "newest stable: ${tag:-none}"
+          echo "mirroring: ${tag:-none}"
 
       - name: Compare with what the mirror already has
         id: current

@@ -19,6 +19,6 @@ GitHub Release 在国内的下载速度是这条发布链路的瓶颈，所以�
 - `index.json` 描述本仓库的产物（插件包、工具链归档、发布公钥）**以及 svcd 本体**。`svcd[]` 由 CI 从 `plugin-manager` 的最新稳定 release 拉取后与包同置根目录，`svcd_sums_url` 指向根目录 `SHA256SUMS`；`release_asset` 在 `catalog_source = qiniu` 时优先读它，缺 `svcd` 小节才回落 GitHub。
 - 这是一次有意的信任让步：宿主用同一份 `SHA256SUMS` 验归档，镜像同时持有字节与哈希，因此它可以决定「升到哪一版」——伪造不了字节（改不了哈希），但可以让升级停在自洽的旧版。真正的修复是给 svcd 的 release 加签名、由宿主验签；在那之前，`catalog_source` 就是「是否信任镜像选版本」的开关，默认仍是 `github`。
 - 空间域名可以是 http：脚本照配置的 base 生成链接，不为「应该上证书」擅自改成 https（改了就等于指一个证书开不出来的地址）。商店侧的规则是「抓列表用什么协议，就要求下载用什么协议」——https 的列表不许指向 http 的包，http 的列表则一致地用 http。签名保证字节，不保证目录，这点写在使用文档里而不是靠默认值隐藏。
-- svcd 的发布发生在另一个仓库，本仓库收不到它的 tag：镜像靠 `mirror` 工作流的定时轮询兜底（6 小时），`repository_dispatch` 可即时触发。发布流程的 `qiniu` job 与它共用 `concurrency: qiniu-mirror`——`index.json` 是读-改-写，两个写入者重叠就会互相覆盖。
+- svcd 的发布发生在另一个仓库，本仓库收不到它的 tag：`plugin-manager` 的发布流程在 `publish` 成功后用 `repository_dispatch`（`svcd-released`，payload 带 tag）通知 `mirror` 工作流，镜像因此是发布驱动的，而不是定时轮询。发布流程的 `qiniu` job 与它共用 `concurrency: qiniu-mirror`——`index.json` 是读-改-写，两个写入者重叠就会互相覆盖。
 - Kodo 边缘默认把对象缓存一年，根目录的 `index.json` / `SHA256SUMS` 因此每次写完都要调 CDN 刷新；不清的后果不是报错，而是商店拿到旧索引后按「不比手里这份旧」规则回落到 GitHub——静默、且看起来像配置没生效。刷新失败只警告，因为发布本身已经完成。
 - `history/` 无人清理，空间容量靠发布频率和人工维护；七牛的免费额度是每月 10GB 标准存储，外网流出按量计费，所以"镜像节省的是下载时间，不是账单"。

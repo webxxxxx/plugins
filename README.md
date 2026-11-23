@@ -202,13 +202,15 @@ curl -fsS "$QINIU_DOMAIN/index.json" | jq -r '.packages[] | "\(.plugin) \(.versi
 `index.json` 里的 svcd 会停在上一次本仓库发布时的版本——而商店在 `catalog_source = qiniu` 时优先读镜像，
 所以它会一直看到旧版，日志里也没有异常。
 
-`.github/workflows/mirror.yml` 补了这一环：
+`.github/workflows/mirror.yml` 补了这一环，由 `plugin-manager` 的发布流程触发：
 
-- **定时**：每 6 小时查一次 `webxxxxx/plugin-manager` 的最新稳定 release；镜像已经是最新版就直接退出，不碰桶；
-- **手动**：Actions 页面 Run workflow，或 `gh workflow run mirror.yml`；
-- **即时**：在 `plugin-manager` 的发布流程里对本仓库发 `repository_dispatch`，`event_type` 用 `svcd-released`（需要一个能访问本仓库的 token，那是另一个仓库的改动）。
+- 它的 `release.yml` 在 `publish` 成功、且 tag 不是预发布之后，把自己刚发布的 tag 用
+  `repository_dispatch`（`event_type: svcd-released`，payload 带 `tag`）送到本仓库；
+- 本仓库收到后只同步 svcd：旧归档进 `history/svcd-<tag>/`，其它包原地不动，`index.json` 按桶的实际内容重写，然后刷 CDN；
+- 镜像已经是那版（比如本仓库刚发过一次）就直接退出，不碰桶；
+- 手动重跑：Actions 页面 Run workflow，或 `gh workflow run mirror.yml`；没有 payload 时退回「最新稳定版」。
 
-发现落后时它只同步 svcd：旧归档进 `history/svcd-<tag>/`，其它包原地不动，`index.json` 按桶的实际内容重写，然后刷 CDN。
+对方仓库需要一个 `PLUGINS_MIRROR_TOKEN`：能在 `webxxxxx/plugins` 上创建 dispatch 的 token（fine-grained 给 Contents: read and write，classic 用 `repo`）。没配时它只打 `::warning::`，镜像会等本仓库下一次发布追上。
 它和发布流程里的 `qiniu` job 共用 `concurrency: qiniu-mirror`，因为 `index.json` 是读-改-写，两个写入者不能重叠。
 
 ### CI 平台覆盖
