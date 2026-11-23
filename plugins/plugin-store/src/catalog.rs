@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 pub const PAGE_SIZE: usize = 50;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,6 +30,36 @@ pub struct Page {
     pub total: usize,
     pub page: usize,
     pub pages: usize,
+}
+
+/// The two shapes a catalog travels in.
+///
+/// `docs/plugins.md` is the Markdown table the GitHub workflow has always
+/// written; `index.json` is the navigation file the Qiniu mirror keeps in its
+/// bucket root. They carry the same rows, so everything above this module —
+/// cache, freshness guard, UI — works with whichever one answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Markdown,
+    Json,
+}
+
+impl Format {
+    pub fn parse(self, text: &str) -> Result<Vec<Entry>, String> {
+        match self {
+            Format::Markdown => parse(text),
+            Format::Json => parse_json(text),
+        }
+    }
+
+    /// One cache file per format: switching sources must not feed yesterday's
+    /// bytes to today's parser.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Format::Markdown => "md",
+            Format::Json => "json",
+        }
+    }
 }
 
 pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
@@ -58,18 +90,14 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
         let platform = cells[2];
         let size = cells[3];
         let url = extract_link(cells[4]).ok_or_else(|| {
-            format!(
-                "第 {} 行的下载地址不是 https 链接: {}",
-                number + 1,
-                cells[4]
-            )
+            format!("第 {} 行的下载地址不是链接: {}", number + 1, cells[4])
         })?;
 
         if name.is_empty() || version.is_empty() || platform.is_empty() {
             return Err(format!("第 {} 行的插件/版本/平台为空", number + 1));
         }
-        if !url.starts_with("https://") || !url.split('?').next().unwrap_or(url).ends_with(".spk") {
-            return Err(format!("第 {} 行的下载地址不是 .spk: {}", number + 1, url));
+        if !is_download_url(url) {
+            return Err(format!("第 {} 行的下载地址不是 http(s) .spk: {}", number + 1, url));
         }
 
         entries.push(Entry {
@@ -94,9 +122,80 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
         return Err("插件表里没有数据行".into());
     }
 
-    // A package is identified by name, version, platform and (when present)
-    // device. Duplicates collapse to the last one; BTreeMap also gives the UI
-    // a deterministic order.
+    Ok(canonicalize(entries))
+}
+
+/// Parse the Qiniu mirror's `index.json` (`schema: 1`).
+///
+/// Strict about the fields the UI needs and about the download address,
+/// because a catalog that half-parses is worse than one that is rejected: the
+/// plugin then keeps the previous list instead of showing rows it cannot
+/// install. `size` and `device` are optional — `size` only feeds the human
+/// column, and a missing `device` is read from the asset name exactly like the
+/// Markdown table does.
+pub fn parse_json(text: &str) -> Result<Vec<Entry>, String> {
+    let document: Value =
+        serde_json::from_str(text).map_err(|error| format!("index.json 不是合法 JSON: {error}"))?;
+    let schema = document.get("schema").and_then(Value::as_u64);
+    if schema != Some(1) {
+        return Err(format!(
+            "index.json 的 schema 不是 1（是 {}）",
+            document.get("schema").map_or("缺失".into(), Value::to_string)
+        ));
+    }
+    let rows = document
+        .get("packages")
+        .and_then(Value::as_array)
+        .ok_or("index.json 缺少 packages 数组")?;
+    if rows.is_empty() {
+        return Err("index.json 的 packages 是空的".into());
+    }
+
+    let mut entries = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let line = index + 1;
+        let field = |name: &str| -> Result<String, String> {
+            row.get(name)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| format!("index.json 第 {line} 行缺少 {name}"))
+        };
+        let name = field("plugin")?;
+        let version = field("version")?;
+        let platform = field("platform")?;
+        let url = field("url")?;
+        if !is_download_url(&url) {
+            return Err(format!("index.json 第 {line} 行的下载地址不是 http(s) .spk: {url}"));
+        }
+        let size_bytes = row.get("size").and_then(Value::as_u64).unwrap_or(0);
+        let device = row
+            .get("device")
+            .and_then(Value::as_str)
+            .and_then(valid_device)
+            .or_else(|| device_from_asset(&url, &name, &version, &platform));
+        entries.push(Entry {
+            name,
+            version,
+            platform,
+            size: if size_bytes > 0 {
+                human_size(size_bytes)
+            } else {
+                "-".into()
+            },
+            size_bytes,
+            url,
+            device,
+        });
+    }
+    Ok(canonicalize(entries))
+}
+
+/// A package is identified by name, version, platform and (when present)
+/// device. Duplicates collapse to the last one; BTreeMap also gives the UI a
+/// deterministic order.
+fn canonicalize(entries: Vec<Entry>) -> Vec<Entry> {
     let mut unique = BTreeMap::new();
     for entry in entries {
         unique.insert(
@@ -118,7 +217,43 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
             .then_with(|| a.platform.cmp(&b.platform))
             .then_with(|| a.device.cmp(&b.device))
     });
-    Ok(entries)
+    entries
+}
+
+/// A package address: `http(s)://…spk`, query string allowed.
+///
+/// The scheme is *syntax* here, not trust. Whether plaintext is acceptable is
+/// the caller's decision — `check_scheme` — because it depends on the source
+/// the list came from, and a parser that cannot say "http" cannot tell you that
+/// the answer was http.
+fn is_download_url(url: &str) -> bool {
+    let plain = url.split('?').next().unwrap_or(url);
+    (url.starts_with("https://") || url.starts_with("http://")) && plain.ends_with(".spk")
+}
+
+/// Reject plaintext package addresses when the list itself arrived over https.
+///
+/// A catalog fetched over https has no business pointing at `http://`: that
+/// would downgrade exactly the hop the user paid for. A catalog fetched over
+/// http may name http packages — refusing them would not add any security, it
+/// would only break the mirror the user chose.
+pub fn check_scheme(entries: &[Entry], require_https: bool) -> Result<(), String> {
+    if !require_https {
+        return Ok(());
+    }
+    let insecure: Vec<&str> = entries
+        .iter()
+        .filter(|entry| entry.url.starts_with("http://"))
+        .map(|entry| entry.url.as_str())
+        .collect();
+    if insecure.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "列表来自 https，但 {} 个包的地址是 http（第一个：{}）",
+        insecure.len(),
+        insecure[0]
+    ))
 }
 
 fn is_separator(cell: &str) -> bool {
@@ -200,6 +335,24 @@ fn parse_size(text: &str) -> Option<u64> {
     };
     let bytes = value * multiplier;
     (bytes.is_finite() && bytes >= 0.0).then_some(bytes as u64)
+}
+
+/// The `15.5 MiB` label the Markdown table carries as text and `index.json`
+/// carries as a byte count.
+fn human_size(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = "B";
+    for next in ["KiB", "MiB", "GiB"] {
+        value /= 1024.0;
+        unit = next;
+        if value < 1024.0 || next == "GiB" {
+            break;
+        }
+    }
+    format!("{value:.1} {unit}")
 }
 
 /// True when `fetched` is strictly older than `current` for every row they
@@ -345,6 +498,123 @@ mod tests {
         assert_eq!(meow.name, "meow");
         assert_eq!(meow.size_bytes, 15_414_067);
         assert!(meow.url.ends_with(".spk"));
+    }
+
+    const INDEX: &str = r#"{
+      "schema": 1,
+      "base_url": "https://dl.example.com",
+      "packages": [
+        {
+          "plugin": "hysteria",
+          "version": "1.0.0",
+          "platform": "x86_64-unknown-linux-gnu",
+          "device": null,
+          "file": "hysteria-1.0.0-x86_64-unknown-linux-gnu.spk",
+          "size": 17825792,
+          "sha256": "aa",
+          "url": "https://dl.example.com/hysteria-1.0.0-x86_64-unknown-linux-gnu.spk"
+        },
+        {
+          "plugin": "sshd",
+          "version": "1.0.0",
+          "platform": "x86_64-unknown-linux-gnu",
+          "device": "router1",
+          "file": "sshd-1.0.0-x86_64-unknown-linux-gnu-router1.spk",
+          "size": 640000,
+          "url": "https://dl.example.com/sshd-1.0.0-x86_64-unknown-linux-gnu-router1.spk"
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn parses_the_qiniu_index_like_the_markdown_table() {
+        let entries = parse_json(INDEX).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        let hysteria = &entries[0];
+        assert_eq!(hysteria.name, "hysteria");
+        assert_eq!(hysteria.platform, "x86_64-unknown-linux-gnu");
+        assert_eq!(hysteria.device, None);
+        assert_eq!(hysteria.size_bytes, 17_825_792);
+        assert_eq!(hysteria.size, "17.0 MiB");
+        assert!(hysteria.url.ends_with(".spk"));
+
+        // An explicit device wins, and the two sources agree on the identity.
+        let sshd = entries
+            .iter()
+            .find(|entry| entry.name == "sshd")
+            .unwrap();
+        assert_eq!(sshd.device.as_deref(), Some("router1"));
+        assert_eq!(sshd.size, "625.0 KiB");
+
+        let markdown = parse(SAMPLE).unwrap();
+        assert!(!is_older(&entries, &markdown));
+        assert!(!is_older(&markdown, &entries));
+    }
+
+    #[test]
+    fn a_missing_device_falls_back_to_the_asset_name() {
+        let text = r#"{"schema":1,"packages":[{"plugin":"sshd","version":"1.0.0",
+            "platform":"x86_64-unknown-linux-gnu","size":1,
+            "url":"https://dl.example.com/sshd-1.0.0-x86_64-unknown-linux-gnu-router1.spk"}]}"#;
+        let entries = parse_json(text).unwrap();
+        assert_eq!(entries[0].device.as_deref(), Some("router1"));
+    }
+
+    #[test]
+    fn rejects_an_index_that_would_install_the_wrong_thing() {
+        let bad_schema = r#"{"schema":2,"packages":[]}"#;
+        assert!(parse_json(bad_schema).unwrap_err().contains("schema"));
+
+        let no_packages = r#"{"schema":1}"#;
+        assert!(parse_json(no_packages).unwrap_err().contains("packages"));
+
+        let empty = r#"{"schema":1,"packages":[]}"#;
+        assert!(parse_json(empty).unwrap_err().contains("空的"));
+
+        let not_spk = r#"{"schema":1,"packages":[{"plugin":"a","version":"1.0.0",
+            "platform":"x86_64-unknown-linux-gnu","url":"https://dl.example.com/a.zip"}]}"#;
+        assert!(parse_json(not_spk).unwrap_err().contains(".spk"));
+
+        let no_url = r#"{"schema":1,"packages":[{"plugin":"a","version":"1.0.0","platform":"p"}]}"#;
+        assert!(parse_json(no_url).unwrap_err().contains("url"));
+
+        assert!(parse_json("{").unwrap_err().contains("JSON"));
+    }
+
+    #[test]
+    fn plaintext_links_are_a_matter_of_where_the_list_came_from() {
+        // Parsing is syntax: an http mirror has to be repres-entable at all.
+        let http = r#"{"schema":1,"packages":[
+            {"plugin":"a","version":"1.0.0","platform":"x86_64-unknown-linux-gnu",
+             "url":"http://dl.example.com/a-1.0.0-x86_64-unknown-linux-gnu.spk"},
+            {"plugin":"b","version":"1.0.0","platform":"x86_64-unknown-linux-gnu",
+             "url":"https://dl.example.com/b-1.0.0-x86_64-unknown-linux-gnu.spk"}]}"#;
+        let entries = parse_json(http).unwrap();
+        assert_eq!(entries.len(), 2);
+
+        // Fetched over http: http links are the same bargain, so they pass.
+        assert!(check_scheme(&entries, false).is_ok());
+
+        // Fetched over https: pointing at plaintext would downgrade the hop.
+        let error = check_scheme(&entries, true).unwrap_err();
+        assert!(error.contains("http"), "{error}");
+        assert!(error.contains("a-1.0.0"), "{error}");
+
+        // An https-only list passes both.
+        let https = parse(SAMPLE).unwrap();
+        assert!(check_scheme(&https, true).is_ok());
+        assert!(check_scheme(&https, false).is_ok());
+    }
+
+    #[test]
+    fn the_format_keeps_one_parser_per_wire_shape() {
+        assert!(Format::Markdown.parse(SAMPLE).is_ok());
+        assert!(Format::Markdown.parse(INDEX).is_err());
+        assert!(Format::Json.parse(INDEX).is_ok());
+        assert!(Format::Json.parse(SAMPLE).is_err());
+        assert_eq!(Format::Markdown.extension(), "md");
+        assert_eq!(Format::Json.extension(), "json");
     }
 
     #[test]

@@ -27,6 +27,37 @@ pub const MAX_CACHE_MINUTES: u64 = 24 * 60;
 /// The host's file name for a plugin's active config.
 pub const CONFIG_NAME: &str = "config";
 
+/// Which catalog the store prefers.
+///
+/// This is a priority, not an exclusive choice: the other source stays in the
+/// fallback chain, so a wrong `qiniu_base` or a blocked GitHub degrades to the
+/// other list instead of an empty page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CatalogSource {
+    /// `docs/plugins.md` on GitHub and its raw proxies.
+    #[default]
+    Github,
+    /// `index.json` in the bucket root of the Qiniu mirror.
+    Qiniu,
+}
+
+impl CatalogSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CatalogSource::Github => "github",
+            CatalogSource::Qiniu => "qiniu",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "github" => Some(CatalogSource::Github),
+            "qiniu" => Some(CatalogSource::Qiniu),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// Read-only GitHub token from the config file. Environment variables and
@@ -34,6 +65,11 @@ pub struct Settings {
     pub github_token: Option<String>,
     /// Reuse window for the release lookup; `Duration::ZERO` disables it.
     pub cache_ttl: Duration,
+    /// Which list to ask first.
+    pub catalog_source: CatalogSource,
+    /// Base URL of the Qiniu bucket that holds `index.json`, without a
+    /// trailing slash. `None` means the mirror is not configured.
+    pub qiniu_base: Option<String>,
 }
 
 impl Default for Settings {
@@ -41,6 +77,8 @@ impl Default for Settings {
         Settings {
             github_token: None,
             cache_ttl: Duration::from_secs(DEFAULT_CACHE_MINUTES * 60),
+            catalog_source: CatalogSource::Github,
+            qiniu_base: None,
         }
     }
 }
@@ -80,16 +118,15 @@ impl Settings {
     pub fn from_json(value: &Value) -> Self {
         let mut settings = Settings::default();
 
-        match value.get("github_token").and_then(Value::as_str) {
-            Some(raw) => match crate::net::clean_token(raw) {
+        if let Some(raw) = value.get("github_token").and_then(Value::as_str) {
+            match crate::net::clean_token(raw) {
                 Some(token) => settings.github_token = Some(token),
                 None if !raw.trim().is_empty() => log_warn!(
                     "配置里的 github_token 不合法（超过 {} 字节或含控制字符），已忽略",
                     crate::net::MAX_TOKEN_BYTES
                 ),
                 None => {}
-            },
-            None => {}
+            }
         }
 
         if let Some(minutes) = value.get("release_cache_minutes").and_then(Value::as_u64) {
@@ -97,8 +134,62 @@ impl Settings {
             settings.cache_ttl = Duration::from_secs(minutes * 60);
         }
 
+        match value.get("catalog_source") {
+            Some(Value::String(raw)) => match CatalogSource::parse(raw) {
+                Some(source) => settings.catalog_source = source,
+                None => log_warn!(
+                    "配置里的 catalog_source 不是 github 或 qiniu（是 {raw:?}），按 github 处理"
+                ),
+            },
+            Some(other) => log_warn!(
+                "配置里的 catalog_source 必须是字符串（是 {other}），按 github 处理"
+            ),
+            None => {}
+        }
+
+        if let Some(raw) = value.get("qiniu_base").and_then(Value::as_str) {
+            match clean_base(raw) {
+                Some(base) => {
+                    if base.starts_with("http://") {
+                        // Allowed on purpose: a bucket without a certificate
+                        // still has to be usable. The signature verifies the
+                        // bytes; only the list's freshness is exposed.
+                        log_warn!(
+                            "qiniu_base 用的是 http（{base}）：目录和包都走明文，能开证书就换成 https"
+                        );
+                    }
+                    settings.qiniu_base = Some(base);
+                }
+                None if !raw.trim().is_empty() => log_warn!(
+                    "配置里的 qiniu_base 必须是 http:// 或 https:// 开头的地址（是 {raw:?}），已忽略"
+                ),
+                None => {}
+            }
+        }
+
         settings
     }
+}
+
+/// Normalise the bucket base: http or https, no trailing slash, and tolerate a
+/// pasted `…/index.json` (that is the URL people test with).
+///
+/// The scheme is kept as given: the store's parsing policy follows it, so an
+/// http bucket is not silently upgraded to a URL its certificate cannot serve.
+fn clean_base(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let base = trimmed.strip_suffix("/index.json").unwrap_or(trimmed);
+    let base = base.trim_end_matches('/');
+    if base.len() > 512 {
+        return None;
+    }
+    let host = base
+        .strip_prefix("https://")
+        .or_else(|| base.strip_prefix("http://"))?;
+    if host.is_empty() || host.chars().any(|character| character.is_whitespace() || character.is_control()) {
+        return None;
+    }
+    Some(base.to_string())
 }
 
 #[cfg(test)]
@@ -160,6 +251,54 @@ mod tests {
 
         let settings = Settings::from_json(&serde_json::json!({ "github_token": 42 }));
         assert_eq!(settings.github_token, None);
+    }
+
+    #[test]
+    fn the_catalog_source_defaults_to_github_and_accepts_qiniu() {
+        let settings = Settings::from_json(&serde_json::json!({}));
+        assert_eq!(settings.catalog_source, CatalogSource::Github);
+        assert_eq!(settings.qiniu_base, None);
+
+        let settings = Settings::from_json(&serde_json::json!({ "catalog_source": " QiNiu " }));
+        assert_eq!(settings.catalog_source, CatalogSource::Qiniu);
+
+        // An unknown word is a typo, not a reason to stop: fall back to GitHub.
+        for raw in [serde_json::json!("gitee"), serde_json::json!(""), serde_json::json!(3)] {
+            let settings = Settings::from_json(&serde_json::json!({ "catalog_source": raw }));
+            assert_eq!(settings.catalog_source, CatalogSource::Github);
+        }
+        assert_eq!(CatalogSource::Qiniu.as_str(), "qiniu");
+    }
+
+    #[test]
+    fn the_qiniu_base_keeps_its_scheme_and_is_normalised() {
+        let base = |value: serde_json::Value| {
+            Settings::from_json(&serde_json::json!({ "qiniu_base": value })).qiniu_base
+        };
+        assert_eq!(
+            base(serde_json::json!("https://dl.example.com/")),
+            Some("https://dl.example.com".into())
+        );
+        // People paste the URL they just tested in a browser.
+        assert_eq!(
+            base(serde_json::json!("https://dl.example.com/index.json")),
+            Some("https://dl.example.com".into())
+        );
+        assert_eq!(
+            base(serde_json::json!("  https://dl.example.com//  ")),
+            Some("https://dl.example.com".into())
+        );
+        // A bucket without a certificate stays reachable, and stays http: the
+        // parsing policy follows what the user actually has.
+        assert_eq!(
+            base(serde_json::json!("http://dl.example.com/")),
+            Some("http://dl.example.com".into())
+        );
+        assert_eq!(base(serde_json::json!("dl.example.com")), None);
+        assert_eq!(base(serde_json::json!("ftp://dl.example.com")), None);
+        assert_eq!(base(serde_json::json!("https://")), None);
+        assert_eq!(base(serde_json::json!("")), None);
+        assert_eq!(base(serde_json::json!(42)), None);
     }
 
     #[test]

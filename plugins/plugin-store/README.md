@@ -25,7 +25,11 @@
 
 ## 数据与下载
 
-列表地址按顺序尝试，取**第一个不比手里这份旧**的：
+列表有两个来源，由配置里的 `catalog_source` 选优先级：GitHub 的 `docs/plugins.md`
+（下面那串地址）或七牛空间根目录的 `index.json`（`qiniu_base`）。选中的先问，另一个排在它后面
+当兜底——所以 `qiniu_base` 写错或 GitHub 不可达时，商店退化到另一份列表，而不是变成空页。
+
+GitHub 这份的地址按顺序尝试，取**第一个不比手里这份旧**的：
 
 1. https://raw.githubusercontent.com/webxxxxx/plugins/main/docs/plugins.md
 2. https://raw.githack.com/webxxxxx/plugins/main/docs/plugins.md
@@ -82,11 +86,21 @@ plugin editconfig plugin-store --reset           # 回到模板
 
 ```json
 {
+  "catalog_source": "github",
+  "qiniu_base": "",
   "github_token": "github_pat_…",
   "release_cache_minutes": 15
 }
 ```
 
+- `catalog_source`：`github` 或 `qiniu`，决定先问哪一份列表，默认 `github`。另一个来源不会消失，
+  只排在后面兜底。
+- `qiniu_base`：七牛空间的公开域名，例如 `https://dl.example.com`（`http` 和 `https` 都行，
+  末尾斜杠可有可无，粘 `…/index.json` 也认）。只有配了它，七牛来源才存在；配了 `qiniu_base`
+  却仍留 `catalog_source: "github"`，七牛就只是 GitHub 全都不通时的最后一条路。
+  用 `http` 时解析规则跟着 base 走：base 是 http，索引里的 http 链接就放行（并记一条警告）；
+  base 是 https，索引里出现 http 链接会被拒绝——抓列表走的是 https，就不该把下载降级回明文。
+  包本身有签名，http 能保证"字节没被换"，保证不了"目录没被改"；能开证书就别停在 http。
 - `github_token`：只读 PAT（读公开 release，`public_repo` 就够）。留空表示不认证。
   宿主写入的活动配置在 Linux 上是 0640；插件不会把 token 打进日志、错误文案或 `/list` 结果。
 - `release_cache_minutes`：`release_asset` 结果的重用窗口，默认 15，上限 1440；
@@ -94,6 +108,19 @@ plugin editconfig plugin-store --reset           # 回到模板
 
 优先级：配置文件 > `GITHUB_TOKEN` > `GH_TOKEN` > `<data_dir>/github-token`。配置文件给服务
 安装用，环境变量留给临时调试。配置解析失败只记一条警告，插件仍按默认值继续跑。
+
+两个来源各写各的缓存：`catalog.md` 存 GitHub 那份表，`catalog.json` 存七牛那份索引；启动时优先读
+配置所选来源的缓存，读不到再读另一份。所以切换来源不会让页面先空一次，也不会把两种格式喂给同一个
+解析器。`list` 结果里的 `catalog_source` 回显当前选择，`source_url` 回显这份列表实际来自哪个地址。
+
+切到七牛的一步操作（改完 `plugin restart plugin-store`）：
+
+```bash
+plugin editconfig plugin-store --print > cfg.json   # 拿到当前值
+# 编辑 cfg.json：catalog_source=qiniu、qiniu_base=https://你的空间域名
+plugin editconfig plugin-store --file cfg.json
+plugin restart plugin-store
+```
 
 ## 自升级查询：release_asset
 
@@ -173,7 +200,8 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
 
 ## 边界
 
-- 目录格式只认 docs/plugins.md 的 Markdown 表；表头/下载单元格错误会拒绝解析并保留旧缓存。
+- 目录格式只认 `docs/plugins.md` 的 Markdown 表和七牛的 `index.json`（`schema: 1`）；表头、缺字段、
+  下载地址不是 https 的 `.spk` 都会拒绝解析并保留旧缓存。
 - 目录里没有 Windows 包时，Windows 上的默认页是空的，这是正确结果。
 - platform 与文件名 device 后缀是列表侧过滤；manifest 里完整的 compat.devices 仍会在安装时由 svcd 再次校验。
 - 安装包必须已签名并被宿主的 trust.d 信任；未签名包需要开发机的 allow_insecure_install = on。

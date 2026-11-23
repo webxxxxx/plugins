@@ -47,6 +47,76 @@ const CATALOG_URLS: &[&str] = &[
     "https://gcore.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
     "https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md",
 ];
+
+/// One place a catalog can come from, with the parser its bytes need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Source {
+    url: String,
+    format: catalog::Format,
+}
+
+impl Source {
+    /// A list fetched over https must not point at `http://` downloads; a list
+    /// fetched over http is already plaintext, so its http links are allowed.
+    fn requires_https(&self) -> bool {
+        self.url.starts_with("https://")
+    }
+}
+
+/// The configured source first, the other one as a safety net.
+///
+/// `catalog_source` sets priority, not exclusivity: a typo in `qiniu_base` or a
+/// network where GitHub is unreachable must degrade the store to the other
+/// list, never to an empty page. `catalog::is_older` still decides whether an
+/// answer is fresh enough to replace what is already in hand.
+fn catalog_sources(settings: &settings::Settings) -> Vec<Source> {
+    let github = || {
+        CATALOG_URLS
+            .iter()
+            .map(|url| Source {
+                url: (*url).to_string(),
+                format: catalog::Format::Markdown,
+            })
+            .collect::<Vec<_>>()
+    };
+    let qiniu = || {
+        settings
+            .qiniu_base
+            .as_ref()
+            .map(|base| {
+                vec![Source {
+                    url: format!("{base}/index.json"),
+                    format: catalog::Format::Json,
+                }]
+            })
+            .unwrap_or_default()
+    };
+    let mut sources = match settings.catalog_source {
+        settings::CatalogSource::Github => github(),
+        settings::CatalogSource::Qiniu => qiniu(),
+    };
+    sources.extend(match settings.catalog_source {
+        settings::CatalogSource::Github => qiniu(),
+        settings::CatalogSource::Qiniu => github(),
+    });
+    sources
+}
+
+/// The cache shape the configured source writes.
+fn cache_format(source: settings::CatalogSource) -> catalog::Format {
+    match source {
+        settings::CatalogSource::Github => catalog::Format::Markdown,
+        settings::CatalogSource::Qiniu => catalog::Format::Json,
+    }
+}
+
+fn other_format(format: catalog::Format) -> catalog::Format {
+    match format {
+        catalog::Format::Markdown => catalog::Format::Json,
+        catalog::Format::Json => catalog::Format::Markdown,
+    }
+}
+
 const TARGET: &str = match option_env!("SVCD_PLUGIN_TARGET") {
     Some(target) => target,
     None => "unknown",
@@ -205,6 +275,7 @@ impl PluginStore {
             "scope": scope,
             "source": state.source.clone(),
             "source_url": state.source_url.clone(),
+            "catalog_source": self.settings.catalog_source.as_str(),
             "fetched_at": state.fetched_at,
             "stale": stale,
             "refreshing": state.refreshing,
@@ -504,10 +575,11 @@ impl PluginStore {
 
         let state = Arc::clone(&self.state);
         let data_dir = self.data_dir.clone();
+        let settings = self.settings.clone();
         if let Err(error) = thread::Builder::new()
             .name("manual-refresh".into())
             .spawn(move || {
-                if let Err(error) = do_refresh(&state, &data_dir) {
+                if let Err(error) = do_refresh(&state, &data_dir, &settings) {
                     log_warn!("手动刷新插件列表失败: {error}");
                 }
             })
@@ -836,29 +908,22 @@ fn safe_part(value: &str) -> String {
     }
 }
 
-fn initial_state(data_dir: &Path) -> State {
-    let cache = data_dir.join("catalog.md");
-    if let Ok(text) = fs::read_to_string(&cache) {
-        match catalog::parse(&text) {
-            Ok(entries) => {
-                let fetched_at = cache
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(system_secs);
-                return State {
-                    entries,
-                    source: "cache".into(),
-                    source_url: None,
-                    fetched_at,
-                    last_error: None,
-                    refreshing: false,
-                    job: None,
-                };
-            }
-            Err(error) => {
-                log_warn!("忽略损坏的 catalog 缓存 {}: {error}", cache.display());
-            }
+fn initial_state(data_dir: &Path, settings: &settings::Settings) -> State {
+    let preferred = cache_format(settings.catalog_source);
+    // A cached http list is fine while the configured source is http, and
+    // stale the moment it is https again.
+    let require_https = match settings.catalog_source {
+        settings::CatalogSource::Github => true,
+        settings::CatalogSource::Qiniu => settings
+            .qiniu_base
+            .as_deref()
+            .is_none_or(|base| base.starts_with("https://")),
+    };
+    // Either cache is valid data; the configured one is merely preferred, so a
+    // user who switches sources still starts from the last known list.
+    for format in [preferred, other_format(preferred)] {
+        if let Some(state) = cached_state(data_dir, format, require_https) {
+            return state;
         }
     }
     let entries = catalog::parse(SNAPSHOT).unwrap_or_else(|error| {
@@ -876,7 +941,43 @@ fn initial_state(data_dir: &Path) -> State {
     }
 }
 
-fn spawn_refresher(state: Arc<Mutex<State>>, data_dir: PathBuf, cancel: Cancel) {
+fn cached_state(data_dir: &Path, format: catalog::Format, require_https: bool) -> Option<State> {
+    let cache = data_dir.join(format!("catalog.{}", format.extension()));
+    let text = fs::read_to_string(&cache).ok()?;
+    match format.parse(&text) {
+        Ok(entries) => {
+            if let Err(error) = catalog::check_scheme(&entries, require_https) {
+                log_warn!("忽略 catalog 缓存 {}: {error}", cache.display());
+                return None;
+            }
+            let fetched_at = cache
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(system_secs);
+            Some(State {
+                entries,
+                source: "cache".into(),
+                source_url: None,
+                fetched_at,
+                last_error: None,
+                refreshing: false,
+                job: None,
+            })
+        }
+        Err(error) => {
+            log_warn!("忽略损坏的 catalog 缓存 {}: {error}", cache.display());
+            None
+        }
+    }
+}
+
+fn spawn_refresher(
+    state: Arc<Mutex<State>>,
+    data_dir: PathBuf,
+    cancel: Cancel,
+    settings: settings::Settings,
+) {
     let _ = thread::Builder::new()
         .name("catalog-refresh".into())
         .spawn(move || loop {
@@ -891,7 +992,7 @@ fn spawn_refresher(state: Arc<Mutex<State>>, data_dir: PathBuf, cancel: Cancel) 
                     .unwrap_or(true)
             };
             if needs {
-                if let Err(error) = refresh_once(&state, &data_dir) {
+                if let Err(error) = refresh_once(&state, &data_dir, &settings) {
                     log_warn!("刷新插件列表失败: {error}");
                 }
             }
@@ -901,7 +1002,11 @@ fn spawn_refresher(state: Arc<Mutex<State>>, data_dir: PathBuf, cancel: Cancel) 
         });
 }
 
-fn refresh_once(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, String> {
+fn refresh_once(
+    state: &Arc<Mutex<State>>,
+    data_dir: &Path,
+    settings: &settings::Settings,
+) -> Result<usize, String> {
     {
         let mut guard = state.lock().map_err(|_| "状态锁不可用".to_string())?;
         if guard.refreshing {
@@ -909,21 +1014,31 @@ fn refresh_once(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, Str
         }
         guard.refreshing = true;
     }
-    do_refresh(state, data_dir)
+    do_refresh(state, data_dir, settings)
 }
 
 /// Fetch and apply a refresh. The caller already owns the refreshing flag.
-fn do_refresh(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, String> {
+fn do_refresh(
+    state: &Arc<Mutex<State>>,
+    data_dir: &Path,
+    settings: &settings::Settings,
+) -> Result<usize, String> {
     let current = match state.lock() {
         Ok(guard) => guard.entries.clone(),
         Err(_) => return Err("状态锁不可用".into()),
     };
-    let fetched = fetch_catalog(&current);
+    let fetched = fetch_catalog(&current, settings);
 
     let mut guard = state.lock().map_err(|_| "状态锁不可用".to_string())?;
     guard.refreshing = false;
     match fetched {
-        Ok((entries, text, url)) => {
+        Ok(fetched) => {
+            let Fetched {
+                entries,
+                text,
+                url,
+                format,
+            } = fetched;
             // The list may have been replaced while this fetch was in flight.
             if catalog::is_older(&entries, &guard.entries) {
                 let error = format!("{url} 返回的列表比当前这份旧，已忽略");
@@ -932,7 +1047,7 @@ fn do_refresh(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, Strin
                 log_warn!("{error}");
                 return Err(error);
             }
-            if let Err(error) = write_cache(data_dir, &text) {
+            if let Err(error) = write_cache(data_dir, &text, format) {
                 log_warn!("写入 catalog 缓存失败: {error}");
             }
             let count = entries.len();
@@ -963,19 +1078,40 @@ fn do_refresh(state: &Arc<Mutex<State>>, data_dir: &Path) -> Result<usize, Strin
 /// A mirror can serve a week-old copy (jsDelivr caches a branch for that long),
 /// so a stale answer is not a failure to install — it is a reason to ask the
 /// next source instead of stopping here.
-fn fetch_catalog(
-    current: &[catalog::Entry],
-) -> Result<(Vec<catalog::Entry>, String, String), String> {
+/// A catalog that passed the freshness check, with the bytes to cache.
+#[derive(Debug)]
+struct Fetched {
+    entries: Vec<catalog::Entry>,
+    text: String,
+    url: String,
+    format: catalog::Format,
+}
+
+fn fetch_catalog(current: &[catalog::Entry], settings: &settings::Settings) -> Result<Fetched, String> {
+    fetch_from(current, &catalog_sources(settings))
+}
+
+/// Ask the sources in order; the first one that parses and is not older wins.
+fn fetch_from(current: &[catalog::Entry], sources: &[Source]) -> Result<Fetched, String> {
     let mut errors = Vec::new();
-    for url in CATALOG_URLS {
-        match net::fetch_text(&[url]) {
-            Ok((text, source)) => match catalog::parse(&text) {
+    for source in sources {
+        match net::fetch_text(&[source.url.as_str()]) {
+            Ok((text, url)) => match source.format.parse(&text) {
                 Ok(entries) => {
-                    if catalog::is_older(&entries, current) {
-                        errors.push(format!("{source}: 返回的列表比当前这份旧，换下一个源"));
+                    if let Err(error) = catalog::check_scheme(&entries, source.requires_https()) {
+                        errors.push(format!("{url}: {error}"));
                         continue;
                     }
-                    return Ok((entries, text, source));
+                    if catalog::is_older(&entries, current) {
+                        errors.push(format!("{url}: 返回的列表比当前这份旧，换下一个源"));
+                        continue;
+                    }
+                    return Ok(Fetched {
+                        entries,
+                        text,
+                        url,
+                        format: source.format,
+                    });
                 }
                 Err(error) => errors.push(format!("{url}: {error}")),
             },
@@ -985,10 +1121,11 @@ fn fetch_catalog(
     Err(errors.join("；"))
 }
 
-fn write_cache(data_dir: &Path, text: &str) -> Result<(), String> {
+fn write_cache(data_dir: &Path, text: &str, format: catalog::Format) -> Result<(), String> {
     fs::create_dir_all(data_dir).map_err(|error| format!("{}: {error}", data_dir.display()))?;
-    let temporary = data_dir.join("catalog.md.tmp");
-    let target = data_dir.join("catalog.md");
+    let name = format!("catalog.{}", format.extension());
+    let temporary = data_dir.join(format!("{name}.tmp"));
+    let target = data_dir.join(&name);
     fs::write(&temporary, text).map_err(|error| format!("{}: {error}", temporary.display()))?;
     #[cfg(windows)]
     let _ = fs::remove_file(&target);
@@ -1032,7 +1169,10 @@ fn main() -> Exit {
     let data_dir = plugin_data_dir(exe.as_deref(), data_root.as_deref(), OWN_ID);
     // The catalog cache sits at the plugin root; downloads use its temp dir.
     let download_dir = data_dir.join("temp");
-    let state = Arc::new(Mutex::new(initial_state(&data_dir)));
+    // Settings first: they decide which cache shape to read and which source
+    // the refresher asks.
+    let settings = settings::Settings::load(context.config_path(), &data_dir);
+    let state = Arc::new(Mutex::new(initial_state(&data_dir, &settings)));
     log_info!(
         "plugin-store 启动: target={TARGET}, 内置/缓存 {} 个包, data={}, downloads={}",
         state.lock().map(|guard| guard.entries.len()).unwrap_or(0),
@@ -1044,8 +1184,12 @@ fn main() -> Exit {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("plugin-store-temp"));
     let cancel = context.cancel();
-    let settings = settings::Settings::load(context.config_path(), &data_dir);
-    spawn_refresher(Arc::clone(&state), data_dir.clone(), cancel.clone());
+    spawn_refresher(
+        Arc::clone(&state),
+        data_dir.clone(),
+        cancel.clone(),
+        settings.clone(),
+    );
 
     svcd_plugin::serve(
         context,
@@ -1085,6 +1229,207 @@ mod tests {
             declared, implemented,
             "manifest and code disagree on capabilities"
         );
+    }
+
+    #[test]
+    fn the_configured_source_comes_first_and_the_other_stays_a_fallback() {
+        // github only: every URL is a Markdown mirror, and nothing else.
+        let urls = catalog_sources(&settings::Settings::default());
+        assert_eq!(urls.len(), CATALOG_URLS.len());
+        assert!(urls
+            .iter()
+            .all(|source| source.format == catalog::Format::Markdown));
+
+        // qiniu chosen: index.json first, GitHub behind it.
+        let qiniu = settings::Settings {
+            catalog_source: settings::CatalogSource::Qiniu,
+            qiniu_base: Some("https://dl.example.com".into()),
+            ..settings::Settings::default()
+        };
+        let urls = catalog_sources(&qiniu);
+        assert_eq!(urls[0].url, "https://dl.example.com/index.json");
+        assert_eq!(urls[0].format, catalog::Format::Json);
+        assert_eq!(urls[1].format, catalog::Format::Markdown);
+        assert_eq!(urls.len(), CATALOG_URLS.len() + 1);
+
+        // qiniu chosen but not configured: GitHub only, no empty first entry.
+        let broken = settings::Settings {
+            catalog_source: settings::CatalogSource::Qiniu,
+            ..settings::Settings::default()
+        };
+        let urls = catalog_sources(&broken);
+        assert_eq!(urls.len(), CATALOG_URLS.len());
+        assert_eq!(urls[0].format, catalog::Format::Markdown);
+
+        // github chosen with a base: the mirror is still worth a try when raw
+        // is blocked, so it goes last.
+        let both = settings::Settings {
+            qiniu_base: Some("https://dl.example.com".into()),
+            ..settings::Settings::default()
+        };
+        let urls = catalog_sources(&both);
+        assert_eq!(urls[0].format, catalog::Format::Markdown);
+        assert_eq!(
+            urls.last().map(|source| source.url.as_str()),
+            Some("https://dl.example.com/index.json")
+        );
+    }
+
+    #[test]
+    fn a_qiniu_source_is_fetched_parsed_and_kept_in_its_own_format() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"schema":1,"packages":[{"plugin":"meow","version":"1.0.2",
+            "platform":"x86_64-unknown-linux-gnu","size":2048,
+            "url":"https://dl.example.com/meow-1.0.2-x86_64-unknown-linux-gnu.spk"}]}"#
+            .to_string();
+        let server_body = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_body.len()
+            )
+            .unwrap();
+            stream.write_all(server_body.as_bytes()).unwrap();
+        });
+
+        let sources = vec![Source {
+            url: format!("http://{address}/index.json"),
+            format: catalog::Format::Json,
+        }];
+        let fetched = fetch_from(&[], &sources).expect("the local index answers");
+        server.join().unwrap();
+
+        assert_eq!(fetched.format, catalog::Format::Json);
+        assert_eq!(fetched.text, body);
+        assert_eq!(fetched.url, format!("http://{address}/index.json"));
+        assert_eq!(fetched.entries.len(), 1);
+        assert_eq!(fetched.entries[0].name, "meow");
+        assert_eq!(fetched.entries[0].size, "2.0 KiB");
+    }
+
+    #[test]
+    fn an_http_source_may_point_at_http_packages() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"schema":1,"packages":[{"plugin":"meow","version":"1.0.2",
+            "platform":"x86_64-unknown-linux-gnu","size":1024,
+            "url":"http://127.0.0.1:1/meow-1.0.2-x86_64-unknown-linux-gnu.spk"}]}"#
+            .to_string();
+        let server_body = body.clone();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                server_body.len(),
+                server_body
+            )
+            .unwrap();
+        });
+
+        // The source itself is http, so plaintext packages are the same
+        // bargain and are not refused.
+        let sources = vec![Source {
+            url: format!("http://{address}/index.json"),
+            format: catalog::Format::Json,
+        }];
+        let fetched = fetch_from(&[], &sources).expect("plaintext mirror is usable");
+        server.join().unwrap();
+        assert!(fetched.entries[0].url.starts_with("http://"));
+
+        // The same bytes cached while the user was on http become unusable the
+        // moment `qiniu_base` goes back to https.
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-http-cache-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("catalog.json"), &body).unwrap();
+        assert!(cached_state(&dir, catalog::Format::Json, false).is_some());
+        assert!(cached_state(&dir, catalog::Format::Json, true).is_none());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_source_that_answers_with_the_wrong_shape_is_skipped() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // A Markdown table behind an `index.json` URL: rejected, not guessed.
+        let body = "# 插件下载\n\n| 插件 | 版本 |\n| --- | --- |\n";
+        let server_body = body.to_string();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                server_body.len(),
+                server_body
+            )
+            .unwrap();
+        });
+
+        let sources = vec![Source {
+            url: format!("http://{address}/index.json"),
+            format: catalog::Format::Json,
+        }];
+        let error = fetch_from(&[], &sources).unwrap_err();
+        server.join().unwrap();
+        assert!(error.contains("JSON"), "{error}");
+    }
+
+    #[test]
+    fn switching_the_source_prefers_its_own_cache_but_keeps_the_other() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-cache-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("catalog.json"),
+            r#"{"schema":1,"packages":[{"plugin":"from-qiniu","version":"2.0.0",
+                "platform":"x86_64-unknown-linux-gnu","size":1024,
+                "url":"https://dl.example.com/from-qiniu-2.0.0-x86_64-unknown-linux-gnu.spk"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("catalog.md"),
+            "| 插件 | 版本 | 平台 | 大小 | 下载地址 |\n| --- | --- | --- | ---: | --- |\n| from-github | 1.0.0 | x86_64-unknown-linux-gnu | 1.0 KiB | [a](https://github.com/o/r/releases/download/v1/from-github-1.0.0-x86_64-unknown-linux-gnu.spk) |\n",
+        )
+        .unwrap();
+
+        let qiniu = settings::Settings {
+            catalog_source: settings::CatalogSource::Qiniu,
+            ..settings::Settings::default()
+        };
+        let state = initial_state(&dir, &qiniu);
+        assert_eq!(state.source, "cache");
+        assert_eq!(state.entries[0].name, "from-qiniu");
+
+        let github = settings::Settings::default();
+        let state = initial_state(&dir, &github);
+        assert_eq!(state.entries[0].name, "from-github");
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

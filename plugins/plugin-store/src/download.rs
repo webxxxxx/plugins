@@ -117,7 +117,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     let text = fs::read_to_string(&options.manifest)
         .map_err(|error| format!("读取 {} 失败：{error}", options.manifest.display()))?;
-    let entries = catalog::parse(&text)
+    // The table is Markdown; a Qiniu `index.json` works too, picked by suffix
+    // so `--manifest` stays one option instead of a second flag.
+    let format = if options
+        .manifest
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        catalog::Format::Json
+    } else {
+        catalog::Format::Markdown
+    };
+    let entries = format
+        .parse(&text)
         .map_err(|error| format!("解析 {} 失败：{error}", options.manifest.display()))?;
 
     let mut packages = Vec::with_capacity(entries.len());

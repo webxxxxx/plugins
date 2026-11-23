@@ -1,4 +1,6 @@
 {
+  "catalog_source": "github",
+  "qiniu_base": "",
   "github_token": "",
   "release_cache_minutes": 15
 }
