@@ -194,6 +194,19 @@ pub fn expand(value: &str, id: &str, version: &str, platform: &str) -> String {
         .replace("{platform}", platform)
 }
 
+/// `{cc}` is the C compiler a recipe runs: `$CC` when the build sets one,
+/// `gcc` otherwise.
+///
+/// This is how one `build.json` serves both a native build and a cross one —
+/// the command array cannot vary by platform, but the compiler can come from
+/// the environment (`tools/cross/install.sh` points `CC` at the musl toolchain).
+pub fn compiler(variable: Option<&str>) -> String {
+    match variable.map(str::trim) {
+        Some(cc) if !cc.is_empty() => cc.to_string(),
+        _ => "gcc".to_string(),
+    }
+}
+
 /// Run the recipe and copy the artifact to `payload/bin/`.
 ///
 /// Returns the exec path the packaged manifest should use — on Windows the
@@ -224,11 +237,20 @@ pub fn build_from_recipe(
         fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {}", parent.display(), error))?;
     }
+    // Clear what the previous platform produced under the same name. Windows
+    // compilers add `.exe`, so a native build and a cross build of one plugin
+    // leave two candidates side by side — and the exact-path lookup below would
+    // happily package the other platform's binary.
+    let _ = fs::remove_file(&artifact_path);
+    if let Some(name) = artifact_path.file_name().and_then(|name| name.to_str()) {
+        let _ = fs::remove_file(artifact_path.with_file_name(stale_twin(name)));
+    }
 
-    let program = expand(&spec.command[0], id, &manifest.version, platform);
+    let cc = compiler(std::env::var("CC").ok().as_deref());
+    let program = expand(&spec.command[0], id, &manifest.version, platform).replace("{cc}", &cc);
     let args: Vec<String> = spec.command[1..]
         .iter()
-        .map(|part| expand(part, id, &manifest.version, platform))
+        .map(|part| expand(part, id, &manifest.version, platform).replace("{cc}", &cc))
         .collect();
 
     let mut command = Command::new(&program);
@@ -278,6 +300,13 @@ pub fn build_from_recipe(
         fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {}", parent.display(), error))?;
     }
+    // One plugin, several platforms: the previous platform's binary would
+    // otherwise stay beside this one and the packer takes everything under
+    // package/.
+    let stale = target.with_file_name(stale_twin(&final_name));
+    if stale != target {
+        let _ = fs::remove_file(&stale);
+    }
     fs::copy(&built, &target)
         .map_err(|error| format!("copy {}: {}", built.display(), error))?;
     // Only rewrite `exec.path` when the artifact was renamed to carry the
@@ -286,6 +315,20 @@ pub fn build_from_recipe(
         Ok(Some(format!("payload/bin/{final_name}")))
     } else {
         Ok(None)
+    }
+}
+
+/// The same binary under the other platform's name: `demo` ↔ `demo.exe`.
+///
+/// A payload directory is shared by every platform a plugin builds for, so the
+/// build that follows must remove the name the previous one left behind.
+fn stale_twin(name: &str) -> String {
+    match name
+        .strip_suffix(".exe")
+        .or_else(|| name.strip_suffix(".EXE"))
+    {
+        Some(stem) if !stem.is_empty() => stem.to_string(),
+        _ => format!("{name}.exe"),
     }
 }
 
@@ -717,6 +760,25 @@ mod tests {
             "export const v = 2;\n"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_second_platform_does_not_inherit_the_first_ones_binary() {
+        assert_eq!(stale_twin("demo"), "demo.exe");
+        assert_eq!(stale_twin("demo.exe"), "demo");
+        // Nothing to strip means nothing to remove beyond the name itself.
+        assert_eq!(stale_twin(".exe"), ".exe.exe");
+    }
+
+    #[test]
+    fn the_compiler_defaults_to_gcc_unless_cc_says_otherwise() {
+        assert_eq!(compiler(None), "gcc");
+        assert_eq!(compiler(Some("")), "gcc");
+        assert_eq!(compiler(Some("  ")), "gcc");
+        assert_eq!(
+            compiler(Some("/opt/cross/bin/aarch64-linux-musl-gcc")),
+            "/opt/cross/bin/aarch64-linux-musl-gcc"
+        );
     }
 
     #[test]

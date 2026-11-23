@@ -179,6 +179,34 @@ fn a_declared_icon_lets_the_build_through() {
 }
 
 #[test]
+fn the_recipe_compiler_comes_from_cc() {
+    // `{cc}` is how one build.json covers both a native build and a musl cross
+    // build: the command array cannot vary by platform, `CC` can.
+    let root = project("recipe-cc", MANIFEST);
+    std::fs::write(
+        root.join("build.json"),
+        r#"{"build":{"command":["{cc}","--version"],"artifact":"out/demo"}}"#,
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_plugin-tools"))
+        .args(["build", "--platform", "x86_64-unknown-linux-musl"])
+        .arg("--dir")
+        .arg(&root)
+        .env("SVCD_PLUGIN_BIN", fake_host())
+        .env("CC", "/opt/cross/bin/aarch64-linux-musl-gcc")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("/opt/cross/bin/aarch64-linux-musl-gcc --version"),
+        "{stdout}"
+    );
+    // That compiler does not exist here, so the build stops before bundling.
+    assert!(!output.status.success(), "{stdout}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn dev_starts_the_id_not_the_display_name() {
     let root = project("dev", MANIFEST);
     let triple = plugin_tools::host_triple().unwrap();
