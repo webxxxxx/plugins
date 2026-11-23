@@ -300,8 +300,7 @@ fn read_loop<P: Plugin>(context: &Context, pool: &runtime::Pool, plugin: &Arc<Mu
             continue;
         }
 
-        let mut notification = |_: &str, _: &Value| false;
-        match runtime::dispatch(&frame, context, pool, plugin, &mut notification) {
+        match runtime::dispatch(&frame, context, pool, plugin) {
             runtime::Action::Stop => return,
             runtime::Action::Continue => {}
         }

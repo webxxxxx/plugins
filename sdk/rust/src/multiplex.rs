@@ -10,9 +10,10 @@
 //!
 //! Stream 0 is the JSON-RPC channel — the same `svcd.ping`, `svcd.status`,
 //! `svcd.shutdown`, `tools/call` and `notifications/*` the protocol-1 loop
-//! serves, with the outer length as the framing. Streams >= 1 are opaque bytes:
-//! the host pairs each one with a `/raw` WebSocket subscriber, so a plugin can
-//! answer calls, push to the UI and stream binary data from one process (#265).
+//! serves, with the outer length as the framing. Raw data streams
+//! (`1 ..= CONTROL_STREAM - 1`) are opaque bytes: the host pairs each one with
+//! a `/raw` WebSocket subscriber, so a plugin can answer calls, push to the UI
+//! and stream binary data from one process (#265).
 //!
 //! What this module guarantees:
 //!
@@ -36,13 +37,13 @@
 //! stall every stream-0 call. The host drops a slow subscriber's frames the
 //! same way; nothing is corrupted, but the bytes are gone.
 //!
-//! Stream lifetime is the one place where this SDK is ahead of the host: the
-//! landed protocol-3 contract has no control frame, so a closed subscriber is
-//! invisible to the plugin and frames written to it are dropped by the host.
-//! The runtime therefore reserves the notification pair
-//! [`STREAM_CLOSED`] (host → plugin: [`RawPlugin::raw_closed`]) and
-//! [`STREAM_CLOSE`] (plugin → host: [`Streams::close`]) and treats both as best
-//! effort until the host implements them.
+//! Stream lifetime is carried by the control stream ([`CONTROL_STREAM`], host
+//! #266): its payload is a small JSON object, today only
+//! `{"op":"close","stream":N}`. The host sends one when a `/raw` subscriber
+//! leaves (and when the plugin writes to a stream nobody reads); the plugin
+//! sends one through [`Streams::close`] to end the stream cleanly, which makes
+//! the host close that WebSocket with 1000. A close is idempotent in both
+//! directions.
 
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, VecDeque};
@@ -58,8 +59,13 @@ use crate::{Context, Exit, Plugin, STOP_BUDGET};
 
 /// Bytes in front of every payload: `u32 len | u32 stream_id`.
 pub const HEADER: usize = 8;
-/// Stream 0 is the JSON-RPC channel; everything at or above this is raw.
+/// Stream 0 is the JSON-RPC channel.
 pub const JSON_STREAM: u32 = 0;
+/// Reserved stream id for transport control frames (host `CONTROL_STREAM`);
+/// raw data streams are `1 ..= CONTROL_STREAM - 1`.
+pub const CONTROL_STREAM: u32 = u32::MAX;
+/// A control frame is one small JSON object; the host rejects anything larger.
+pub const CONTROL_FRAME_MAX: usize = 128;
 /// Largest stream-0 payload, matching the host's `CALL_FRAME_MAX`.
 pub const JSON_FRAME_MAX: usize = 1024 * 1024;
 /// Largest raw payload the host accepts by default (`ws_raw_max_bytes`).
@@ -70,10 +76,8 @@ pub const RAW_QUEUE_DEPTH: usize = 64;
 /// this numerous, so the bound is a safety net, not a backpressure signal.
 pub const JSON_QUEUE_DEPTH: usize = 256;
 
-/// Host → plugin: the subscriber on `stream` went away.
-pub const STREAM_CLOSED: &str = "svcd.stream.closed";
-/// Plugin → host: stop delivering `stream`; nothing more will be produced.
-pub const STREAM_CLOSE: &str = "svcd.stream.close";
+/// The only control op the host defines today.
+const CONTROL_OP_CLOSE: &str = "close";
 
 /// Per-stream payload limits. The host derives both from its own configuration;
 /// raise [`Limits::raw_frame_max`] only when the host's `ws_raw_max_bytes` was
@@ -98,6 +102,8 @@ impl Default for Limits {
 pub enum SendError {
     /// Stream 0 belongs to the runtime; push notifications with [`crate::emit`].
     StreamZero,
+    /// [`CONTROL_STREAM`] carries the transport's own frames, never raw data.
+    Reserved,
     /// The payload is above the limit for that stream. Nothing was written.
     TooLarge { len: usize, max: usize },
     /// The host is not draining fast enough. Retry later; do not block.
@@ -111,6 +117,9 @@ impl std::fmt::Display for SendError {
         match self {
             SendError::StreamZero => {
                 write!(formatter, "stream 0 is the JSON-RPC channel, not raw")
+            }
+            SendError::Reserved => {
+                write!(formatter, "stream {CONTROL_STREAM} is the control stream")
             }
             SendError::TooLarge { len, max } => {
                 write!(
@@ -142,6 +151,9 @@ impl Streams {
         if stream == JSON_STREAM {
             return Err(SendError::StreamZero);
         }
+        if stream == CONTROL_STREAM {
+            return Err(SendError::Reserved);
+        }
         let payload = payload.as_ref();
         if payload.len() > self.limits.raw_frame_max {
             return Err(SendError::TooLarge {
@@ -159,26 +171,24 @@ impl Streams {
         self.json(&value.to_string())
     }
 
-    /// Tell the host this stream is done, and refuse further frames on it.
+    /// Tell the host this stream is done: it closes that `/raw` WebSocket with
+    /// 1000, drops the subscription and releases its budget. The local stream
+    /// refuses further frames from here on.
     ///
     /// The close is queued behind the frames already accepted for this stream,
-    /// so the host sees the burst and only then the notification. The
-    /// notification itself is best effort: the host does not implement
-    /// [`STREAM_CLOSE`] yet, but the local stream is closed either way.
+    /// so the host sees the burst and only then the close.
     pub fn close(&self, stream: u32) -> Result<(), SendError> {
         if stream == JSON_STREAM {
             return Err(SendError::StreamZero);
         }
-        let notice = json!({
-            "jsonrpc": "2.0",
-            "method": STREAM_CLOSE,
-            "params": { "stream": stream },
-        })
-        .to_string();
+        if stream == CONTROL_STREAM {
+            return Err(SendError::Reserved);
+        }
+        let control = json!({ "op": CONTROL_OP_CLOSE, "stream": stream }).to_string();
         // Queue first: a stream whose close could not be announced must not be
         // dead locally with nothing on the wire.
         self.queue
-            .push_close(stream, encode(JSON_STREAM, notice.as_bytes()))?;
+            .push_close(stream, encode(CONTROL_STREAM, control.as_bytes()))?;
         self.queue.mark_closed(stream);
         Ok(())
     }
@@ -208,12 +218,12 @@ pub trait RawPlugin: Plugin {
     /// status, shutdown or `tools/call`.
     fn raw(&mut self, stream: u32, payload: &[u8], out: &Streams);
 
-    /// The host said the subscriber on `stream` went away.
+    /// The host closed `stream`: the `/raw` subscriber left, or the plugin
+    /// wrote to a stream nobody reads any more. Further [`Streams::send`]
+    /// calls for that stream answer [`SendError::Closed`].
     ///
-    /// Fires only when the host sends [`STREAM_CLOSED`]; the landed protocol-3
-    /// contract has no close frame, so today this is a reserved hook. Do not
-    /// make production depend on it — design producers so they stop on their own
-    /// (for example: produce a burst per request instead of pushing forever).
+    /// Runs on the raw thread, so it waits for a running capability like
+    /// [`RawPlugin::raw`] does.
     fn raw_closed(&mut self, _stream: u32) {}
 }
 
@@ -324,6 +334,8 @@ impl<P: RawPlugin> Session<'_, P> {
                         if self.handle_json(&payload) {
                             return;
                         }
+                    } else if stream == CONTROL_STREAM {
+                        self.handle_control(&payload);
                     } else if let Err(error) = self.raw.try_send(RawJob::Frame(stream, payload)) {
                         // Dropping is the only option that keeps the read loop
                         // free; the host drops a slow subscriber's frames the
@@ -346,7 +358,7 @@ impl<P: RawPlugin> Session<'_, P> {
                 Err(ReadError::TooLarge { stream, len, max }) => {
                     // The bytes were consumed, so the next frame is still aligned.
                     crate::log_error!(
-                        "raw stream {stream} frame dropped: {len} bytes, above the {max} byte limit"
+                        "stream {stream} frame dropped: {len} bytes, above the {max} byte limit"
                     );
                 }
             }
@@ -374,39 +386,45 @@ impl<P: RawPlugin> Session<'_, P> {
             return true;
         }
 
-        let mut on_notification = |method: &str, params: &Value| -> bool {
-            if method != STREAM_CLOSED {
-                return false;
-            }
-            if let Some(stream) = stream_param(params) {
-                self.streams.host_closed(stream);
-                if let Err(error) = self.raw.try_send(RawJob::Closed(stream)) {
-                    crate::log_error!(
-                        "stream {stream} closed by the host, but the raw thread is busy: {error}"
-                    );
-                }
-            }
-            true
-        };
-
-        match crate::runtime::dispatch(
-            &frame,
-            self.context,
-            self.pool,
-            self.plugin,
-            &mut on_notification,
-        ) {
+        match crate::runtime::dispatch(&frame, self.context, self.pool, self.plugin) {
             Action::Stop => true,
             Action::Continue => false,
         }
     }
+
+    /// One control frame from the host: today only
+    /// `{"op":"close","stream":N}`. Anything else is logged and ignored.
+    fn handle_control(&self, payload: &[u8]) {
+        let Some(stream) = control_close(payload) else {
+            crate::log_error!(
+                "ignoring a control frame: {}",
+                String::from_utf8_lossy(payload)
+            );
+            return;
+        };
+        self.streams.host_closed(stream);
+        if let Err(error) = self.raw.try_send(RawJob::Closed(stream)) {
+            crate::log_error!(
+                "stream {stream} closed by the host, but the raw thread is busy: {error}"
+            );
+        }
+    }
 }
 
-fn stream_param(params: &Value) -> Option<u32> {
-    let stream = params.get("stream").and_then(Value::as_u64)?;
+/// Parse `{"op":"close","stream":N}`. A control frame that is not a close for a
+/// real data stream is not ours to act on.
+fn control_close(payload: &[u8]) -> Option<u32> {
+    if payload.len() > CONTROL_FRAME_MAX {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(payload).ok()?;
+    if value.get("op").and_then(Value::as_str)? != CONTROL_OP_CLOSE {
+        return None;
+    }
+    let stream = value.get("stream").and_then(Value::as_u64)?;
     u32::try_from(stream)
         .ok()
-        .filter(|stream| *stream != JSON_STREAM)
+        .filter(|stream| *stream > JSON_STREAM && *stream < CONTROL_STREAM)
 }
 
 fn raw_loop<P: RawPlugin>(plugin: Arc<Mutex<P>>, receiver: Receiver<RawJob>, streams: Streams) {
@@ -617,10 +635,10 @@ impl<R: Read> Frames<R> {
         };
         let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let stream = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
-        let max = if stream == JSON_STREAM {
-            limits.json_frame_max
-        } else {
-            limits.raw_frame_max
+        let max = match stream {
+            JSON_STREAM => limits.json_frame_max,
+            CONTROL_STREAM => CONTROL_FRAME_MAX,
+            _ => limits.raw_frame_max,
         };
         if len > max {
             if stream != JSON_STREAM {
@@ -792,22 +810,24 @@ mod tests {
     }
 
     #[test]
-    fn closing_twice_keeps_one_notification() {
+    fn closing_twice_keeps_one_control_frame() {
         let streams = streams();
         streams.close(9).expect("close");
         streams.close(9).expect("close is idempotent");
-        let frame = streams.queue.pop().expect("one notification");
-        assert_eq!(&frame[4..8], &0u32.to_be_bytes());
-        assert!(
-            streams.queue.lock().raw.is_empty(),
-            "no second notification"
-        );
+        let frame = streams.queue.pop().expect("one control frame");
+        assert_eq!(&frame[4..8], &CONTROL_STREAM.to_be_bytes());
+        assert!(streams.queue.lock().raw.is_empty(), "no second frame");
     }
 
     #[test]
-    fn stream_zero_is_not_a_raw_target() {
+    fn the_transport_streams_are_not_raw_targets() {
         assert_eq!(streams().send(0, b"x"), Err(SendError::StreamZero));
         assert_eq!(streams().close(0), Err(SendError::StreamZero));
+        assert_eq!(
+            streams().send(CONTROL_STREAM, b"x"),
+            Err(SendError::Reserved)
+        );
+        assert_eq!(streams().close(CONTROL_STREAM), Err(SendError::Reserved));
     }
 
     #[test]
@@ -840,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_stream_sends_the_notification_and_refuses_more_frames() {
+    fn closing_a_stream_queues_a_control_frame_and_refuses_more_frames() {
         let streams = streams();
         streams.send(3, b"one").expect("before the close");
 
@@ -853,15 +873,14 @@ mod tests {
             &3u32.to_be_bytes(),
             "the raw frame kept its stream"
         );
-        let notice = streams.queue.pop().expect("the close notification");
+        let control = streams.queue.pop().expect("the control frame");
         assert_eq!(
-            &notice[4..8],
-            &0u32.to_be_bytes(),
-            "the notification is stream 0"
+            &control[4..8],
+            &CONTROL_STREAM.to_be_bytes(),
+            "the close travels on the control stream"
         );
-        let text = String::from_utf8(notice[HEADER..].to_vec()).expect("utf-8");
-        assert!(text.contains(STREAM_CLOSE), "{text}");
-        assert!(text.contains("\"stream\":3"), "{text}");
+        let text = String::from_utf8(control[HEADER..].to_vec()).expect("utf-8");
+        assert_eq!(text, r#"{"op":"close","stream":3}"#);
     }
 
     #[test]
@@ -872,10 +891,17 @@ mod tests {
     }
 
     #[test]
-    fn the_stream_parameter_is_a_raw_stream_only() {
-        assert_eq!(stream_param(&json!({ "stream": 4 })), Some(4));
-        assert_eq!(stream_param(&json!({ "stream": 0 })), None);
-        assert_eq!(stream_param(&json!({ "stream": "4" })), None);
-        assert_eq!(stream_param(&json!({})), None);
+    fn a_control_close_names_a_real_data_stream() {
+        assert_eq!(control_close(br#"{"op":"close","stream":4}"#), Some(4));
+        assert_eq!(control_close(br#"{"op":"close","stream":0}"#), None);
+        assert_eq!(
+            control_close(br#"{"op":"close","stream":4294967295}"#),
+            None
+        );
+        assert_eq!(control_close(br#"{"op":"nope","stream":1}"#), None);
+        assert_eq!(control_close(br#"{"op":"close"}"#), None);
+        assert_eq!(control_close(b"not json"), None);
+        let oversized = format!(r#"{{"op":"close","stream":1,"pad":"{}"}}"#, "x".repeat(200));
+        assert_eq!(control_close(oversized.as_bytes()), None);
     }
 }

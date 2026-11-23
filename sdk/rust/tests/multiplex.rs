@@ -12,7 +12,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
-use svcd_plugin::multiplex::{self, Limits, RawPlugin, SendError, Streams, STREAM_CLOSED};
+use svcd_plugin::multiplex::{self, Limits, RawPlugin, SendError, Streams, CONTROL_STREAM};
 use svcd_plugin::{Context, Plugin, ToolOutcome};
 
 /// One plugin process owns the sink, so tests in this binary run one at a time.
@@ -44,6 +44,17 @@ impl Plugin for Demo {
 
 impl RawPlugin for Demo {
     fn raw(&mut self, stream: u32, payload: &[u8], out: &Streams) {
+        if payload == b"close-me" {
+            svcd_plugin::emit(
+                "notifications/message",
+                json!({
+                    "type": "closed-by-plugin",
+                    "stream": stream,
+                    "ok": out.close(stream).is_ok(),
+                }),
+            );
+            return;
+        }
         let mut reply = b"echo:".to_vec();
         reply.extend_from_slice(payload);
         let sent = out.send(stream, reply);
@@ -243,19 +254,42 @@ fn a_slow_capability_does_not_hold_up_ping() {
 }
 
 #[test]
-fn a_host_close_notification_reaches_the_plugin() {
+fn a_control_close_from_the_host_reaches_the_plugin() {
     let _guard = serial();
     let mut host = Host::start();
 
-    host.send_json(&json!({
-        "jsonrpc": "2.0",
-        "method": STREAM_CLOSED,
-        "params": { "stream": 7 }
-    }));
+    host.send(CONTROL_STREAM, br#"{"op":"close","stream":7}"#);
 
     let notice = host.next_json();
     assert_eq!(notice["params"]["type"], json!("closed"));
     assert_eq!(notice["params"]["stream"], json!(7));
+
+    host.finish();
+}
+
+#[test]
+fn the_plugin_can_close_a_stream_on_the_control_stream() {
+    let _guard = serial();
+    let mut host = Host::start();
+
+    host.send(4, b"close-me");
+
+    let mut notice = None;
+    let mut control = None;
+    while notice.is_none() || control.is_none() {
+        let (stream, payload) = host.next();
+        if stream == CONTROL_STREAM {
+            control = Some(payload);
+        } else {
+            let value: Value = serde_json::from_slice(&payload).expect("json");
+            if value["params"]["type"] == json!("closed-by-plugin") {
+                notice = Some(value);
+            }
+        }
+    }
+    assert_eq!(notice.unwrap()["params"]["ok"], json!(true));
+    let control: Value = serde_json::from_slice(&control.unwrap()).expect("json");
+    assert_eq!(control, json!({ "op": "close", "stream": 4 }));
 
     host.finish();
 }

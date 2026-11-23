@@ -120,15 +120,13 @@ pub(crate) enum Action {
 /// Dispatch one stream-0 JSON-RPC message for either protocol.
 ///
 /// The method set, the reply shapes and the error codes are the contract: a
-/// plugin must hear the same answers whichever transport it speaks. The loops
-/// differ only in how a frame arrives and in what an unknown notification
-/// means, so that difference is the single hook.
+/// plugin must hear the same answers whichever transport it speaks, so both
+/// read loops call this one function.
 pub(crate) fn dispatch<P: Plugin>(
     frame: &Value,
     context: &Context,
     pool: &Pool,
     plugin: &Arc<Mutex<P>>,
-    notification: &mut dyn FnMut(&str, &Value) -> bool,
 ) -> Action {
     let id = frame.get("id").cloned().unwrap_or(Value::Null);
     let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
@@ -169,7 +167,7 @@ pub(crate) fn dispatch<P: Plugin>(
         }
         "" => {}
         other => {
-            if !notification(other, &params) && !id.is_null() {
+            if !id.is_null() {
                 reply_error(&id, -32601, &format!("method not found: {other}"));
             }
         }
