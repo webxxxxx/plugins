@@ -28,6 +28,11 @@
       <feComposite in2="shadowDiff" operator="in"/>
       <feComposite in2="SourceGraphic" operator="over"/>
     </filter>
+
+    <!-- 5. 文字投影：下面 text 引用的就是它 -->
+    <filter id="textShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="1.2" flood-color="#002299" flood-opacity="0.45" />
+    </filter>
   </defs>
 
   <!-- ==================== 1. 背景 ==================== -->
