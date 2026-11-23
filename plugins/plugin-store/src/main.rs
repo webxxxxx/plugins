@@ -532,7 +532,13 @@ impl PluginStore {
             None
         };
 
-        let release = match release::fetch_at(&self.api_base, repo, &|url| net::fetch_json(url)) {
+        // A read-only token lifts the anonymous 60/hour to 5000/hour; the ETag
+        // cache makes a repeated check a 304, which does not use the quota.
+        let token = net::github_token(&self.data_dir);
+        let data_dir = self.data_dir.as_path();
+        let release = match release::fetch_at(&self.api_base, repo, &|url| {
+            net::fetch_json(url, token.as_deref(), Some(data_dir))
+        }) {
             Ok(release) => release,
             Err(error) => return ToolOutcome::error(error),
         };
@@ -1202,7 +1208,10 @@ mod tests {
             ToolOutcome::Error(text) => assert!(text.contains("无法删除"), "{text}"),
             _ => panic!("expected an error result"),
         }
-        assert_eq!(store.state.lock().unwrap().job.as_ref().map(|job| job.id), Some(1));
+        assert_eq!(
+            store.state.lock().unwrap().job.as_ref().map(|job| job.id),
+            Some(1)
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

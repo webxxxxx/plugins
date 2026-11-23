@@ -14,7 +14,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
 pub(crate) const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
@@ -104,29 +104,172 @@ fn read_body(reader: impl Read, url: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|error| format!("{url}: not UTF-8: {error}"))
 }
 
+/// ETag + body of the last successful release lookup. GitHub answers a
+/// matching `If-None-Match` with 304, which does not count against the quota,
+/// so a repeated check costs nothing after the first one.
+const RELEASE_CACHE: &str = "release-cache.json";
+/// Optional read-only PAT. It lives next to `catalog.md` in the plugin data
+/// directory so a service install does not need a machine-wide environment
+/// variable; the `/api/v1` face never sees it.
+pub(crate) const TOKEN_FILE: &str = "github-token";
+const MAX_TOKEN_BYTES: u64 = 512;
+
+/// Read a read-only GitHub token: `GITHUB_TOKEN`, then `GH_TOKEN`, then
+/// `<data_dir>/github-token`. An authenticated request gets 5000 requests per
+/// hour instead of the anonymous 60, which is the difference between a shared
+/// NAT address working and not. The value is never logged.
+pub(crate) fn github_token(data_dir: &Path) -> Option<String> {
+    token_choice(
+        std::env::var("GITHUB_TOKEN").ok(),
+        std::env::var("GH_TOKEN").ok(),
+        data_dir,
+    )
+}
+
+fn token_choice(
+    primary: Option<String>,
+    secondary: Option<String>,
+    data_dir: &Path,
+) -> Option<String> {
+    primary
+        .as_deref()
+        .and_then(clean_token)
+        .or_else(|| secondary.as_deref().and_then(clean_token))
+        .or_else(|| {
+            let path = data_dir.join(TOKEN_FILE);
+            if fs::metadata(&path).ok()?.len() > MAX_TOKEN_BYTES {
+                return None;
+            }
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| clean_token(&text))
+        })
+}
+
+fn clean_token(value: &str) -> Option<String> {
+    let token = value.trim();
+    if token.is_empty()
+        || token.len() as u64 > MAX_TOKEN_BYTES
+        || token.chars().any(char::is_control)
+    {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+struct CachedRelease {
+    url: String,
+    etag: String,
+    body: String,
+}
+
+fn cache_file(data_dir: &Path) -> PathBuf {
+    data_dir.join(RELEASE_CACHE)
+}
+
+fn read_cache(path: &Path, url: &str) -> Option<CachedRelease> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let cached_url = value.get("url")?.as_str()?;
+    // The cache is only valid for the repository that produced it; `repo` is a
+    // call argument, so a second repository must not reuse this ETag.
+    if cached_url != url {
+        return None;
+    }
+    Some(CachedRelease {
+        url: cached_url.to_string(),
+        etag: value.get("etag")?.as_str()?.to_string(),
+        body: value.get("body")?.as_str()?.to_string(),
+    })
+}
+
+fn write_cache(path: &Path, cached: &CachedRelease) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let value = json!({
+        "url": cached.url,
+        "etag": cached.etag,
+        "body": cached.body,
+    });
+    let Ok(text) = serde_json::to_string(&value) else {
+        return;
+    };
+    if fs::write(&temporary, text).is_ok() && fs::rename(&temporary, path).is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+}
+
 /// Fetch one JSON document (the GitHub API) as text. Same DoH fallback as
 /// [`fetch_text`], but a rate-limit or a missing repo is reported as itself
 /// instead of being retried against another resolver.
-pub fn fetch_json(url: &str) -> Result<String, String> {
+///
+/// With `data_dir` the last body and its ETag are reused through
+/// `If-None-Match`; with `auth` the request is authenticated. A 304 is not a
+/// failure and does not consume quota.
+pub(crate) fn fetch_json(
+    url: &str,
+    auth: Option<&str>,
+    data_dir: Option<&Path>,
+) -> Result<String, String> {
+    let cache = data_dir.map(cache_file);
+    let cached = cache.as_deref().and_then(|path| read_cache(path, url));
+    let etag = cached.as_ref().map(|cached| cached.etag.as_str());
+
     let direct = agent();
-    match json_from(&direct, url) {
-        Ok(body) => Ok(body),
+    let outcome = match json_from(&direct, url, auth, etag) {
+        Ok(reply) => Ok(reply),
         // A 403/404 is an answer, not a broken resolver: retrying it through
         // DoH would burn another request without changing anything.
         Err(JsonFailure::Status(message)) => Err(message),
-        Err(JsonFailure::Transport(first)) => {
-            if let Some(agent) = agent_with_doh(&unique_hosts(&[url])) {
-                match json_from(&agent, url) {
-                    Ok(body) => return Ok(body),
-                    Err(JsonFailure::Status(message)) => return Err(message),
-                    Err(JsonFailure::Transport(second)) => {
-                        return Err(format!("{first}；{second}"))
-                    }
-                }
+        Err(JsonFailure::Transport(first)) => match agent_with_doh(&unique_hosts(&[url])) {
+            Some(agent) => match json_from(&agent, url, auth, etag) {
+                Ok(reply) => Ok(reply),
+                Err(JsonFailure::Status(message)) => Err(message),
+                Err(JsonFailure::Transport(second)) => Err(format!("{first}；{second}")),
+            },
+            None => Err(first),
+        },
+    };
+
+    match outcome {
+        Ok(JsonReply::NotModified) => match cached {
+            Some(cached) => Ok(cached.body),
+            None => Err("GitHub 返回 304，但本地没有缓存".into()),
+        },
+        Ok(JsonReply::Body { body, etag }) => {
+            if let (Some(path), Some(etag)) = (cache.as_deref(), etag) {
+                write_cache(
+                    path,
+                    &CachedRelease {
+                        url: url.to_string(),
+                        etag,
+                        body: body.clone(),
+                    },
+                );
             }
-            Err(first)
+            Ok(body)
         }
+        Err(message) => Err(token_hint(message, auth, data_dir)),
     }
+}
+
+/// Append the one action that fixes the anonymous quota, so the console error
+/// says where the token goes instead of only asking the user to wait.
+fn token_hint(message: String, auth: Option<&str>, data_dir: Option<&Path>) -> String {
+    if auth.is_some() || !message.contains("限流") {
+        return message;
+    }
+    let location = data_dir
+        .map(|dir| dir.join(TOKEN_FILE).display().to_string())
+        .unwrap_or_else(|| TOKEN_FILE.to_string());
+    format!(
+        "{message}；把只读 GitHub token 写到 {location}（或设置 GITHUB_TOKEN）可把配额提到 5000 次/小时"
+    )
 }
 
 enum JsonFailure {
@@ -134,12 +277,28 @@ enum JsonFailure {
     Transport(String),
 }
 
-fn json_from(agent: &ureq::Agent, url: &str) -> Result<String, JsonFailure> {
-    let response = match agent
+enum JsonReply {
+    Body { body: String, etag: Option<String> },
+    NotModified,
+}
+
+fn json_from(
+    agent: &ureq::Agent,
+    url: &str,
+    auth: Option<&str>,
+    etag: Option<&str>,
+) -> Result<JsonReply, JsonFailure> {
+    let mut request = agent
         .get(url)
         .set("Accept", "application/vnd.github+json")
-        .call()
-    {
+        .set("X-GitHub-Api-Version", "2022-11-28");
+    if let Some(token) = auth {
+        request = request.set("Authorization", &format!("Bearer {token}"));
+    }
+    if let Some(etag) = etag {
+        request = request.set("If-None-Match", etag);
+    }
+    let response = match request.call() {
         Ok(response) => response,
         Err(ureq::Error::Status(status, response)) => {
             let remaining = response.header("x-ratelimit-remaining").map(str::to_string);
@@ -160,13 +319,19 @@ fn json_from(agent: &ureq::Agent, url: &str) -> Result<String, JsonFailure> {
                 message.as_deref(),
                 remaining.as_deref(),
                 reset.as_deref(),
+                auth.is_some(),
             )));
         }
         Err(ureq::Error::Transport(error)) => {
             return Err(JsonFailure::Transport(format!("{url}: {error}")))
         }
     };
-    read_body(response.into_reader(), url).map_err(JsonFailure::Transport)
+    if response.status() == 304 {
+        return Ok(JsonReply::NotModified);
+    }
+    let etag = response.header("etag").map(str::to_string);
+    let body = read_body(response.into_reader(), url).map_err(JsonFailure::Transport)?;
+    Ok(JsonReply::Body { body, etag })
 }
 
 fn github_http_error(
@@ -174,6 +339,7 @@ fn github_http_error(
     message: Option<&str>,
     remaining: Option<&str>,
     reset: Option<&str>,
+    authenticated: bool,
 ) -> String {
     let message = message
         .map(str::trim)
@@ -191,10 +357,18 @@ fn github_http_error(
         if let Some(reset) = reset.map(str::trim).filter(|value| !value.is_empty()) {
             text.push_str(&format!("；配额重置于 {reset}（Unix 时间）"));
         }
-        text.push_str("；GitHub 匿名请求每小时 60 次，稍后重试或换出口 IP 即可");
+        if authenticated {
+            text.push_str("；GitHub 认证请求每小时 5000 次，稍后重试或换出口 IP 即可");
+        } else {
+            text.push_str("；GitHub 匿名请求每小时 60 次，稍后重试或换出口 IP 即可");
+        }
         text
     } else if status == 404 {
         format!("GitHub API 返回 404：仓库或 release 不存在（{message}）")
+    } else if status == 401 {
+        format!(
+            "GitHub token 无效或被吊销（HTTP 401）：{message}；检查 GITHUB_TOKEN / GH_TOKEN 或插件数据目录里的 github-token"
+        )
     } else if status == 403 {
         format!("GitHub API 拒绝访问（HTTP 403）：{message}")
     } else {
@@ -624,18 +798,31 @@ mod tests {
             Some("API rate limit exceeded for 1.2.3.4."),
             Some("0"),
             Some("1763800000"),
+            false,
         );
         assert!(limited.contains("限流"), "{limited}");
         assert!(limited.contains("API rate limit exceeded"), "{limited}");
         assert!(limited.contains("1763800000"), "{limited}");
+        assert!(limited.contains("匿名请求每小时 60 次"), "{limited}");
 
-        let missing = github_http_error(404, Some("Not Found"), None, None);
+        // The same headers with a token in place say the 5000/hour budget is
+        // the one that ran out, so the hint does not tell the user to add one.
+        let authed = github_http_error(
+            403,
+            Some("API rate limit exceeded"),
+            Some("0"),
+            Some("1763800000"),
+            true,
+        );
+        assert!(authed.contains("认证请求每小时 5000 次"), "{authed}");
+
+        let missing = github_http_error(404, Some("Not Found"), None, None, false);
         assert!(missing.contains("404"), "{missing}");
         assert!(missing.contains("Not Found"), "{missing}");
 
         // A plain refusal is not a rate limit, even though GitHub uses 403 for
         // both.
-        let forbidden = github_http_error(403, Some("Forbidden"), None, Some("1763800000"));
+        let forbidden = github_http_error(403, Some("Forbidden"), None, Some("1763800000"), false);
         assert!(!forbidden.contains("限流"), "{forbidden}");
         assert!(forbidden.contains("拒绝访问"), "{forbidden}");
     }
@@ -677,15 +864,161 @@ mod tests {
             .unwrap();
         });
 
-        let error = fetch_json(&format!(
-            "http://{address}/repos/webxxxxx/plugin-manager/releases/latest"
-        ))
+        let error = fetch_json(
+            &format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest"),
+            None,
+            None,
+        )
         .unwrap_err();
 
         assert!(error.contains("限流"), "{error}");
         assert!(error.contains("API rate limit exceeded"), "{error}");
         assert!(error.contains("本小时剩余 0 次"), "{error}");
         assert!(error.contains("1763800000"), "{error}");
+        server.join().unwrap();
+    }
+
+    /// Read one request head from a test server connection.
+    fn request_head(stream: &mut std::net::TcpStream) -> String {
+        use std::io::Read as _;
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[test]
+    fn an_etag_turns_a_repeated_check_into_a_cached_304() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let head = request_head(&mut first).to_ascii_lowercase();
+            assert!(!head.contains("if-none-match"), "{head}");
+            let body = r#"{"tag_name":"v0.1.5"}"#;
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"rel-1\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+
+            let (mut second, _) = listener.accept().unwrap();
+            let head = request_head(&mut second).to_ascii_lowercase();
+            assert!(head.contains("if-none-match: \"rel-1\""), "{head}");
+            write!(
+                second,
+                "HTTP/1.1 304 Not Modified\r\nETag: \"rel-1\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+
+        let dir = std::env::temp_dir().join(format!("plugin-store-etag-{}", address.port()));
+        let _ = fs::remove_dir_all(&dir);
+        let url = format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest");
+        let first = fetch_json(&url, None, Some(&dir)).unwrap();
+        let second = fetch_json(&url, None, Some(&dir)).unwrap();
+        assert_eq!(first, second);
+        assert!(dir.join(RELEASE_CACHE).is_file());
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_configured_token_is_sent_as_a_bearer_header() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let head = request_head(&mut stream).to_ascii_lowercase();
+            assert!(head.contains("authorization: bearer read-only"), "{head}");
+            let body = r#"{"tag_name":"v0.1.5"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let url = format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest");
+        let body = fetch_json(&url, Some("read-only"), None).unwrap();
+        assert!(body.contains("v0.1.5"), "{body}");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_token_file_is_read_trimmed_and_never_beats_the_environment() {
+        let dir = std::env::temp_dir().join(format!("plugin-store-token-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(TOKEN_FILE), b"  file-token\n").unwrap();
+
+        assert_eq!(
+            token_choice(None, None, &dir).as_deref(),
+            Some("file-token")
+        );
+        assert_eq!(
+            token_choice(Some("env-token".into()), None, &dir).as_deref(),
+            Some("env-token")
+        );
+        assert_eq!(
+            token_choice(Some("   ".into()), Some("gh-token".into()), &dir).as_deref(),
+            Some("gh-token")
+        );
+        // A control character invalidates the value instead of reaching a header.
+        assert_eq!(
+            token_choice(Some("bad\nx".into()), None, &dir).as_deref(),
+            Some("file-token")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rate_limited_answer_points_at_the_token_file() {
+        use std::io::Write as _;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = r#"{"message":"API rate limit exceeded for 1.2.3.4."}"#;
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = request_head(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1795401688\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let dir = std::env::temp_dir().join(format!("plugin-store-limited-{}", address.port()));
+        let url = format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest");
+        let error = fetch_json(&url, None, Some(&dir)).unwrap_err();
+        assert!(error.contains("限流"), "{error}");
+        assert!(error.contains("github-token"), "{error}");
+        assert!(error.contains(dir.to_string_lossy().as_ref()), "{error}");
+        assert!(error.contains("5000"), "{error}");
         server.join().unwrap();
     }
 }
