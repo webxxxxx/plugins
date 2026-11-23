@@ -463,8 +463,10 @@ mod tests {
     #[test]
     #[ignore = "hits api.github.com; run by hand when the network is available"]
     fn finds_the_latest_stable_release_of_the_daemon() {
-        let release = fetch_at(API, DEFAULT_REPO, &|url| crate::net::fetch_json(url))
-            .expect("latest release");
+        let release = fetch_at(API, DEFAULT_REPO, &|url| {
+            crate::net::fetch_json(url, None, None)
+        })
+        .expect("latest release");
 
         let value = release_json(&release);
 

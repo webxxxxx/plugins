@@ -87,6 +87,13 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
 - 查询带 `User-Agent: plugin-store/<version>`，匿名配额 60 次/小时；403/429 只有在
   确实是限流（剩余 0、HTTP 429，或文案含 rate limit/abuse）时才报限流，否则报「拒绝访问」，
   都给出可读错误而不是裸 403。
+- 认证：每次查询先读 `GITHUB_TOKEN`、再读 `GH_TOKEN`，都没有就找插件数据目录下的
+  `github-token`（一行文本，建议 0600）。有 token 就带 `Authorization: Bearer …`，
+  配额从匿名 60 次/小时提到 5000 次/小时；token 只发给 `api.github.com`，不写日志。
+  401 明确报「token 无效或被吊销」，不会静默退回匿名。
+- 缓存：第一次成功查询把响应体与 `ETag` 写到 `<data_dir>/release-cache.json`（按 URL 区分），
+  之后带 `If-None-Match`；GitHub 的 304 不计入配额，所以日常「检查更新」只有版本变化那次
+  真正消耗一次请求。`download: true` 不读缓存，永远取最新字节。
 - 下载复用直连 + DoH 回退与代理，但**不走** `PLUGIN_STORE_MIRROR`：镜像可以决定插件包，
   不能决定 svcd 本体的字节。版本不缓存，每次升级都重新查、重新下；失败时清掉 `.part`。
 - 不做签名；校验链由宿主用 `SHA256SUMS` 的 sha256 完成，插件只负责把字节交回。
@@ -101,6 +108,10 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   用本地 HTTP 假 transport 覆盖：下载文件与响应体逐字节一致，`.part` 已清理，路径在
   `incoming/` 下；不依赖外网。限流响应另有一条本地假 403 用例，直接驱动 `net::fetch_json`
   验证 `x-ratelimit-*` 头与可读文案。
+- 认证与缓存：`an_etag_turns_a_repeated_check_into_a_cached_304`、
+  `a_configured_token_is_sent_as_a_bearer_header`、`a_token_file_is_read_trimmed_and_never_beats_the_environment`
+  与 `a_rate_limited_answer_points_at_the_token_file` 都用本地 TCP 假服务器覆盖，
+  断言实际发出的 `If-None-Match` / `Authorization` 头与落到错误文案里的 token 路径。
 - 构建：`plugin-tools build --platform x86_64-pc-windows-msvc` 产出
   `dist/plugin-store-<version>-x86_64-pc-windows-msvc.spk`（未签名本地包），`plugin verify`
   返回 `ok: true`、`signature.state: "missing"`；发布包需在发布流程里用发布钥签名。
