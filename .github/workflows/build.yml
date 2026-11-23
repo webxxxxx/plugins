@@ -65,13 +65,17 @@ jobs:
     needs: host
     strategy:
       fail-fast: false
-      # Native builds on the runner's own triple; cross-compiling would need a
-      # toolchain the templates deliberately do not assume. The C sample stays on
-      # Linux because a Windows runner has no supported C toolchain of its own.
+      # Native builds on the runner's own triple plus the musl cross targets the
+      # samples declare, which is what `tools/cross/install.sh` installs. The C
+      # sample stays on Linux because a Windows runner has no supported C
+      # toolchain of its own.
       matrix:
         include:
           - { os: ubuntu-24.04, sample: hello-rust, platform: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, sample: hello-rust, platform: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04, sample: hello-rust, platform: aarch64-unknown-linux-musl }
           - { os: ubuntu-24.04, sample: hello-c, platform: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04, sample: hello-c, platform: x86_64-unknown-linux-musl }
           - { os: ubuntu-24.04, sample: hello-shell, platform: x86_64-unknown-linux-gnu }
           - { os: windows-2025, sample: hello-rust, platform: x86_64-pc-windows-msvc }
           - { os: windows-2025, sample: hello-shell, platform: x86_64-pc-windows-msvc }
@@ -92,12 +96,18 @@ jobs:
           if [ -f bin/plugin ]; then chmod +x bin/plugin; fi
           ls -l bin
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tools/cli -> target
           key: tools-${{ matrix.os }}
       - name: Build plugin-tools
         run: cargo build --locked --release --manifest-path tools/cli/Cargo.toml
+      - name: Install the musl cross toolchain
+        if: contains(matrix.platform, 'musl')
+        shell: bash
+        run: sh tools/cross/install.sh "${{ matrix.platform }}"
       - name: Package the sample
         shell: bash
         env:

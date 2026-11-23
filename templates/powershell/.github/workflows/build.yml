@@ -49,6 +49,12 @@ jobs:
           # The crate lives in tools/cli; cargo install --git does not look in subdirectories.
           git clone --depth 1 https://github.com/webxxxxx/plugins "$RUNNER_TEMP/plugins"
           cargo install --locked --path "$RUNNER_TEMP/plugins/tools/cli"
+      - name: Install the musl cross toolchain
+        if: contains(matrix.platform, 'musl')
+        shell: bash
+        # 同一份脚本仓库里也用：下 musl.cc 的包（带镜像回退），把链接器写进
+        # $GITHUB_ENV / $GITHUB_PATH，后面的 cargo / gcc 直接吃到。
+        run: sh "$RUNNER_TEMP/plugins/tools/cross/install.sh" "${{ matrix.platform }}"
       - name: Install the host plugin CLI
         shell: bash
         # plugin-tools 只编排，真正打包的是宿主的 `plugin bundle`。
