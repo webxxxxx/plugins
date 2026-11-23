@@ -128,6 +128,7 @@ GitHub secret 和这个公钥文件。
 ```
 <插件>-<版本>-<平台>[-<设备>].spk   当前版本的包
 plugin-tools-<版本>-<目标>.tar.gz   当前版本的工具链（仅全量发布）
+svcd-<版本>-<目标>.zip|tar.gz       守护进程本体（从 plugin-manager 的最新稳定版镜像）
 signing.pub, release-key.pub        发布公钥
 SHA256SUMS                          本次发布这些文件的校验和
 index.json                          导航文件：根目录每个包的版本、大小、sha256、下载地址
@@ -155,15 +156,20 @@ history/<版本>/<文件名>              被本版替换掉的旧文件
 | --- | --- | --- |
 | `packages[]` | `.spk`：`plugin` `version` `platform` `device` `file` `size` `sha256` `url` `released` | 每次发布 |
 | `tools[]` | `plugin-tools` 工具链归档：`version` `target` `file` `size` `sha256` `url` `released` | 只有全量发布（`v*` tag） |
+| `svcd[]` | 守护进程归档：`version` `target` `file` `size` `sha256` `url` | 每次发布都尽力镜像 `plugin-manager` 的最新稳定版 |
 | `keys[]` | 根目录的发布公钥（`signing.pub`、兼容别名 `release-key.pub`） | 每次发布 |
 
-**`svcd` 本体（plugin-manager 的 release）故意不在这里**。它是另一个仓库的产物，而且 `release_asset` 的校验链是"同一份 release 里的 `SHA256SUMS` 验归档"——镜像同时拿到字节和哈希，就等于让镜像决定守护进程跑哪一版；`plugin-store` 的自升级路径因此连 `PLUGIN_STORE_MIRROR` 都不走。要让它也走七牛，得先给 svcd 的 release 加签名、并由宿主按签名校验（而不是信任同一来源的哈希），那是另一个决定。
+`svcd[]` 的字节由 CI 从 `webxxxxx/plugin-manager` 的最新**稳定** release 拉下来，和插件包放在同一个根目录，`svcd_sums_url` 指向根目录的 `SHA256SUMS`（那份清单覆盖根目录所有已知哈希的文件），所以宿主拿到的 `sumsAsset` 和校验方式跟走 GitHub 时一模一样。
+
+这里要认清代价：宿主用**同一份** `SHA256SUMS` 验归档，镜像同时拿到字节和哈希，就等于镜像可以决定守护进程跑哪一版（它不能伪造字节，因为改不了哈希，但可以让升级停在旧版本、或提供一份自洽的旧版）。要彻底解决只能给 svcd 的 release 加签名、由宿主按签名校验；在那之前，把 `catalog_source` 留在 `github` 就是"不信任镜像选版本"的开关。
 
 导航文件可直接取：
 
 ```bash
 curl -fsS https://<QINIU_DOMAIN>/index.json | jq -r '.packages[] | "\(.plugin) \(.version) \(.platform) \(.url)"'
 ```
+
+七牛边缘默认把对象缓存一年（响应头 `Cache-Control: public, max-age=31536000`），所以同步脚本写完 `index.json` 会顺带刷新 `index.json` 与 `SHA256SUMS` 两条 CDN 缓存。不刷新的话，商店读到的还是上一次发布的索引——而商店的「不比手里这份旧」规则会让它**静默回落 GitHub**，现象就是"配了 qiniu，列表还是从 GitHub 来的"。刷新失败脚本只打 warning（不影响 release），这时去控制台「CDN → 刷新缓存」手动推一次即可；免费额度按条算，每次发布两条。
 
 注意 `base_url` 的协议要和商店里填的 `qiniu_base` 一致：索引是 `http://` 而配置写 `https://`，商店会按"https 列表不许指向 http 包"整份拒掉。
 

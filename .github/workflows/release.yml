@@ -626,6 +626,33 @@ jobs:
             if [ -f "docs/$name" ]; then cp "docs/$name" dist/; fi
           done
           ls -1 dist
+      - name: Fetch the daemon release to mirror
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # svcd is built in another repository. The mirror still has to carry
+          # it, so its newest stable archives are pulled next to the packages
+          # and the sync script places them at the root.
+          repo="webxxxxx/plugin-manager"
+          # `release view` returns the newest release even when it is a
+          # prerelease; list with the prereleases excluded instead, so an rc
+          # never replaces the stable daemon on the mirror.
+          tag=$(gh release list --repo "$repo" --exclude-pre-releases --limit 1 \
+                  --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          if [ -z "$tag" ]; then
+            echo "::warning::no stable release in $repo; the index keeps the svcd entries the bucket already has"
+            exit 0
+          fi
+          mkdir -p svcd
+          if ! gh release download "$tag" --repo "$repo" --pattern 'svcd-*' --dir svcd --clobber; then
+            echo "::warning::$repo $tag has no svcd archives to mirror"
+            exit 0
+          fi
+          cp svcd/* dist/
+          echo "mirroring svcd $tag"
+          ls -1 svcd
       - name: Install the Qiniu SDK
         run: |
           set -euo pipefail

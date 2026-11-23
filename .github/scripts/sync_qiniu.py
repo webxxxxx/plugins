@@ -58,6 +58,13 @@ TOOLS_RE = re.compile(
     r"\.(?:tar\.gz|zip)$"
 )
 
+SVCD_RE = re.compile(
+    r"^svcd-(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)-"
+    r"(?P<target>(?:x86_64|aarch64|armv7|i686|universal2)-"
+    r"(?:unknown-linux-(?:gnu|musl(?:eabihf)?)|apple-darwin|pc-windows-(?:msvc|gnu)))"
+    r"\.(?:zip|tar\.gz)$"
+)
+
 MIME_TYPES = {
     ".spk": "application/octet-stream",
     ".pub": "text/plain; charset=utf-8",
@@ -88,6 +95,9 @@ def identity(key: str) -> tuple[str, ...] | None:
     tools = TOOLS_RE.match(key)
     if tools is not None:
         return ("tools", tools.group("target"))
+    svcd = SVCD_RE.match(key)
+    if svcd is not None:
+        return ("svcd", svcd.group("target"))
     return None
 
 
@@ -159,7 +169,10 @@ def parse_version(key: str) -> str:
     if package is not None:
         return package["version"]
     tools = TOOLS_RE.match(key)
-    return tools.group("version") if tools else "0.0.0"
+    if tools is not None:
+        return tools.group("version")
+    svcd = SVCD_RE.match(key)
+    return svcd.group("version") if svcd is not None else "0.0.0"
 
 
 def history_key(key: str) -> str:
@@ -176,6 +189,7 @@ def render_index(
     base = domain.rstrip("/")
     packages: list[dict] = []
     tools: list[dict] = []
+    svcd: list[dict] = []
     keys: list[dict] = []
     for item in root_items:
         key = str(item.get("key") or "")
@@ -217,10 +231,25 @@ def render_index(
                 }
             )
             continue
+        daemon = SVCD_RE.match(key)
+        if daemon is not None:
+            svcd.append(
+                {
+                    "version": daemon.group("version"),
+                    "target": daemon.group("target"),
+                    "file": key,
+                    "size": size,
+                    "sha256": digest,
+                    "url": f"{base}/{key}",
+                    "released": released,
+                }
+            )
+            continue
         keys.append({"file": key, "size": size, "sha256": digest, "url": f"{base}/{key}"})
 
     packages.sort(key=lambda row: (row["plugin"], row["platform"], row["device"] or "", version_key(row["version"])))
     tools.sort(key=lambda row: (row["target"], version_key(row["version"])))
+    svcd.sort(key=lambda row: row["target"])
     keys.sort(key=lambda row: row["file"])
     document = {
         "schema": 1,
@@ -231,6 +260,11 @@ def render_index(
         "sums_url": f"{base}/{SUMS_KEY}",
         "packages": packages,
         "tools": tools,
+        "svcd": svcd,
+        # The root checksum list covers every file we know a hash for, so the
+        # host can verify an svcd archive with the same line format it already
+        # understands.
+        "svcd_sums_url": f"{base}/{SUMS_KEY}",
         "keys": keys,
     }
     return json.dumps(document, ensure_ascii=False, indent=2, sort_keys=False) + "\n"
@@ -281,7 +315,22 @@ def collect_uploads(directory: Path) -> list[dict]:
                 {"key": name, "path": path, "version": tools.group("version"), "target": tools.group("target"), "size": path.stat().st_size}
             )
             continue
-        print(f"skip {name}: not a package, toolchain archive or key", file=sys.stderr)
+        daemon = SVCD_RE.match(name)
+        if daemon is not None:
+            uploads.append(
+                {
+                    "key": name,
+                    "path": path,
+                    "version": daemon.group("version"),
+                    "target": daemon.group("target"),
+                    "size": path.stat().st_size,
+                }
+            )
+            continue
+        print(
+            f"skip {name}: not a package, toolchain archive, daemon archive or key",
+            file=sys.stderr,
+        )
     return prune_versions(uploads)
 
 
@@ -325,9 +374,26 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
-def render_sums(uploads: list[dict]) -> str:
-    lines = [f"{upload['sha256']}  {upload['key']}" for upload in sorted(uploads, key=lambda row: row["key"])]
-    return "\n".join(lines) + "\n"
+def render_sums(root_items: list[dict], digests: dict[str, dict]) -> str:
+    """Checksums for everything at the root we know the hash of.
+
+    The host looks a line up by exact file name, so this list has to cover the
+    files a release did not touch as well — `svcd-<version>-<target>.zip` is
+    downloaded and checked against it. A file whose hash we never learned is
+    left out instead of guessed.
+    """
+    lines: list[str] = []
+    for item in root_items:
+        key = str(item.get("key") or "")
+        if not is_root_key(key) or key == SUMS_KEY:
+            continue
+        known = digests.get(key)
+        if known is None:
+            continue
+        if int(known.get("size") or 0) != int(item.get("fsize") or 0):
+            continue
+        lines.append(f"{known['sha256']}  {key}")
+    return "\n".join(sorted(lines)) + "\n"
 
 
 def mime_type(key: str) -> str:
@@ -382,6 +448,21 @@ class Kodo:
         if not info.ok():
             raise SystemExit(f"upload {key} failed: HTTP {info.status_code} {ret}")
 
+    def refresh(self, urls: list[str]) -> str | None:
+        """Drop the CDN's copy of the two short-lived files.
+
+        Kodo's edge caches an object for a year by default (`Cache-Control:
+        max-age=31536000`), so a rewritten `index.json` would keep serving the
+        previous release's list until it expires — and the store, seeing an
+        older list than GitHub's, would silently fall back to GitHub. Returns an
+        error string when the refresh did not take.
+        """
+        manager = self.qiniu.CdnManager(self.auth)
+        _, info = manager.refresh_urls(urls)
+        if info.ok():
+            return None
+        return f"HTTP {info.status_code} {info.text_body[:200]}"
+
     def fetch(self, url: str) -> str | None:
         try:
             with urllib.request.urlopen(url, timeout=20) as response:
@@ -410,7 +491,7 @@ def load_index(path: Path) -> dict[str, dict]:
 
 def index_digests(document: dict) -> dict[str, dict]:
     digests: dict[str, dict] = {}
-    for section in ("packages", "tools", "keys"):
+    for section in ("packages", "tools", "svcd", "keys"):
         for row in document.get(section) or []:
             name = row.get("file")
             if name and row.get("sha256"):
@@ -443,7 +524,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"no artifacts found in {directory}")
     for upload in uploads:
         upload["sha256"] = sha256_of(upload["path"])
-    sums = render_sums(uploads)
 
     domain = (args.domain or "https://example.invalid").rstrip("/")
     if args.domain and not domain.startswith(("https://", "http://")):
@@ -496,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
         ]
         for upload in uploads:
             after.append({"key": upload["key"], "fsize": upload["size"], "putTime": 0})
+        print("--- SHA256SUMS ---")
+        sys.stdout.write(render_sums(after, digests))
         print("--- index.json ---")
         sys.stdout.write(render_index(after, domain, args.repo, digests))
         return 0
@@ -508,21 +590,40 @@ def main(argv: list[str] | None = None) -> int:
 
     with tempfile.TemporaryDirectory(prefix="qiniu-") as scratch:
         staged = Path(scratch)
+        # Re-list instead of reasoning about the moves: the checksum list and
+        # the index must describe the bucket, not this script's expectations.
+        root_items = kodo.list_root()
+
+        sums_text = render_sums(root_items, digests)
         sums_path = staged / SUMS_KEY
-        sums_path.write_text(sums, encoding="utf-8", newline="\n")
+        sums_path.write_text(sums_text, encoding="utf-8", newline="\n")
         kodo.upload(sums_path, SUMS_KEY)
         kodo.upload(sums_path, f"{HISTORY_PREFIX}{args.tag}/{SUMS_KEY}")
+        print(f"  uploaded {SUMS_KEY} ({len(sums_text.splitlines())} lines)")
 
-        # Re-list instead of reasoning about the moves: the index must describe
-        # the bucket, not this script's expectations.
-        root_items = kodo.list_root()
         index = render_index(root_items, domain, args.repo, digests)
         index_path = staged / INDEX_KEY
         index_path.write_text(index, encoding="utf-8", newline="\n")
         kodo.upload(index_path, INDEX_KEY)
 
+        # The edge cached the previous copy for a year; without this the list a
+        # client reads would still describe the last release.
+        for url in (f"{domain}/{INDEX_KEY}", f"{domain}/{SUMS_KEY}"):
+            problem = kodo.refresh([url])
+            if problem is None:
+                print(f"  refreshed {url}")
+            else:
+                print(
+                    f"warning: CDN refresh of {url} failed ({problem}); the edge may serve "
+                    "the previous copy until it expires — purge it in the console",
+                    file=sys.stderr,
+                )
+
     document = json.loads(index)
-    print(f"index: {len(document['packages'])} packages, {len(document['tools'])} toolchains")
+    print(
+        f"index: {len(document['packages'])} packages, "
+        f"{len(document['tools'])} toolchains, {len(document['svcd'])} daemon archives"
+    )
     print(f"done: {domain}/{INDEX_KEY}")
     return 0
 
