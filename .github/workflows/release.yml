@@ -590,3 +590,66 @@ jobs:
           else
             echo "::warning::jsDelivr purge failed; the mirror may serve a stale catalog until it expires"
           fi
+
+  # The mirror is a convenience, not the source of truth: the GitHub release is
+  # already published at this point, so a mirror that cannot be reached must
+  # not pretend the release failed. It still fails loudly when it talks to
+  # Qiniu and Qiniu refuses.
+  qiniu:
+    name: mirror to qiniu
+    needs: [publish, project]
+    if: |
+      !cancelled()
+      && needs.publish.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v5
+        with:
+          path: dist
+          pattern: spk-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v5
+        if: needs.project.result == 'success'
+        with:
+          path: dist
+          pattern: plugin-tools-*
+          merge-multiple: true
+      - name: Add the release public key
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The root of the bucket is the install surface, so the key that
+          # verifies every package there has to live next to them.
+          for name in signing.pub release-key.pub; do
+            if [ -f "docs/$name" ]; then cp "docs/$name" dist/; fi
+          done
+          ls -1 dist
+      - name: Install the Qiniu SDK
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 refuses `pip install` outside a venv (PEP 668), and a
+          # venv also keeps the release job from touching the system Python.
+          python3 -m venv "$RUNNER_TEMP/qiniu"
+          "$RUNNER_TEMP/qiniu/bin/pip" install --disable-pip-version-check --quiet qiniu==7.18.0
+      - name: Sync the root and the history
+        shell: bash
+        env:
+          QINIU_ACCESS_KEY: ${{ secrets.QINIU_ACCESS_KEY }}
+          QINIU_SECRET_KEY: ${{ secrets.QINIU_SECRET_KEY }}
+          QINIU_BUCKET: ${{ secrets.QINIU_BUCKET }}
+          QINIU_DOMAIN: ${{ secrets.QINIU_DOMAIN }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${QINIU_ACCESS_KEY:-}" ] || [ -z "${QINIU_SECRET_KEY:-}" ]; then
+            echo "::notice::QINIU_ACCESS_KEY / QINIU_SECRET_KEY are not configured; the mirror is skipped"
+            exit 0
+          fi
+          tag="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          if [ -z "$tag" ] || [ "$tag" = "main" ]; then
+            echo "::error::a release tag is required to place the history folder"
+            exit 1
+          fi
+          "$RUNNER_TEMP/qiniu/bin/python" .github/scripts/sync_qiniu.py --dir dist --tag "$tag"

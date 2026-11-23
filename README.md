@@ -102,6 +102,7 @@ tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代�
 - **签名**：`sign` job 只下载上一步的 package，在 `release` environment 里用 `secrets.PLUGIN_SIGNING_KEY` 重新 `plugin bundle --key` 并 `plugin verify`；构建脚本接触不到私钥；
 - **发布**：汇总已签名的 `.spk`、`plugin-tools` 归档和 `SHA256SUMS`，`gh release create/upload` 到同一个 Release；tag 的**版本部分**带 `-`（如 `v1.0.0-rc1`、`hysteria-v1.0.1-rc1`）自动标 prerelease，`hysteria-v1.0.1` 这类单插件稳定版不标；
 - **插件列表**：发布成功后 `update-plugin-list` job 重新生成 [docs/plugins.md](docs/plugins.md) 并提交到 `main`，只保留每个插件/平台的最新稳定版。
+- **七牛镜像**：GitHub Release 建好后再跑一个 job，把本版包推到七牛空间根目录，被本版替换掉的旧文件移到 `history/<版本>/`，然后按空间实际内容重写根目录的 `index.json`。没配 `QINIU_*` secret 时整步跳过，不影响发布。
 
 私钥只存在于 GitHub Actions Secret（建议放 `release` environment secret）和发布机，仓库里只有公钥。建议给 `release` environment 配 required reviewers；构建 job 不注入 secret，没有它时 PR 只做未签名构建，tag / 手动发布会在 `sign` job 直接失败，避免发出未签名包。
 
@@ -119,6 +120,61 @@ svc trust add docs/signing.pub
 
 私钥只保存在发布机上（`~/.svcd-release/release.pem`）和 GitHub Actions Secret，不要提交；轮换时同时更新
 GitHub secret 和这个公钥文件。
+
+### 七牛云镜像（可选）
+
+发布成功后 `.github/scripts/sync_qiniu.py` 把产物同步到一个七牛 Kodo 空间。空间根目录就是"新装用户该看到的东西"：
+
+```
+<插件>-<版本>-<平台>[-<设备>].spk   当前版本的包
+plugin-tools-<版本>-<目标>.tar.gz   当前版本的工具链（仅全量发布）
+signing.pub, release-key.pub        发布公钥
+SHA256SUMS                          本次发布这些文件的校验和
+index.json                          导航文件：根目录每个包的版本、大小、sha256、下载地址
+history/<版本>/<文件名>              被本版替换掉的旧文件
+```
+
+对象类型按内容给：`.spk` 存成 `application/octet-stream`、`index.json` 是 `application/json`、`SHA256SUMS` 是 `text/plain`——上传凭证带 `detectMime: -1`，否则七牛会把 `.spk` 按扩展名猜成 `application/x-tar`（`detectMime: 0` 时 `application/octet-stream` 会被刻意忽略，照样去侦测）。
+
+三条规则保证这个形状不会歪：根目录只放"该身份（插件/平台/设备，工具链是目标三元组）的最新版"；旧文件只有在本版带来**同一身份且不低于**的版本时才移进 `history/`，所以单个插件的发布会保留其它插件的当前包；`index.json` 是**按空间实际列表重算**的，不是按本地目录拼的，因此不会出现"索引里有、空间里没有"。
+
+需要的 secret（加在**仓库级** Actions secrets：Settings → Secrets and variables → Actions；
+不是 Variables（明文），也不是 `release` environment——那个只给 `sign` job）：
+
+两个访问密钥缺任一就跳过整步，其余两项缺了会直接报错，免得半套配置静默通过。
+
+| secret | 说明 |
+| --- | --- |
+| `QINIU_ACCESS_KEY` / `QINIU_SECRET_KEY` | 七牛账号密钥对（控制台「密钥管理」）。社区版是账号级权限，没有「只授权一个空间」的粒度：泄露等于整个账号可写，只放 secret 里，别落进配置或日志 |
+| `QINIU_BUCKET` | 空间名 |
+| `QINIU_DOMAIN` | 空间的公开访问域名，带 `http://` 或 `https://`，末尾不加斜杠；`http` 会在日志里警告 |
+
+导航文件可直接取：
+
+```bash
+curl -fsS https://<QINIU_DOMAIN>/index.json | jq -r '.packages[] | "\(.plugin) \(.version) \(.platform) \(.url)"'
+```
+
+本地预演不需要密钥，也不碰网络：
+
+```bash
+python3 .github/scripts/sync_qiniu.py --dir dist --tag v0.3.0 --dry-run --domain https://dl.example.com
+```
+
+它打印这次会上传什么、哪些旧文件会进 `history/`、以及重算出来的 `index.json`；加 `--listing <列表 JSON>` 可以拿一份真实的列举结果做输入。真跑（不带 `--dry-run`）需要七牛 SDK：`python3 -m pip install qiniu==7.18.0`，CI 里装在临时 venv 里，不碰系统 Python。
+
+第一次别直接上 CI，先拿一个测试桶把密钥、域名、公开读验一遍：
+
+```bash
+export QINIU_ACCESS_KEY=… QINIU_SECRET_KEY=… QINIU_BUCKET=… QINIU_DOMAIN=https://…
+python3 -m pip install qiniu==7.18.0
+python3 .github/scripts/sync_qiniu.py --dir dist --tag v0.0.0-test
+curl -fsS "$QINIU_DOMAIN/index.json" | jq -r '.packages[] | "\(.plugin) \(.version) \(.url)"'
+```
+
+期望输出三样：每个包一行 `uploaded …`、`index: N packages`、`done: <域名>/index.json`。把 `dist/` 里某个包复制成更高版本的名字再跑一次，就能看到 `history <旧文件> -> history/<版本>/<旧文件>`——这行出现，说明移动和归档都通了。
+
+代价要心里有数：七牛的免费额度是每月 10GB 标准存储，**外网流出流量按量计费**（约 0.26 元/GB），不是免费下载；`index.json` 只记录根目录的当前版本，历史包永远留在 `history/` 里，需要时自己清理。
 
 ### CI 平台覆盖
 
