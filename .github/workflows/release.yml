@@ -28,6 +28,10 @@ on:
         description: "Create or update a GitHub Release"
         type: boolean
         default: false
+      build_macos:
+        description: "Build macOS too? true/false; empty = the BUILD_MACOS repository variable"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -45,6 +49,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       filter: ${{ steps.scope.outputs.filter }}
       has_plugins: ${{ steps.matrix.outputs.has_plugins }}
+      macos: ${{ steps.targets.outputs.macos }}
+      hosts: ${{ steps.targets.outputs.hosts }}
+      tools: ${{ steps.targets.outputs.tools }}
     steps:
       - uses: actions/checkout@v7
       - id: scope
@@ -113,6 +120,36 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: targets
+        name: Decide which runners this release needs
+        shell: bash
+        env:
+          # 仓库变量（Settings -> Secrets and variables -> Actions -> Variables）：
+          # 不设或设成 true 就照旧构建 macOS，设成 false/0/no/off 跳过。
+          # workflow_dispatch 上的同名输入可以临时覆盖它。
+          BUILD_MACOS: ${{ vars.BUILD_MACOS }}
+          INPUT_BUILD_MACOS: ${{ github.event.inputs.build_macos }}
+        run: |
+          set -euo pipefail
+          flag="${INPUT_BUILD_MACOS:-${BUILD_MACOS:-}}"
+          macos=true
+          case "$(printf '%s' "$flag" | tr '[:upper:]' '[:lower:]')" in
+            false | 0 | no | off) macos=false ;;
+          esac
+
+          hosts='["ubuntu-24.04","windows-2025"]'
+          tools='{"include":[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","kind":"linux"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc","kind":"windows"}]}'
+          if [ "$macos" = true ]; then
+            hosts='["ubuntu-24.04","macos-15","windows-2025"]'
+            tools='{"include":[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","kind":"linux"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc","kind":"windows"},{"os":"macos-15","target":"universal2-apple-darwin","kind":"macos"}]}'
+          else
+            echo "::notice::BUILD_MACOS=$flag — 这次不跑 macos-15 runner，也不产出 *-apple-darwin 包"
+          fi
+
+          echo "macos=$macos" >> "$GITHUB_OUTPUT"
+          echo "hosts=$hosts" >> "$GITHUB_OUTPUT"
+          echo "tools=$tools" >> "$GITHUB_OUTPUT"
+
       - id: matrix
         name: Build the plugin/platform matrix
         shell: bash
@@ -120,6 +157,7 @@ jobs:
           FILTER: ${{ steps.scope.outputs.filter }}
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          MACOS: ${{ steps.targets.outputs.macos }}
         run: |
           set -euo pipefail
           changed=""
@@ -162,6 +200,9 @@ jobs:
                 *-windows-*)     os=windows-2025 ;;
                 *)               os=ubuntu-24.04 ;;
               esac
+              if [ "$os" = macos-15 ] && [ "$MACOS" != true ]; then
+                continue
+              fi
               entries=$(jq -c \
                 --arg plugin "$name" \
                 --arg dir "$plugin_dir" \
@@ -192,7 +233,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
+        os: ${{ fromJSON(needs.preflight.outputs.hosts) }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
@@ -232,11 +273,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, kind: linux }
-          - { os: windows-2025, target: x86_64-pc-windows-msvc, kind: windows }
-          - { os: macos-15, target: universal2-apple-darwin, kind: macos }
+      matrix: ${{ fromJSON(needs.preflight.outputs.tools) }}
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       TARGET: ${{ matrix.target }}

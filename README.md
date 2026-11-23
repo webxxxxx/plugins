@@ -108,6 +108,15 @@ git push origin hysteria-v1.0.1
 
 手动 `workflow_dispatch` 也可以选 `plugin=all` 或单个插件名（配合 `tag` 和 `release`）。
 
+### 关掉 macOS 构建
+
+`macos-15` 那两台 runner 经常排长队（`The job was not acquired by Runner of type hosted`），等 15 分钟就失败。可以关掉它：
+
+- **长期**：Settings → Secrets and variables → Actions → **Variables** 新建 `BUILD_MACOS`，值 `false`（也认 `0`/`no`/`off`）。不设或设 `true` 就是原来的行为。
+- **单次**：`gh workflow run release.yml -f tag=<tag> -f plugin=<名字|all> -f release=true -f build_macos=false`。
+
+关掉之后这次发布不跑 `host tools / macos-15`、不产出 `plugin-tools` 的 universal2 归档，也不产出各插件的 `*-apple-darwin` 包。旧包不会被删：`docs/plugins.md` 和七牛 `index.json` 会保留上一版的 mac 条目，只是版本停在上一版；七牛根目录上的旧 mac 文件也不会被挪进 `history/`，因为新版本没顶掉它们。
+
 每次发布：
 
 - **项目本身**：构建 `plugin-tools`，产出 Linux x86_64 gnu、Windows x86_64 msvc、macOS universal2 三份归档（仅全量发布）；
