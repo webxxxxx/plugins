@@ -149,11 +149,23 @@ history/<版本>/<文件名>              被本版替换掉的旧文件
 | `QINIU_BUCKET` | 空间名 |
 | `QINIU_DOMAIN` | 空间的公开访问域名，带 `http://` 或 `https://`，末尾不加斜杠；`http` 会在日志里警告 |
 
+`index.json` 的三个数组各管一段，别混：
+
+| 字段 | 内容 | 什么时候有 |
+| --- | --- | --- |
+| `packages[]` | `.spk`：`plugin` `version` `platform` `device` `file` `size` `sha256` `url` `released` | 每次发布 |
+| `tools[]` | `plugin-tools` 工具链归档：`version` `target` `file` `size` `sha256` `url` `released` | 只有全量发布（`v*` tag） |
+| `keys[]` | 根目录的发布公钥（`signing.pub`、兼容别名 `release-key.pub`） | 每次发布 |
+
+**`svcd` 本体（plugin-manager 的 release）故意不在这里**。它是另一个仓库的产物，而且 `release_asset` 的校验链是"同一份 release 里的 `SHA256SUMS` 验归档"——镜像同时拿到字节和哈希，就等于让镜像决定守护进程跑哪一版；`plugin-store` 的自升级路径因此连 `PLUGIN_STORE_MIRROR` 都不走。要让它也走七牛，得先给 svcd 的 release 加签名、并由宿主按签名校验（而不是信任同一来源的哈希），那是另一个决定。
+
 导航文件可直接取：
 
 ```bash
 curl -fsS https://<QINIU_DOMAIN>/index.json | jq -r '.packages[] | "\(.plugin) \(.version) \(.platform) \(.url)"'
 ```
+
+注意 `base_url` 的协议要和商店里填的 `qiniu_base` 一致：索引是 `http://` 而配置写 `https://`，商店会按"https 列表不许指向 http 包"整份拒掉。
 
 本地预演不需要密钥，也不碰网络：
 
