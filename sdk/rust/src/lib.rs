@@ -1,27 +1,36 @@
 //! The protocol shell for `.spk` plugins.
 //!
-//! The control channel is newline-delimited JSON-RPC 2.0 on stdin/stdout, with no
-//! handshake: the host sends `svcd.ping`, `svcd.status`, `svcd.shutdown` and
-//! `tools/call`, and expects MCP-shaped results back. Everything that contract
-//! demands lives here — framing and the 1 MiB cap, the readiness probe, the
-//! `tools/call` shape, out-of-order replies keyed by id, the cancellation token
-//! every background worker must observe, and keeping stdout exclusively for the
-//! protocol.
+//! Two transports ship here:
 //!
-//! A plugin author implements [`Plugin`] and nothing else.
+//! * [`serve`] speaks protocol 1: newline-delimited JSON-RPC 2.0 on
+//!   stdin/stdout, the shape every template and sample used before protocol 3.
+//! * [`multiplex::serve`] speaks protocol 3: `u32 len | u32 stream_id | payload`
+//!   frames, with stream 0 carrying the same JSON-RPC and streams >= 1 carrying
+//!   raw bytes. A protocol-3 plugin serves calls, notifications and `/raw` from
+//!   one pipe.
+//!
+//! Both share this page's contract: framing and the 1 MiB cap, the readiness
+//! probe, the `tools/call` shape, out-of-order replies keyed by id, the
+//! cancellation token every background worker must observe, and keeping stdout
+//! exclusively for the protocol.
+//!
+//! A plugin author implements [`Plugin`] (plus [`multiplex::RawPlugin`] when it
+//! speaks protocol 3) and nothing else.
 
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 pub mod blob;
 pub mod file;
+pub mod multiplex;
 pub mod transfer;
+
+mod runtime;
 
 pub use blob::{BlobArg, BlobWriter};
 pub use file::{file_argument, FileArg, PartReader};
@@ -243,79 +252,24 @@ pub trait Plugin: Send + 'static {
     }
 }
 
-struct Job {
-    id: Value,
-    name: String,
-    arguments: Value,
-}
-
-/// Serve the protocol until stdin closes or the host asks us to stop.
+/// Serve protocol 1 until stdin closes or the host asks us to stop.
 pub fn serve<P: Plugin>(context: Context, plugin: P) -> Exit {
     install_panic_hook();
-    let _ = WRITER.set(Mutex::new(io::stdout()));
+    install_sink(Sink::Lines(Mutex::new(io::stdout())));
 
     let plugin = Arc::new(Mutex::new(plugin));
-    // Queued *and* running calls. Waiting on this instead of "running" is what
-    // makes a shutdown drain the queue rather than drop the tail of it.
-    let pending = Arc::new(AtomicUsize::new(0));
-    let (sender, receiver) = mpsc::sync_channel::<Job>(QUEUE_DEPTH);
-    let receiver = Arc::new(Mutex::new(receiver));
+    let pool = runtime::Pool::new(Arc::clone(&plugin), context.id());
 
-    for index in 0..WORKER_THREADS {
-        let plugin = Arc::clone(&plugin);
-        let receiver = Arc::clone(&receiver);
-        let pending = Arc::clone(&pending);
-        let _ = thread::Builder::new()
-            .name(format!("{}-call-{}", context.id(), index))
-            .spawn(move || worker_loop(plugin, receiver, pending));
-    }
-
-    read_loop(&context, sender, &plugin, Arc::clone(&pending));
+    read_loop(&context, &pool, &plugin);
 
     // Stop accepting work, tell the workers, and give them the stop budget to
     // fold their loops and finish what was already accepted. The host kills the
     // process group after 10 s regardless.
     context.cancel().cancel();
-    let deadline = Instant::now() + STOP_BUDGET;
-    while pending.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
+    pool.drain(STOP_BUDGET);
 }
 
-fn worker_loop<P: Plugin>(
-    plugin: Arc<Mutex<P>>,
-    receiver: Arc<Mutex<Receiver<Job>>>,
-    pending: Arc<AtomicUsize>,
-) {
-    loop {
-        // The lock is held only while blocking in `recv`, so one worker waits
-        // while the others run — concurrency without a second queue type.
-        let job = {
-            let guard = match receiver.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.recv()
-        };
-        let Ok(job) = job else { return };
-        let outcome = {
-            let mut guard = match plugin.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            guard.call(&job.name, &job.arguments)
-        };
-        reply_result(&job.id, outcome.into_result());
-        pending.fetch_sub(1, Ordering::SeqCst);
-    }
-}
-
-fn read_loop<P: Plugin>(
-    context: &Context,
-    sender: SyncSender<Job>,
-    plugin: &Arc<Mutex<P>>,
-    pending: Arc<AtomicUsize>,
-) {
+fn read_loop<P: Plugin>(context: &Context, pool: &runtime::Pool, plugin: &Arc<Mutex<P>>) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let mut line = String::new();
@@ -346,62 +300,15 @@ fn read_loop<P: Plugin>(
             continue;
         }
 
-        let id = frame.get("id").cloned().unwrap_or(Value::Null);
-        let method = frame.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = frame.get("params").cloned().unwrap_or(Value::Null);
-
-        match method {
-            "svcd.ping" => reply_result(&id, json!({ "ok": true })),
-            "svcd.status" => {
-                let summary = status_text(plugin);
-                reply_result(&id, json!({ "summary": summary, "details": {} }));
-            }
-            "svcd.shutdown" => {
-                if !id.is_null() {
-                    reply_result(&id, Value::Null);
-                }
-                context.cancel().cancel();
-                return;
-            }
-            "tools/call" => {
-                let name = params
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string();
-                if !P::CAPABILITIES.contains(&name.as_str()) {
-                    reply_error(&id, -32602, &format!("unknown tool: {name}"));
-                    continue;
-                }
-                let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-                pending.fetch_add(1, Ordering::SeqCst);
-                match sender.try_send(Job {
-                    id,
-                    name,
-                    arguments,
-                }) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(job)) => {
-                        pending.fetch_sub(1, Ordering::SeqCst);
-                        reply_error(&job.id, -32603, "too many concurrent calls");
-                    }
-                    Err(TrySendError::Disconnected(_)) => {
-                        pending.fetch_sub(1, Ordering::SeqCst);
-                        return;
-                    }
-                }
-            }
-            "" => {}
-            other => {
-                if !id.is_null() {
-                    reply_error(&id, -32601, &format!("method not found: {other}"));
-                }
-            }
+        let mut notification = |_: &str, _: &Value| false;
+        match runtime::dispatch(&frame, context, pool, plugin, &mut notification) {
+            runtime::Action::Stop => return,
+            runtime::Action::Continue => {}
         }
     }
 }
 
-fn status_text<P: Plugin>(plugin: &Arc<Mutex<P>>) -> String {
+pub(crate) fn status_text<P: Plugin>(plugin: &Arc<Mutex<P>>) -> String {
     match plugin.try_lock() {
         Ok(guard) => guard.status().unwrap_or_else(|| "running".to_string()),
         // A capability holds the lock; never block the probe behind it.
@@ -422,7 +329,8 @@ pub fn emit(method: &str, params: Value) {
 /// template ships: the declared set must equal [`Plugin::CAPABILITIES`].
 pub fn declared_capabilities(path: impl AsRef<Path>) -> Result<Vec<String>, String> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|error| format!("{}: {}", path.display(), error))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|error| format!("{}: {}", path.display(), error))?;
     let manifest: Value =
         serde_json::from_str(&text).map_err(|error| format!("{}: {}", path.display(), error))?;
     let mut names = Vec::new();
@@ -436,7 +344,32 @@ pub fn declared_capabilities(path: impl AsRef<Path>) -> Result<Vec<String>, Stri
     Ok(names)
 }
 
-static WRITER: OnceLock<Mutex<io::Stdout>> = OnceLock::new();
+/// Where `emit` and every reply go. One sink per process: a plugin speaks one
+/// protocol, and the runtime that starts it installs the sink before reading.
+pub(crate) enum Sink {
+    /// Protocol 1: one JSON value per line on stdout.
+    Lines(Mutex<io::Stdout>),
+    /// Protocol 3: stream-0 frames through the multiplex writer.
+    Multiplex(multiplex::Streams),
+}
+
+static SINK: Mutex<Option<Arc<Sink>>> = Mutex::new(None);
+
+pub(crate) fn install_sink(sink: Sink) {
+    let mut slot = match SINK.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *slot = Some(Arc::new(sink));
+}
+
+fn sink() -> Option<Arc<Sink>> {
+    let slot = match SINK.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    slot.clone()
+}
 
 fn write_json(value: &Value) {
     let text = value.to_string();
@@ -444,19 +377,26 @@ fn write_json(value: &Value) {
         log_error!("refusing to write an invalid frame");
         return;
     }
-    let Some(writer) = WRITER.get() else {
+    let Some(sink) = sink() else {
         return;
     };
-    let mut out = match writer.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let _ = out.write_all(text.as_bytes());
-    let _ = out.write_all(b"\n");
-    let _ = out.flush();
+    match &*sink {
+        Sink::Lines(writer) => {
+            let mut out = match writer.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let _ = out.write_all(text.as_bytes());
+            let _ = out.write_all(b"\n");
+            let _ = out.flush();
+        }
+        Sink::Multiplex(streams) => {
+            let _ = streams.json(&text);
+        }
+    }
 }
 
-fn reply_result(id: &Value, result: Value) {
+pub(crate) fn reply_result(id: &Value, result: Value) {
     if id.is_null() {
         return;
     }
@@ -471,7 +411,7 @@ fn reply_error(id: &Value, code: i64, message: &str) {
     }));
 }
 
-fn install_panic_hook() {
+pub(crate) fn install_panic_hook() {
     // A panicking handler must not spew a backtrace onto stdout: that would
     // corrupt the channel and the host would see a protocol violation.
     let previous = std::panic::take_hook();
