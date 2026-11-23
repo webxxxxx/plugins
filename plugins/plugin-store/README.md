@@ -28,16 +28,17 @@
 列表地址按顺序尝试，取**第一个不比手里这份旧**的：
 
 1. https://raw.githubusercontent.com/webxxxxx/plugins/main/docs/plugins.md
-2. https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md
-3. https://fastly.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md
-4. https://gcore.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md
-5. https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md
+2. https://raw.githack.com/webxxxxx/plugins/main/docs/plugins.md
+3. https://cdn.statically.io/gh/webxxxxx/plugins/main/docs/plugins.md
+4. https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md
+5. https://fastly.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md
+6. https://gcore.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md
+7. https://github.com/webxxxxx/plugins/raw/refs/heads/main/docs/plugins.md
 
-raw 排第一：它给的就是分支当前内容，没有配额。后面三个 jsDelivr 域名是国内实际能通的
-那几个（同一份缓存后端）。jsDelivr 的分支地址按 `max-age=604800` 缓存一周 —— 曾经因此
-出现过「已安装 0.1.10、列表里却是 0.1.6」，所以发布流程在改完 `docs/plugins.md` 之后会
-调一次 `https://purge.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md` 把镜像清掉
-（实测清完 Age 归零、立刻读到新表）。
+raw 排第一：它给的就是分支当前内容，没有配额。2、3 是两个无状态的 raw 代理，GitHub 不通时
+它们通常还能用。jsDelivr 放在最后：它的分支地址按 `max-age=604800` 缓存一周，实测即便发布
+流程调了 `purge.jsdelivr.net` 清理，它仍可能继续发一周前的表（有时干脆 301 回 raw）——
+留着它只是「别的源全都不通时至少还有一份旧表」。
 
 插件侧还有两道保险：请求带 `Cache-Control` / `Pragma: no-cache`；抓回来的表如果每一行都
 不比手里这份新（`catalog::is_older`，按 `x.y.z` 数值比较），就跳过这个源去问下一个，

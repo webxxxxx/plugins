@@ -25,19 +25,23 @@ const PAGE_SIZE: usize = catalog::PAGE_SIZE;
 const REFRESH_AFTER: Duration = Duration::from_secs(6 * 60 * 60);
 /// Where the generated catalog is fetched from, in order.
 ///
-/// GitHub raw first: it serves the branch as it is, with no quota. The jsDelivr
-/// mirrors follow because they are the ones that answer from mainland China;
-/// their branch URLs are cached for a week (`max-age=604800`), which is why the
-/// release workflow purges them right after it rewrites `docs/plugins.md`
-/// (`https://purge.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md`).
-/// Even without that purge the catalog never walks backwards: a source whose
-/// rows are all older than what we already have is skipped, not installed.
+/// GitHub raw first: it serves the branch as it is, with no quota. Then two
+/// stateless raw proxies (`raw.githack.com`, `cdn.statically.io`) for networks
+/// where GitHub is blocked. jsDelivr sits last of the mirrors: its branch URLs
+/// are cached for a week (`max-age=604800`) and in practice it kept serving
+/// last week's table even after the release workflow purged it
+/// (`https://purge.jsdelivr.net/...`), sometimes as a 301 back to raw. It is
+/// still worth trying when nothing else answers, because a stale list is
+/// better than no list — `catalog::is_older` keeps it from overwriting a newer
+/// one.
 ///
 /// The GitHub REST API is deliberately not a source: it is the same network as
 /// raw (so it does not add reachability), it caps unauthenticated callers at 60
 /// requests an hour per IP, and the Markdown file is generated from it anyway.
 const CATALOG_URLS: &[&str] = &[
     "https://raw.githubusercontent.com/webxxxxx/plugins/main/docs/plugins.md",
+    "https://raw.githack.com/webxxxxx/plugins/main/docs/plugins.md",
+    "https://cdn.statically.io/gh/webxxxxx/plugins/main/docs/plugins.md",
     "https://cdn.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
     "https://fastly.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
     "https://gcore.jsdelivr.net/gh/webxxxxx/plugins@main/docs/plugins.md",
