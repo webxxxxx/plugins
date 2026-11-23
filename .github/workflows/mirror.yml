@@ -1,0 +1,116 @@
+name: mirror
+
+# svcd is built in another repository, so its releases never reach this workflow
+# on their own. This job polls the newest stable one and re-syncs the mirror;
+# `repository_dispatch` (type `svcd-released`) makes that instant when the other
+# repository is wired to send it.
+#
+# The release pipeline mirrors svcd too, so this job's usual answer is "already
+# current" and it exits without touching the bucket.
+
+on:
+  schedule:
+    # Every six hours. A daemon release is rare; six hours is the worst case a
+    # user on the mirror spends on a stale version.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+  repository_dispatch:
+    types: [svcd-released]
+
+permissions:
+  contents: read
+
+# The same group the release pipeline uses: both rewrite the bucket root, and
+# index.json is a read-modify-write, so they must not overlap.
+concurrency:
+  group: qiniu-mirror
+  cancel-in-progress: false
+
+jobs:
+  svcd:
+    name: mirror svcd
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Find the newest stable daemon release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          repo="webxxxxx/plugin-manager"
+          # `release view` returns the newest release even when it is a
+          # prerelease, so list with prereleases excluded.
+          tag=$(gh release list --repo "$repo" --exclude-pre-releases --limit 1 \
+                  --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "newest stable: ${tag:-none}"
+
+      - name: Compare with what the mirror already has
+        id: current
+        shell: bash
+        env:
+          DOMAIN: ${{ secrets.QINIU_DOMAIN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAG" ]; then
+            echo "::notice::$repo has no stable release yet; nothing to mirror"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="${TAG#v}"
+          mirrored=$(curl -fsS --max-time 30 "$DOMAIN/index.json" \
+                       | jq -r '.svcd[0].version // ""' 2>/dev/null || true)
+          echo "mirror=${mirrored:-none} target=$version"
+          if [ "$mirrored" = "$version" ]; then
+            echo "::notice::the mirror is already at svcd $version"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the daemon archives
+        if: steps.current.outputs.skip == 'false'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$TAG" --repo webxxxxx/plugin-manager \
+            --pattern 'svcd-*' --dir dist --clobber
+          ls -1 dist
+
+      - name: Install the Qiniu SDK
+        if: steps.current.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          # Ubuntu 24.04 refuses `pip install` outside a venv (PEP 668).
+          python3 -m venv "$RUNNER_TEMP/qiniu"
+          "$RUNNER_TEMP/qiniu/bin/pip" install --disable-pip-version-check --quiet qiniu==7.18.0
+
+      - name: Sync the root and the history
+        if: steps.current.outputs.skip == 'false'
+        shell: bash
+        env:
+          QINIU_ACCESS_KEY: ${{ secrets.QINIU_ACCESS_KEY }}
+          QINIU_SECRET_KEY: ${{ secrets.QINIU_SECRET_KEY }}
+          QINIU_BUCKET: ${{ secrets.QINIU_BUCKET }}
+          QINIU_DOMAIN: ${{ secrets.QINIU_DOMAIN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${QINIU_ACCESS_KEY:-}" ] || [ -z "${QINIU_SECRET_KEY:-}" ]; then
+            echo "::notice::QINIU_ACCESS_KEY / QINIU_SECRET_KEY are not configured; the mirror is skipped"
+            exit 0
+          fi
+          # The daemon's own release is the tag its files are archived under, so
+          # `history/` keeps one scheme: one directory per release of either
+          # repository.
+          "$RUNNER_TEMP/qiniu/bin/python" .github/scripts/sync_qiniu.py \
+            --dir dist --tag "svcd-$TAG"

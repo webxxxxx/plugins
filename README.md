@@ -196,6 +196,21 @@ curl -fsS "$QINIU_DOMAIN/index.json" | jq -r '.packages[] | "\(.plugin) \(.versi
 
 代价要心里有数：七牛的免费额度是每月 10GB 标准存储，**外网流出流量按量计费**（约 0.26 元/GB），不是免费下载；`index.json` 只记录根目录的当前版本，历史包永远留在 `history/` 里，需要时自己清理。
 
+### svcd 单独发版怎么办
+
+本仓库打 tag 时会顺带把 svcd 的最新稳定版一起镜像。但 `plugin-manager` 自己发版**不会**通知这里，
+`index.json` 里的 svcd 会停在上一次本仓库发布时的版本——而商店在 `catalog_source = qiniu` 时优先读镜像，
+所以它会一直看到旧版，日志里也没有异常。
+
+`.github/workflows/mirror.yml` 补了这一环：
+
+- **定时**：每 6 小时查一次 `webxxxxx/plugin-manager` 的最新稳定 release；镜像已经是最新版就直接退出，不碰桶；
+- **手动**：Actions 页面 Run workflow，或 `gh workflow run mirror.yml`；
+- **即时**：在 `plugin-manager` 的发布流程里对本仓库发 `repository_dispatch`，`event_type` 用 `svcd-released`（需要一个能访问本仓库的 token，那是另一个仓库的改动）。
+
+发现落后时它只同步 svcd：旧归档进 `history/svcd-<tag>/`，其它包原地不动，`index.json` 按桶的实际内容重写，然后刷 CDN。
+它和发布流程里的 `qiniu` job 共用 `concurrency: qiniu-mirror`，因为 `index.json` 是读-改-写，两个写入者不能重叠。
+
 ### CI 平台覆盖
 
 每个插件的 `.plugin.json` 可以写 `ci.platforms` 覆盖发布矩阵；不写就按 `platforms` 全量构建。meow 的 Linux musl 目标用 musl cross 工具链编译 BoringSSL。

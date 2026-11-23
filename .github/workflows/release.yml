@@ -603,6 +603,11 @@ jobs:
       && needs.publish.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    # Both this job and the scheduled `mirror` workflow rewrite the bucket root,
+    # and index.json is read-modify-write: serialize them.
+    concurrency:
+      group: qiniu-mirror
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v5
