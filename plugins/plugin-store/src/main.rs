@@ -10,6 +10,7 @@ mod catalog;
 mod download;
 mod net;
 mod release;
+mod settings;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -81,6 +82,8 @@ struct State {
 
 struct PluginStore {
     state: Arc<Mutex<State>>,
+    /// The user's config file: GitHub token and release-cache window.
+    settings: settings::Settings,
     data_dir: PathBuf,
     /// Transient package downloads live under the plugin root, not beside the
     /// host's data root.
@@ -550,12 +553,14 @@ impl PluginStore {
             None
         };
 
-        // A read-only token lifts the anonymous 60/hour to 5000/hour; the ETag
-        // cache makes a repeated check a 304, which does not use the quota.
-        let token = net::github_token(&self.data_dir);
+        // A read-only token lifts the anonymous 60/hour to 5000/hour, and the
+        // cache answers a repeat from disk: within the window no request is
+        // made at all, after it the ETag turns the check into a free 304.
+        let token = net::github_token(self.settings.github_token.as_deref(), &self.data_dir);
         let data_dir = self.data_dir.as_path();
+        let ttl = self.settings.cache_ttl;
         let release = match release::fetch_at(&self.api_base, repo, &|url| {
-            net::fetch_json(url, token.as_deref(), Some(data_dir))
+            net::fetch_json(url, token.as_deref(), Some(data_dir), ttl)
         }) {
             Ok(release) => release,
             Err(error) => return ToolOutcome::error(error),
@@ -1035,12 +1040,14 @@ fn main() -> Exit {
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("plugin-store-temp"));
     let cancel = context.cancel();
+    let settings = settings::Settings::load(context.config_path(), &data_dir);
     spawn_refresher(Arc::clone(&state), data_dir.clone(), cancel.clone());
 
     svcd_plugin::serve(
         context,
         PluginStore {
             state,
+            settings,
             data_dir,
             download_dir,
             temp_dir,
@@ -1165,6 +1172,7 @@ mod tests {
 
     fn store_with(dir: &Path, job: Job) -> PluginStore {
         PluginStore {
+            settings: settings::Settings::default(),
             state: Arc::new(Mutex::new(State {
                 entries: Vec::new(),
                 source: "test".into(),

@@ -468,8 +468,10 @@ mod tests {
         // branch; without it, this needs anonymous quota to be available.
         let dir = std::env::temp_dir().join("plugin-store-live-release");
         let _ = std::fs::remove_dir_all(&dir);
-        let token = crate::net::github_token(&dir);
-        let transport = |url: &str| crate::net::fetch_json(url, token.as_deref(), Some(&dir));
+        let token = crate::net::github_token(None, &dir);
+        let transport = |url: &str| {
+            crate::net::fetch_json(url, token.as_deref(), Some(&dir), std::time::Duration::ZERO)
+        };
         let release = fetch_at(API, DEFAULT_REPO, &transport).expect("latest release");
 
         let value = release_json(&release);

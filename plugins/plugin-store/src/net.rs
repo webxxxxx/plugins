@@ -116,14 +116,16 @@ const RELEASE_CACHE: &str = "release-cache.json";
 /// directory so a service install does not need a machine-wide environment
 /// variable; the `/api/v1` face never sees it.
 pub(crate) const TOKEN_FILE: &str = "github-token";
-const MAX_TOKEN_BYTES: u64 = 512;
+pub(crate) const MAX_TOKEN_BYTES: u64 = 512;
 
-/// Read a read-only GitHub token: `GITHUB_TOKEN`, then `GH_TOKEN`, then
-/// `<data_dir>/github-token`. An authenticated request gets 5000 requests per
-/// hour instead of the anonymous 60, which is the difference between a shared
-/// NAT address working and not. The value is never logged.
-pub(crate) fn github_token(data_dir: &Path) -> Option<String> {
+/// Read a read-only GitHub token: the plugin's own config file, then
+/// `GITHUB_TOKEN`, then `GH_TOKEN`, then `<data_dir>/github-token`. An
+/// authenticated request gets 5000 requests per hour instead of the anonymous
+/// 60, which is the difference between a shared NAT address working and not.
+/// The value is never logged.
+pub(crate) fn github_token(configured: Option<&str>, data_dir: &Path) -> Option<String> {
     token_choice(
+        configured,
         std::env::var("GITHUB_TOKEN").ok(),
         std::env::var("GH_TOKEN").ok(),
         data_dir,
@@ -131,13 +133,14 @@ pub(crate) fn github_token(data_dir: &Path) -> Option<String> {
 }
 
 fn token_choice(
+    configured: Option<&str>,
     primary: Option<String>,
     secondary: Option<String>,
     data_dir: &Path,
 ) -> Option<String> {
-    primary
-        .as_deref()
+    configured
         .and_then(clean_token)
+        .or_else(|| primary.as_deref().and_then(clean_token))
         .or_else(|| secondary.as_deref().and_then(clean_token))
         .or_else(|| {
             let path = data_dir.join(TOKEN_FILE);
@@ -150,7 +153,7 @@ fn token_choice(
         })
 }
 
-fn clean_token(value: &str) -> Option<String> {
+pub(crate) fn clean_token(value: &str) -> Option<String> {
     let token = value.trim();
     if token.is_empty()
         || token.len() as u64 > MAX_TOKEN_BYTES
@@ -165,10 +168,20 @@ struct CachedRelease {
     url: String,
     etag: String,
     body: String,
+    /// When the 200 that produced this body arrived (unix seconds). A cache
+    /// written by an older build has no stamp and simply misses the TTL.
+    stored_at: u64,
 }
 
 fn cache_file(data_dir: &Path) -> PathBuf {
     data_dir.join(RELEASE_CACHE)
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn read_cache(path: &Path, url: &str) -> Option<CachedRelease> {
@@ -184,6 +197,7 @@ fn read_cache(path: &Path, url: &str) -> Option<CachedRelease> {
         url: cached_url.to_string(),
         etag: value.get("etag")?.as_str()?.to_string(),
         body: value.get("body")?.as_str()?.to_string(),
+        stored_at: value.get("stored_at").and_then(Value::as_u64).unwrap_or(0),
     })
 }
 
@@ -199,6 +213,7 @@ fn write_cache(path: &Path, cached: &CachedRelease) {
         "url": cached.url,
         "etag": cached.etag,
         "body": cached.body,
+        "stored_at": cached.stored_at,
     });
     let Ok(text) = serde_json::to_string(&value) else {
         return;
@@ -219,9 +234,19 @@ pub(crate) fn fetch_json(
     url: &str,
     auth: Option<&str>,
     data_dir: Option<&Path>,
+    cache_ttl: Duration,
 ) -> Result<String, String> {
     let cache = data_dir.map(cache_file);
     let cached = cache.as_deref().and_then(|path| read_cache(path, url));
+    // A fresh body answers without touching the network at all. That is what
+    // keeps a burst of "check for updates" clicks (or a host poller) from
+    // spending quota even before GitHub can answer 304.
+    if let Some(cached) = &cached {
+        if !cache_ttl.is_zero() && now_secs().saturating_sub(cached.stored_at) < cache_ttl.as_secs()
+        {
+            return Ok(cached.body.clone());
+        }
+    }
     let etag = cached.as_ref().map(|cached| cached.etag.as_str());
 
     let direct = agent();
@@ -253,6 +278,7 @@ pub(crate) fn fetch_json(
                         url: url.to_string(),
                         etag,
                         body: body.clone(),
+                        stored_at: now_secs(),
                     },
                 );
             }
@@ -272,7 +298,8 @@ fn token_hint(message: String, auth: Option<&str>, data_dir: Option<&Path>) -> S
         .map(|dir| dir.join(TOKEN_FILE).display().to_string())
         .unwrap_or_else(|| TOKEN_FILE.to_string());
     format!(
-        "{message}；把只读 GitHub token 写到 {location}（或设置 GITHUB_TOKEN）可把配额提到 5000 次/小时"
+        "{message}；把只读 GitHub token 填进配置（`plugin editconfig plugin-store` 的 github_token，\
+         或写 {location}、设置 GITHUB_TOKEN）可把配额提到 5000 次/小时"
     )
 }
 
@@ -371,7 +398,7 @@ fn github_http_error(
         format!("GitHub API 返回 404：仓库或 release 不存在（{message}）")
     } else if status == 401 {
         format!(
-            "GitHub token 无效或被吊销（HTTP 401）：{message}；检查 GITHUB_TOKEN / GH_TOKEN 或插件数据目录里的 github-token"
+            "GitHub token 无效或被吊销（HTTP 401）：{message}；用 `plugin editconfig plugin-store` 检查 github_token，或看 GITHUB_TOKEN / GH_TOKEN"
         )
     } else if status == 403 {
         format!("GitHub API 拒绝访问（HTTP 403）：{message}")
@@ -872,6 +899,7 @@ mod tests {
             &format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest"),
             None,
             None,
+            Duration::ZERO,
         )
         .unwrap_err();
 
@@ -932,11 +960,38 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plugin-store-etag-{}", address.port()));
         let _ = fs::remove_dir_all(&dir);
         let url = format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest");
-        let first = fetch_json(&url, None, Some(&dir)).unwrap();
-        let second = fetch_json(&url, None, Some(&dir)).unwrap();
+        let first = fetch_json(&url, None, Some(&dir), Duration::ZERO).unwrap();
+        let second = fetch_json(&url, None, Some(&dir), Duration::ZERO).unwrap();
         assert_eq!(first, second);
         assert!(dir.join(RELEASE_CACHE).is_file());
         server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fresh_cache_answers_without_a_request() {
+        let dir = std::env::temp_dir().join(format!("plugin-store-ttl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let url = "http://127.0.0.1:1/repos/webxxxxx/plugin-manager/releases/latest";
+        fs::write(
+            cache_file(&dir),
+            json!({
+                "url": url,
+                "etag": "\"rel-9\"",
+                "body": r#"{"tag_name":"v9.9.9"}"#,
+                "stored_at": now_secs(),
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Inside the window nothing is dialled; the body comes off disk.
+        let body = fetch_json(url, None, Some(&dir), Duration::from_secs(600)).unwrap();
+        assert!(body.contains("v9.9.9"), "{body}");
+
+        // A zero window means "always revalidate", and this endpoint refuses.
+        assert!(fetch_json(url, None, Some(&dir), Duration::ZERO).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -963,7 +1018,7 @@ mod tests {
         });
 
         let url = format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest");
-        let body = fetch_json(&url, Some("read-only"), None).unwrap();
+        let body = fetch_json(&url, Some("read-only"), None, Duration::ZERO).unwrap();
         assert!(body.contains("v0.1.5"), "{body}");
         server.join().unwrap();
     }
@@ -976,20 +1031,26 @@ mod tests {
         fs::write(dir.join(TOKEN_FILE), b"  file-token\n").unwrap();
 
         assert_eq!(
-            token_choice(None, None, &dir).as_deref(),
+            token_choice(None, None, None, &dir).as_deref(),
             Some("file-token")
         );
         assert_eq!(
-            token_choice(Some("env-token".into()), None, &dir).as_deref(),
+            token_choice(None, Some("env-token".into()), None, &dir).as_deref(),
             Some("env-token")
         );
         assert_eq!(
-            token_choice(Some("   ".into()), Some("gh-token".into()), &dir).as_deref(),
+            token_choice(None, Some("   ".into()), Some("gh-token".into()), &dir).as_deref(),
             Some("gh-token")
+        );
+        // The config file is the documented knob, so it wins over the
+        // environment and over the legacy token file.
+        assert_eq!(
+            token_choice(Some("config-token"), Some("env-token".into()), None, &dir).as_deref(),
+            Some("config-token")
         );
         // A control character invalidates the value instead of reaching a header.
         assert_eq!(
-            token_choice(Some("bad\nx".into()), None, &dir).as_deref(),
+            token_choice(None, Some("bad\nx".into()), None, &dir).as_deref(),
             Some("file-token")
         );
         let _ = fs::remove_dir_all(&dir);
@@ -1018,7 +1079,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("plugin-store-limited-{}", address.port()));
         let url = format!("http://{address}/repos/webxxxxx/plugin-manager/releases/latest");
-        let error = fetch_json(&url, None, Some(&dir)).unwrap_err();
+        let error = fetch_json(&url, None, Some(&dir), Duration::ZERO).unwrap_err();
         assert!(error.contains("限流"), "{error}");
         assert!(error.contains("github-token"), "{error}");
         assert!(error.contains(dir.to_string_lossy().as_ref()), "{error}");

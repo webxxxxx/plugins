@@ -11,7 +11,7 @@
   version 两侧的写法；只有宿主的 device id 相同才显示，无标识视为该 platform 的通用包。
   当前 docs 生成器也已支持平台后的 device 后缀，避免设备包在列表里被丢掉。
 - 每页固定 50 条；搜索只匹配插件名，输入即筛（250 ms 防抖）。
-- 已安装版本低于目录版本时，操作列显示「升级」；相同或更高时显示「已安装」并禁用。
+- 已安装版本低于目录版本时，操作列显示「升级」；相同或更高时显示「已安装」并禁用。名字后面只在装了**别的**版本时标「已安装 x.y.z」，与目录同版本时不再重复标（操作列已经说明）。
 - 插件商店自己也在列表里，带「自己」标记。它的「升级」会下载自己的新包并交给宿主替换：宿主停掉旧进程后由页面启动新版本并自动刷新。升级期间本页的安装任务会随旧进程消失，其他标签页会收到任务清空。
 - 列表来自本地缓存或内置快照，启动后先在后台刷新；「刷新列表」只触发后台任务，不会卡住页面。
 - 安装按钮先由插件下载 .spk 到数据目录，再通过宿主现成的 API 安装并启动：
@@ -68,6 +68,32 @@ cargo run --release --manifest-path plugins/plugin-store/Cargo.toml -- download
 
 它直接调用上面的 `net::download`，所以代理、DoH 回退和 `PLUGIN_STORE_MIRROR` 都会生效。默认读 `docs/plugins.md`、写 `dist/`；已存在文件跳过，`--force` 重下，`--dry-run` 只看清单，`--manifest` / `--output` 可换路径。`--only meow` 只下这个插件的包，`--only <完整文件名>` 只下一个包；不区分大小写，可重复。
 
+## 配置
+
+安装时宿主把包里的 `config/config.json` 复制成插件的活动配置，并用 `SVCD_CONFIG` 指给插件。
+之后用宿主的命令编辑，改完 `plugin restart plugin-store` 生效：
+
+```bash
+plugin editconfig plugin-store --print           # 看当前值
+plugin editconfig plugin-store --file cfg.json   # 整体替换
+plugin editconfig plugin-store --reset           # 回到模板
+```
+
+```json
+{
+  "github_token": "github_pat_…",
+  "release_cache_minutes": 15
+}
+```
+
+- `github_token`：只读 PAT（读公开 release，`public_repo` 就够）。留空表示不认证。
+  宿主写入的活动配置在 Linux 上是 0640；插件不会把 token 打进日志、错误文案或 `/list` 结果。
+- `release_cache_minutes`：`release_asset` 结果的重用窗口，默认 15，上限 1440；
+  设 0 表示每次检查都带 `If-None-Match` 校验。
+
+优先级：配置文件 > `GITHUB_TOKEN` > `GH_TOKEN` > `<data_dir>/github-token`。配置文件给服务
+安装用，环境变量留给临时调试。配置解析失败只记一条警告，插件仍按默认值继续跑。
+
 ## 自升级查询：release_asset
 
 svcd 自己不链 TLS，检查与下载 svcd 本体由 plugin-store 代劳。`release_asset`
@@ -103,13 +129,14 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
 - 查询带 `User-Agent: plugin-store/<version>`，匿名配额 60 次/小时；403/429 只有在
   确实是限流（剩余 0、HTTP 429，或文案含 rate limit/abuse）时才报限流，否则报「拒绝访问」，
   都给出可读错误而不是裸 403。
-- 认证：每次查询先读 `GITHUB_TOKEN`、再读 `GH_TOKEN`，都没有就找插件数据目录下的
-  `github-token`（一行文本，建议 0600）。有 token 就带 `Authorization: Bearer …`，
-  配额从匿名 60 次/小时提到 5000 次/小时；token 只发给 `api.github.com`，不写日志。
-  401 明确报「token 无效或被吊销」，不会静默退回匿名。
-- 缓存：第一次成功查询把响应体与 `ETag` 写到 `<data_dir>/release-cache.json`（按 URL 区分），
-  之后带 `If-None-Match`；GitHub 的 304 不计入配额，所以日常「检查更新」只有版本变化那次
-  真正消耗一次请求。`download: true` 不读缓存，永远取最新字节。
+- 认证：读取顺序是**配置文件里的 `github_token`** → `GITHUB_TOKEN` → `GH_TOKEN` →
+  插件数据目录下的 `github-token`（一行文本，建议 0600）。有 token 就带
+  `Authorization: Bearer …`，配额从匿名 60 次/小时提到 5000 次/小时；token 只发给
+  `api.github.com`，不写日志。401 明确报「token 无效或被吊销」，不会静默退回匿名。
+- 缓存：第一次成功查询把响应体、`ETag` 和写入时间存进 `<data_dir>/release-cache.json`
+  （按 URL 区分）。`release_cache_minutes`（默认 15 分钟）内的重复查询**不发请求**，直接从
+  磁盘回；超出窗口才带 `If-None-Match`，GitHub 的 304 不计配额。窗口设 0 表示每次都校验。
+  `download: true` 不读缓存，永远取最新字节。
 - 下载复用直连 + DoH 回退与代理，但**不走** `PLUGIN_STORE_MIRROR`：镜像可以决定插件包，
   不能决定 svcd 本体的字节。版本不缓存，每次升级都重新查、重新下；失败时清掉 `.part`。
 - 不做签名；校验链由宿主用 `SHA256SUMS` 的 sha256 完成，插件只负责把字节交回。

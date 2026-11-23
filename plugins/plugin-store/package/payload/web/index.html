@@ -465,17 +465,18 @@
     // is the only case that gets the upgrade action.
     const upToDate = isInstalled && (!installedVersion || compareVersions(installedVersion, entry.version) >= 0);
     const canUpgrade = isInstalled && Boolean(installedVersion) && compareVersions(installedVersion, entry.version) < 0;
-    if (isInstalled) {
+    // Only an installed version that differs from the listed one is worth a
+    // badge: "same version" is what the action column already says, and an
+    // unknown version has nothing to add either.
+    if (isInstalled && installedVersion && installedVersion !== entry.version) {
       const badge = document.createElement('span');
       badge.className = 'badge installed';
-      badge.textContent = installedVersion && installedVersion !== entry.version
-        ? '已安装 ' + installedVersion
-        : '已安装';
-      badge.title = installedVersion
-        ? (canUpgrade ? '已安装 ' + installedVersion + '，可升级到 ' + entry.version : '已安装版本 ' + installedVersion)
-        : '已安装';
+      badge.textContent = '已安装 ' + installedVersion;
+      badge.title = canUpgrade
+        ? '已安装 ' + installedVersion + '，可升级到 ' + entry.version
+        : '已安装版本 ' + installedVersion;
       nameCell.appendChild(badge);
-    } else if (entry.cached) {
+    } else if (!isInstalled && entry.cached) {
       const badge = document.createElement('span');
       badge.className = 'badge cached';
       badge.textContent = '已缓存';
