@@ -538,11 +538,14 @@ pub fn sync(repo: &Repo) -> Result<usize, String> {
             if !package.join("manifest.json").is_file() {
                 continue;
             }
-            let web = package.join("payload").join("web");
-            if web.is_dir() {
+            // Refresh, never inject: a package whose page does not import the
+            // toolkit (meow ships a two-line redirect to YACD) must not grow a
+            // 15 KiB file that would then have to be committed.
+            let toolkit = package.join("payload").join("web").join("plugin-ui.mjs");
+            if toolkit.is_file() {
                 let _ = fs::copy(
                     repo.root.join("sdk").join("web").join("plugin-ui.mjs"),
-                    web.join("plugin-ui.mjs"),
+                    &toolkit,
                 );
             }
             let header = entry.path().join("src").join("svcd_plugin.h");
@@ -675,6 +678,46 @@ fn pem(label: &str, der: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `sync` refreshes the SDK copies a plugin already ships and never adds
+    /// one: a UI that does not import the toolkit must stay without it.
+    #[test]
+    fn sync_refreshes_vendored_sdks_without_injecting_them() {
+        let root = std::env::temp_dir().join(format!("plugin-tools-sync-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let sdk = root.join("sdk");
+        fs::create_dir_all(sdk.join("web")).unwrap();
+        fs::create_dir_all(sdk.join("c")).unwrap();
+        fs::create_dir_all(sdk.join("shell")).unwrap();
+        fs::create_dir_all(sdk.join("powershell")).unwrap();
+        fs::write(sdk.join("web/plugin-ui.mjs"), "export const v = 2;\n").unwrap();
+        fs::write(sdk.join("c/svcd_plugin.h"), "/* v2 */\n").unwrap();
+        fs::write(sdk.join("shell/svcd-plugin.sh"), "# v2\n").unwrap();
+        fs::write(sdk.join("powershell/SvcdPlugin.ps1"), "# v2\n").unwrap();
+
+        // A plugin with a plain page and no SDK copy: nothing may be injected.
+        let plain = root.join("plugins/plain");
+        fs::create_dir_all(plain.join("package/payload/web")).unwrap();
+        fs::write(plain.join("package/manifest.json"), "{}").unwrap();
+        fs::write(plain.join("package/payload/web/index.html"), "<p>hi</p>").unwrap();
+
+        // A plugin that does vendor the toolkit: the copy is refreshed.
+        let vendor = root.join("samples/vendor");
+        fs::create_dir_all(vendor.join("package/payload/web")).unwrap();
+        fs::write(vendor.join("package/manifest.json"), "{}").unwrap();
+        fs::write(vendor.join("package/payload/web/plugin-ui.mjs"), "stale\n").unwrap();
+
+        assert_eq!(sync(&Repo { root: root.clone() }).unwrap(), 2);
+        assert!(
+            !plain.join("package/payload/web/plugin-ui.mjs").exists(),
+            "sync must not drop the toolkit into a page that never used it"
+        );
+        assert_eq!(
+            fs::read_to_string(vendor.join("package/payload/web/plugin-ui.mjs")).unwrap(),
+            "export const v = 2;\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn placeholders_expand() {

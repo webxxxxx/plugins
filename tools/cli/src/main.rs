@@ -88,7 +88,7 @@ fn usage() {
 
   dev [options]     打包 + 安装 + 启动（首装不自启，这里代做）
   devkey            生成机器级开发钥（~/.svcd-dev）
-  sync              刷新各插件里 vendored 的 SDK 副本
+  sync              刷新各插件里 vendored 的 SDK 副本（只刷新已有的，不新增）
   check <file.spk>  plugin verify 包装"
     );
 }
