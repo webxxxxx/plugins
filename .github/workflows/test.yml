@@ -52,6 +52,26 @@ jobs:
       - name: Build plugin-tools
         run: cargo build --locked --manifest-path tools/cli/Cargo.toml
 
+      # `.plugin.json` is the project's own identity record (it drives the
+      # release matrix and the per-plugin workflow); it has to name the same
+      # plugin the manifest does.
+      - name: Project metadata matches the manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          for dir in samples/* plugins/*; do
+            [ -f "$dir/.plugin.json" ] || continue
+            [ -f "$dir/package/manifest.json" ] || continue
+            id=$(jq -r '.id // empty' "$dir/package/manifest.json")
+            name=$(jq -r '.name // empty' "$dir/.plugin.json")
+            if [ "$name" != "$id" ]; then
+              echo "::error::$dir/.plugin.json name \"$name\" != manifest id \"$id\""
+              failed=1
+            fi
+          done
+          exit "$failed"
+
       - name: Scaffold every template
         shell: bash
         run: |
