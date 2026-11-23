@@ -56,7 +56,7 @@
 <section>
   <h2>raw 流（协议 3）</h2>
   <p class="muted">同一条管道上的第二条通道：浏览器发二进制帧，插件在同一个 stream 上回帧。
-  宿主还没实现「流关闭」通知，所以这里按请求回一帧，不持续推。</p>
+  关掉这个 WebSocket，宿主会给插件发控制流 close，SSE 上能看到对应事件。</p>
   <div class="row">
     <input id="rawmessage" type="text" value="hello raw" size="24">
     <button id="raw">发一帧 raw</button>
@@ -132,6 +132,8 @@
       feed.textContent = `tick #${params.count}`;
     } else if (params?.type === 'call') {
       feed.textContent = `能力调用 #${params.count}：${params.name}（经 SSE/WS 推送）`;
+    } else if (params?.type === 'raw' && params.closed) {
+      feed.textContent = `raw 流 ${params.stream} 已关闭（控制流 close）`;
     }
   };
   const sse = ui.subscribe({ onMessage, onReset: () => { feed.textContent = '历史不可回放'; } });

@@ -87,12 +87,10 @@ await ui.downloadBlob(r.structuredContent.$blob, { filename: 'report.txt' });
 超限的帧在写头之前就被拒。本样例每收到一帧 raw，就在同一条 stream 上回一帧，并推一条
 `{"type":"raw"}` 通知（UI 的 raw 面板能同时看到两者）。
 
-**关流目前是单向的**：宿主还没实现 `svcd.stream.closed`，订阅者走了插件不会收到通知，
-往死流写的帧被宿主静默丢掉。所以样例按请求回帧，不写持续推流的后台循环。
-
-插件侧若主动关流，用 `Streams::close(stream)`：本地立刻拒后续帧，并尽力发
-`svcd.stream.close` 通知宿主（宿主未实现，忽略）。`raw_closed` 同理，只在宿主发
-`svcd.stream.closed` 时触发。
+**关流走控制流**：stream `0xFFFFFFFF` 带 `{"op":"close","stream":N}`。页面的 raw WebSocket
+断开时，宿主给插件发 close → `raw_closed` 被调用（样例推一条 `{"type":"raw","closed":true}`
+通知，SSE 上能看到）。插件也能用 `Streams::close(stream)` 主动结束一条流，宿主会把该
+WebSocket 干净关闭（1000）。往已经被关掉的流写数据，宿主会回一个 close 而不是静默丢弃。
 
 ## 它演示了宿主哪些能力
 

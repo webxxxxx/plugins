@@ -240,8 +240,12 @@ impl RawPlugin for Hello {
     }
 
     fn raw_closed(&mut self, stream: u32) {
-        // Only fires once the host implements `svcd.stream.closed`.
+        // The /raw subscriber left; the host sent the control close.
         log_info!("host closed raw stream {stream}");
+        svcd_plugin::emit(
+            "notifications/message",
+            json!({ "type": "raw", "stream": stream, "closed": true }),
+        );
     }
 }
 
