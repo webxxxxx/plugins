@@ -83,7 +83,20 @@ cd tools/cli && cargo build --release
 - **全量发布**：`v*`（如 `v1.0.0`）构建 `plugin-tools` + `plugins/` 下全部插件；
 - **单插件发布**：`<plugin>-v*`（如 `hysteria-v1.0.1`）只构建该插件，tag 版本必须等于该插件 `package/manifest.json` 的 `version`。
 
-单插件发布示例：
+改版本、提交、打 tag、推送交给 [tools/tag.py](tools/tag.py)：
+
+```bash
+python tools/tag.py all patch             # 全量发布：plugin-tools 0.2.1 -> 0.2.2，tag v0.2.2
+python tools/tag.py plugin-store patch    # 单插件发布：0.1.17 -> 0.1.18，tag plugin-store-v0.1.18
+python tools/tag.py sshd 1.0.1 --dry-run  # 指定版本，只打印会改哪些文件
+```
+
+- `all` 改 `tools/cli/Cargo.toml` 和它的 `Cargo.lock`；单个插件改 `plugins/<name>/package/manifest.json`，Rust 插件连 `Cargo.toml`、`Cargo.lock` 一起改。两处必须同步，否则 CI 的 `cargo --locked` 会在第一步就拒绝构建。
+- 版本号带 `-rc1` 时只有 tag 带后缀，manifest 里写 `1.0.1`（workflow 拿 `-` 之前的部分去比 manifest）。
+- 动手之前会检查：在 `main` 上、没有未提交改动、tag 没被用过；改完先跑一遍 `cargo metadata --locked`，和 CI 的同一步对齐。
+- `--no-push` 只在本地产提交和 tag，`--no-verify` 跳过 cargo 校验。
+
+手动发布也行，注意 tag 里的版本必须和插件 manifest 的 `version` 一致：
 
 ```bash
 # 先把 plugins/hysteria/package/manifest.json 的 version 改成 1.0.1
@@ -91,7 +104,7 @@ git tag hysteria-v1.0.1
 git push origin hysteria-v1.0.1
 ```
 
-tag 里的版本必须和插件 manifest 的 `version` 一致；只改插件代码、不 bump 版本时 workflow 会直接报错。
+只改插件代码、不 bump 版本时 workflow 会直接报错。
 
 手动 `workflow_dispatch` 也可以选 `plugin=all` 或单个插件名（配合 `tag` 和 `release`）。
 
