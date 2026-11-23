@@ -52,11 +52,12 @@ _Avoid_: 控制流、主通道
 关流对插件目前不可见（见「关流通知」），往死流写的帧被丢弃。
 _Avoid_: 二进制通道、WebSocket 直连
 
-**关流通知（svcd.stream.close / svcd.stream.closed）**:
-协议 3 预留的一对 stream 0 通知。插件发 `svcd.stream.close` 表示这条流不再生产：本地立刻拒
-后续帧，宿主侧的订阅者要等宿主实现后才会断开；宿主发 `svcd.stream.closed` 表示订阅者走了，
-SDK 触发 `RawPlugin::raw_closed`。宿主两半都还没实现，所以目前是尽力而为。
-_Avoid_: 断流、结束帧
+**控制流（control stream）**:
+协议 3 里 stream `0xFFFF_FFFF`（数据流是 `1 ..= 0xFFFF_FFFE`）。payload 是一个 ≤128 字节的
+JSON 对象，目前只有 `{"op":"close","stream":N}`，双向、幂等：宿主在订阅者离开（或插件往死流
+写数据）时发 close，插件用 `Streams::close` 发 close 让宿主把该 WebSocket 干净关闭（1000）。
+非法控制帧被忽略并计数，不占 stream 表、不计入 raw 数据字节。
+_Avoid_: 关流通知、svcd.stream.*（那是没落地的早期设想）
 
 **发布钥（Release key）**:
 仓库 CI 独占的 Ed25519 私钥，是打进 catalog 的唯一签发者；贡献者的自签钥只用于本地自测。

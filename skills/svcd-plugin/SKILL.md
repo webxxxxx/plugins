@@ -145,13 +145,11 @@ manifest 写 `"protocol": 3`，`main` 用 `multiplex::serve`。帧是
 丢掉（读循环不能被一条慢流拖住）——raw 本来就不保证送达，需要可靠就自己带序号重传。上限用 `multiplex::serve_with(..., Limits { raw_frame_max, .. })`
 跟宿主的 `ws_raw_max_bytes` 对齐。
 
-**关流是单向的。** 宿主还没实现 `svcd.stream.closed`，订阅者走了插件不会收到通知，
-往死流写的帧被宿主丢掉。所以按请求生产（收到一帧回一批），别写「一直在推」的后台循环。
-
-插件侧主动关流用 `Streams::close(stream)`：本地立刻把这条流标成已关（之后的 `send`
-返回 `SendError::Closed`），并发一条 `svcd.stream.close` 通知；宿主还没实现这条通知，
-所以订阅者那边不会因此断开——它是给宿主落地后准备的。`RawPlugin::raw_closed` 同理：
-只有宿主发 `svcd.stream.closed` 时才会触发。
+**关流走控制流。** stream `0xFFFFFFFF` 是控制流，payload 是一个小 JSON 对象，目前只有
+`{"op":"close","stream":N}`：宿主在 `/raw` 订阅者离开时给插件发它（触发
+`RawPlugin::raw_closed`），插件用 `Streams::close(stream)` 发它让宿主把该 WebSocket 干净关闭
+（1000）并释放订阅。本地 `close` 之后该流立刻拒后续帧（`SendError::Closed`）。插件往已经被
+关掉的流写数据时，宿主不再静默丢弃，而是回一个 close 让插件知道。
 
 ### Shell（`sdk/shell`，随包拷贝）
 
