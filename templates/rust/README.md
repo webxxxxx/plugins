@@ -71,7 +71,9 @@ cargo test                                   # 清单与代码的能力清单是
 也可以用 `--key` 指定。
 
 多平台构建会执行 `cargo build --target <triple>`；先 `rustup target add <triple>`，
-musl / ARM 目标还需要对应的链接器。
+musl 目标还要链接器 —— 仓库里的 `tools/cross/install.sh <triple>` 会下 musl.cc 的工具链
+并把 `CARGO_TARGET_<TRIPLE>_LINKER`、`CC`、`PATH` 一并准备好（CI 里写 `$GITHUB_ENV` /
+`$GITHUB_PATH`，本地打印 `export` 行）。模板自带的 workflow 已经在 musl 平台上调它。
 
 ## 验证（当前实现的两个限制）
 

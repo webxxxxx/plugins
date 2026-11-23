@@ -236,7 +236,7 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **UI 放 `package/payload/web/`。** 宿主把整棵树反代到 `/plugin-ui/<id>/`，页面用**相对路径** `fetch('rpc')`；插件进程不自起任何 HTTP 或 WebSocket 服务。
 
-**源码留在 `package/` 外面。** `package/` 是打包根，打包器不过滤任何文件：放进去的 `src/`、`Cargo.toml`、`.gitkeep` 都会进 `.spk`。构建产物由 `build.json` 的 `artifact` 复制进 `payload/bin/`。
+**源码留在 `package/` 外面。** `package/` 是打包根，打包器不过滤任何文件：放进去的 `src/`、`Cargo.toml`、`.gitkeep` 都会进 `.spk`。构建产物由 `build.json` 的 `artifact` 复制进 `payload/bin/`；同一目录里上一个平台留下的同名产物（`demo` ↔ `demo.exe`）会在构建前被清掉，否则两种架构会一起进包。
 
 **能力清单一处改全。** 加/删能力时同时改 manifest 的 `capabilities[]` 和代码分支；Rust 用 `cargo test` 兜底，shell 靠 `case` 与清单人工对齐。
 
@@ -266,7 +266,7 @@ SDK 没有 raw 实现。
 - **自起 HTTP 服务**：单端口模型由宿主独占。
 - **宿主级定时调度**：没有 cron；定时器在进程内，重启即归零。
 - **权限隔离**：插件以安装者权限运行，隔离是未决问题。
-- **跨目标构建**：`plugin-tools build --platform` 只改 manifest 的盖章；真正的交叉编译需要目标工具链（Rust：`rustup target` + zig）。
+- **跨目标构建**：`plugin-tools build --platform` 改的是 manifest 的盖章与 `build.json` 里的 `{platform}`；交叉编译器得自己备。`tools/cross/install.sh <triple>` 把 musl.cc 的工具链下到缓存，并交代 `CARGO_TARGET_<TRIPLE>_LINKER`、`CC_<triple>`、`CC` 与 `PATH`（CI 写 `$GITHUB_ENV` / `$GITHUB_PATH`，本地打印 `export` 行）。C 的 `build.json` 用 `{cc}` 取编译器（`$CC` 优先，否则 `gcc`），Rust 用 `--target {platform}` 加 `rustup target add`。
 
 ## 常见错误 → 症状
 

@@ -20,12 +20,15 @@ plugin install dist/hello-c-1.0.0-<triple>.spk
 plugin start hello-c
 ```
 
-交叉编译要换工具链，改 `build.json`：
+交叉编译不用改 `build.json`：命令里的 `{cc}` 取 `$CC`，没设才退回 `gcc`。
 
-```json
-{ "build": { "command": ["aarch64-linux-gnu-gcc", "-static", "-o", "out/{name}", "src/main.c"],
-             "artifact": "out/{name}" } }
+```bash
+CC=/usr/soft/x86_64-linux-musl/bin/x86_64-linux-musl-gcc \
+  plugin-tools build --platform x86_64-unknown-linux-musl
 ```
+
+musl 目标可以让 `tools/cross/install.sh <triple>` 把工具链和 `CC` 一起准备好
+（CI 里它同时写 `$GITHUB_ENV` / `$GITHUB_PATH`）。
 
 ## 与目标机相关的两个点
 

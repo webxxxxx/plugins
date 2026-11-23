@@ -42,6 +42,7 @@ samples/hello-shell       Shell 同款（POSIX sh + awk）
 samples/hello-powershell  PowerShell 同款
 skills/           给 AI 的插件开发手册（语言、toolkit、边界）
 tools/cli/        Rust 工具链：单二进制 plugin-tools（template / build / dev / devkey / sync / check）
+tools/cross/      musl 交叉工具链的准备脚本：`install.sh <triple>`（musl.cc 的包 + 镜像回退）
 ```
 
 模板是唯一真源；由模板生成的样例用 `--force` 重新生成，别手改。`samples/hello-rust` 是手写的参考实现，不受模板约束。
@@ -140,6 +141,8 @@ plugin-tools template wireguard --lang c --platforms x86_64-unknown-linux-musl,x
 发布路径是 CI 用发布钥调 `plugin bundle --key`。
 
 `build` 不给 `--platform` 时按 `.plugin.json` 的 `platforms` 逐个打；没写 `platforms` 的插件视为 7 个平台通用。本地开发用 `--platform <本机三元组>` 只打一个。`check <file.spk>` 走 `plugin verify`。
+
+交叉到 musl 目标（x86_64 / aarch64 / armv7）时，先跑 `tools/cross/install.sh <triple>`：它把 musl.cc 的工具链下到 `~/.svcd-cross`（可复用），并交代 `CARGO_TARGET_<TRIPLE>_LINKER`、`CC_<triple>`、`CC` 与 `PATH`——在 CI 里写 `$GITHUB_ENV` / `$GITHUB_PATH`，本地打印 `export` 行（`eval "$(tools/cross/install.sh …)"`）。C 的 `build.json` 用 `{cc}` 取编译器（`$CC` 优先，否则 `gcc`），所以同一份配方既能本机编也能交叉编；仓库 CI、四份模板和四份样例的 workflow 都调这个脚本。
 
 每个插件（含四份样例和四份模板）都带自己的 `.github/workflows/build.yml`：平台列表从 `.plugin.json` 读，没写就 7 个全build，每个平台在自己的 runner 上构建并上传 `.spk`。插件独立成仓库后直接就是它的 CI。
 

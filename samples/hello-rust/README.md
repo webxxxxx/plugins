@@ -29,8 +29,9 @@ plugin start hello-rust
 ```
 
 `build.json` 按 `cargo build --target <triple>` 构建，产物取 `target/<triple>/release/<name>`；
-换平台前先 `rustup target add <triple>`，musl / ARM 还要对应的链接器。不给 `--platform`
-时会按 `.plugin.json` 的三个平台逐个打，缺工具链的那几个会直接报错，不会拿主机产物顶替。
+换平台前先 `rustup target add <triple>`，musl 目标还要链接器 —— `tools/cross/install.sh <triple>`
+会下 musl.cc 的工具链并交代好变量。不给 `--platform` 时会按 `.plugin.json` 的三个平台逐个打，
+缺工具链的那几个会直接报错，不会拿主机产物顶替。
 
 宿主需要 `allow_insecure_install = on`（未签名包）。打开 UI 后可以试 echo、上传一个
 文本文件看摘要、生成报告并下载、看 tick 事件。

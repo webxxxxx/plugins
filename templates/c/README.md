@@ -24,13 +24,17 @@ plugin-tools build                               # gcc 编译 + 打包（默认�
 plugin-tools build --platform aarch64-unknown-linux-musl
 ```
 
-构建用 `build.json` 里的 `gcc`。Windows 上需要 MinGW/MSYS 的 `gcc`；
-没有就改用 `cl` 等编译器并同步改 `build.json`。交叉编译要换工具链：
+构建命令里的 `{cc}` 取 `$CC`，没设才用 `gcc`。Windows 上需要 MinGW/MSYS 的 `gcc`；
+没有就改用 `cl` 等编译器并同步改 `build.json`。交叉编译不用改 `build.json`：
 
-```json
-{ "build": { "command": ["aarch64-linux-gnu-gcc", "-static", "-o", "out/{name}", "src/main.c"],
-             "artifact": "out/{name}" } }
+```bash
+CC=/usr/soft/x86_64-linux-musl/bin/x86_64-linux-musl-gcc \
+  plugin-tools build --platform x86_64-unknown-linux-musl
 ```
+
+musl 目标用 `tools/cross/install.sh <triple>` 一步到位：它下 musl.cc 的工具链，
+并把 `CC`、`CC_<triple>`、`CARGO_TARGET_<TRIPLE>_LINKER` 和 `PATH` 交代出去
+（在 CI 里写 `$GITHUB_ENV` / `$GITHUB_PATH`，本地打印 `export` 行）。
 
 ## 边界
 
