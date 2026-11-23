@@ -22,6 +22,8 @@
 </div>
 <pre id="out">（等待调用）</pre>
 <pre id="feed">（等待 tick 事件）</pre>
+<button id="raw">打开 raw 流（协议 3）</button>
+<pre id="rawfeed">（等待 raw 帧）</pre>
 
 <script type="module">
   import { pluginUI } from './plugin-ui.mjs';
@@ -57,6 +59,24 @@
       show(ui.invoke('stats'));
     },
   });
+
+  // raw 是同一个插件的另一条通道：浏览器发二进制帧，插件在同一个 stream 上回帧。
+  const rawfeed = document.getElementById('rawfeed');
+  document.getElementById('raw').onclick = () => {
+    const url = new URL('./raw', location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    const socket = new WebSocket(url);
+    socket.binaryType = 'arraybuffer';
+    let frames = 0;
+    rawfeed.textContent = '';
+    socket.onopen = () => socket.send(new TextEncoder().encode('hello raw'));
+    socket.onmessage = (event) => {
+      frames += 1;
+      rawfeed.textContent += `${new TextDecoder().decode(event.data)}\n`;
+      if (frames >= 3) socket.close();
+    };
+    socket.onerror = () => { rawfeed.textContent = 'raw 连接失败：插件不是协议 3？'; };
+  };
 
   status.textContent = '已连接';
 </script>

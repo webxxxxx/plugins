@@ -4,12 +4,17 @@
 // readiness probe, the shutdown request, framing, concurrency and the MCP
 // result shape. Keep the capability list here identical to
 // `package/manifest.json`; the test at the bottom fails the build if it drifts.
+//
+// This template speaks protocol 3: stream 0 carries the JSON-RPC (calls,
+// notifications, ping) and streams >= 1 carry raw bytes for `/raw` subscribers,
+// all over the same stdin/stdout.
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use svcd_plugin::{Context, Exit, Plugin, ToolOutcome};
+use svcd_plugin::multiplex::{self, RawPlugin, Streams};
+use svcd_plugin::{log_info, log_warn, Context, Exit, Plugin, ToolOutcome};
 
 struct __NAME_PASCAL__ {
     ticks: Arc<AtomicU64>,
@@ -45,6 +50,32 @@ impl Plugin for __NAME_PASCAL__ {
     }
 }
 
+/// Protocol 3 only: a raw frame arrived on `stream` (>= 1).
+impl RawPlugin for __NAME_PASCAL__ {
+    fn raw(&mut self, stream: u32, payload: &[u8], out: &Streams) {
+        // One request, a short burst back. The landed host has no "this stream
+        // closed" notification, so a producer that pushed forever would keep
+        // pushing into a dead subscriber: produce per request instead.
+        let text = String::from_utf8_lossy(payload);
+        for step in 1..=3 {
+            let frame = format!("tick {step}/3 on stream {stream}: {text}");
+            if let Err(error) = out.send(stream, frame.as_bytes()) {
+                log_warn!("raw stream {stream}: {error}");
+                break;
+            }
+        }
+        // Best effort: the host ignores this until it implements the frame.
+        if let Err(error) = out.close(stream) {
+            log_warn!("raw stream {stream}: {error}");
+        }
+    }
+
+    fn raw_closed(&mut self, stream: u32) {
+        // Only fires once the host sends `svcd.stream.closed`.
+        log_info!("host closed raw stream {stream}");
+    }
+}
+
 fn main() -> Exit {
     let context = Context::from_env();
     let ticks = Arc::new(AtomicU64::new(0));
@@ -64,7 +95,7 @@ fn main() -> Exit {
             }
         });
 
-    svcd_plugin::serve(context, __NAME_PASCAL__ { ticks })
+    multiplex::serve(context, __NAME_PASCAL__ { ticks })
 }
 
 #[cfg(test)]

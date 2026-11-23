@@ -4,7 +4,7 @@
   "name": "__NAME__",
   "version": "0.1.0",
   "desc": "__DESC__",
-  "protocol": 1,
+  "protocol": 3,
   "exec": {
     "path": "payload/bin/__NAME__",
     "ready": "notify"

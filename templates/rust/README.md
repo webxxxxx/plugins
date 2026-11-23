@@ -31,6 +31,33 @@ src/main.rs               ← 你的代码
 `Cargo.toml` 用 path 依赖本仓库的 `sdk/rust`；如果把插件拆成独立仓库，
 需要把 `svcd-plugin` 改成 git 或已发布版本的依赖。
 
+## 协议 3：一条管道上的调用、推送与 raw
+
+模板的 `manifest.json` 写 `"protocol": 3`，`src/main.rs` 用 `multiplex::serve`。帧格式是
+`u32 len | u32 stream_id | payload`：
+
+- **stream 0** 还是那套 JSON-RPC：`svcd.ping`、`svcd.status`、`svcd.shutdown`、`tools/call`、
+  `notifications/*`。宿主在 stream 0 上发 ping，插件在同一条流上回；SSE 与 `/ws` 都从这里来。
+- **stream ≥ 1** 是不透明字节，宿主按 stream 配给 `/raw` 的 WebSocket 订阅者。插件永远不知道
+  谁在订阅，只知道「从哪条 stream 收到了帧」——所以回帧就用收到的那条 stream。
+
+插件作者只实现两个 trait：`Plugin`（能力）与 `RawPlugin`（`raw` / `raw_closed`）。
+
+写侧不会把读循环拖住：`Streams::send(stream, bytes)` 进有界写队列，满了返回
+`SendError::Busy`（重试或丢，别阻塞）；超过上限的帧在写头之前就被拒，不会出现半帧。
+上限：stream 0 是 1 MiB（宿主 `CALL_FRAME_MAX`）；raw 默认 1 MiB（`ws_raw_max_bytes`），
+宿主调大过就用 `multiplex::serve_with(..., Limits { raw_frame_max, .. })`。
+
+**关流目前是单向的。** 宿主还没实现 `svcd.stream.closed`，订阅者走了插件不会收到通知，
+往死流写的帧被宿主静默丢掉。所以模板按请求生产（收到一帧回三帧），不要写「一直在推」的
+后台循环。
+
+模板最后调 `Streams::close(stream)`：本地立刻把这条流标成已关（后续 `send` 返回
+`SendError::Closed`），并发 `svcd.stream.close` 给宿主；宿主还没实现这条通知，
+所以订阅者那边不会因此断开。`raw_closed` 只在宿主发 `svcd.stream.closed` 时触发。
+
+C / shell / PowerShell 模板仍只支持协议 1 的 JSON 线；raw 只有 Rust SDK 有。
+
 ## 命令（在仓库根或插件目录内都行）
 
 ```bash
