@@ -15,6 +15,30 @@ command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"   # WSL 的非
 
 die() { echo "meow: $*" >&2; exit 1; }
 
+# BoringSSL 会把 google benchmark 一起配进来（BUILD_TESTING 缺省 ON），而 benchmark 的
+# 特性探测在 Windows 上很容易失败："Failed to determine the source files for the regular
+# expression backend"（本机 CMake 4 + 长路径），交叉编译时也会卡在它的 find_package(Threads)。
+# 我们只要 libcrypto/libssl，所以在项目 CMakeLists 之前就用工具链文件把 BUILD_TESTING
+# 关掉；include(CTest) 不会覆盖已有的缓存值。
+TC=${TMPDIR:-/tmp}/svcd-meow.cmake
+cat > "$TC" <<'EOF'
+set(BUILD_TESTING OFF CACHE BOOL "meow: no boringssl tests or benchmarks" FORCE)
+EOF
+export CMAKE_TOOLCHAIN_FILE=$TC
+
+# Windows 上 boring-sys 用 bindgen 生成绑定，bindgen 要 libclang.dll。装了 LLVM
+# （scoop 或官方安装包）就把它找出来，省得每个 shell 自己设 LIBCLANG_PATH。
+if [ -z "${LIBCLANG_PATH:-}" ]; then
+    for _dir in "$HOME/scoop/apps/llvm/current/bin" "/c/Program Files/LLVM/bin" \
+        "/c/Program Files (x86)/LLVM/bin"; do
+        if [ -e "$_dir/libclang.dll" ]; then
+            export LIBCLANG_PATH="$_dir"
+            export PATH="$_dir:$PATH"
+            break
+        fi
+    done
+fi
+
 # 交叉工具链的根目录：$1 是环境变量值（可能为空），$2 是编译器名，其余是候选目录。
 # 返回第一个真的装着 $2 的目录；一个都没有就失败。
 cross_root() {
@@ -41,7 +65,7 @@ case "$PLATFORM" in
     BINDGEN_ARGS="--target=armv7-unknown-linux-musleabihf --sysroot=$CROSS/arm-linux-musleabihf"
     export BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_ARGS"
     export BINDGEN_EXTRA_CLANG_ARGS_armv7_unknown_linux_musleabihf="$BINDGEN_ARGS"
-    TC=${TMPDIR:-/tmp}/svcd-armv7.cmake
+    # 追加到上面那份工具链文件里：BUILD_TESTING 那行要留着。
     {
       echo "set(CMAKE_SYSTEM_NAME Linux)"
       echo "set(CMAKE_SYSTEM_PROCESSOR arm)"
@@ -53,8 +77,7 @@ case "$PLATFORM" in
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)"
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)"
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)"
-    } > "$TC"
-    export CMAKE_TOOLCHAIN_FILE=$TC ;;
+    } >> "$TC" ;;
   aarch64-unknown-linux-musl)
     A=$(cross_root "${AARCH64_CROSS:-}" aarch64-linux-musl-gcc /usr/soft/aarch64-linux-musl-cross) ||
       die "找不到 aarch64 交叉工具链：设 AARCH64_CROSS=<root>（里面有 bin/aarch64-linux-musl-gcc）"
