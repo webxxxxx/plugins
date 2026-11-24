@@ -54,7 +54,7 @@ raw 排第一：它给的就是分支当前内容，没有配额。2、3 是两�
 
 成功结果写到插件根目录的 <data_dir>/plugins/plugin-store/catalog.md，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。插件根目录从运行中的 payload 路径推出（<data>/plugins/<id>/<version>/payload/bin/<exe> 往上四级）——svcd 不给插件注入 SVCD_DATA_DIR；手动运行二进制时才退回 SVCD_DATA_DIR，再退回系统临时目录。页面顶部的「列表」会显示这条在线结果来自哪个域名。
 
-下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/；安装成功后删除，失败时保留以便重试。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk（含 .part 临时文件）并清空任务状态；已经交给宿主安装（installing）后不能删除。下载顺序：
+下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/；安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk（含 .part 临时文件）并清空任务状态；已经交给宿主安装（installing）后不能删除。下载顺序：
 
 1. 直接下载（自动跟随 GitHub release 的 302）；
 2. 如果 release-assets.githubusercontent.com 被 DNS 污染/无法连接，查询 Cloudflare/Google DNS-over-HTTPS 得到真实地址，用固定 resolver 重试；TLS 仍按原主机名校验；
@@ -186,6 +186,7 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   用本地 HTTP 假 transport 覆盖：下载文件与响应体逐字节一致，`.part` 已清理，路径在
   `incoming/` 下；不依赖外网。限流响应另有一条本地假 403 用例，直接驱动 `net::fetch_json`
   验证 `x-ratelimit-*` 头与可读文案。
+- 安装收尾：`a_failed_install_drops_the_downloaded_package` 断言失败报告后 `.spk` 与 `.part` 都不在了。
 - 认证与缓存：`an_etag_turns_a_repeated_check_into_a_cached_304`、
   `a_configured_token_is_sent_as_a_bearer_header`、`a_token_file_is_read_trimmed_and_never_beats_the_environment`
   与 `a_rate_limited_answer_points_at_the_token_file` 都用本地 TCP 假服务器覆盖，

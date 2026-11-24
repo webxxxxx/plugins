@@ -536,19 +536,17 @@ impl PluginStore {
         let job = job.clone();
         drop(state);
         emit_job(&job);
-        if ok {
-            let cached = self.download_dir.join(package_file_parts(
-                &job.name,
-                &job.version,
-                &job.platform,
-                job.device.as_deref(),
-            ));
-            match fs::remove_file(&cached) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => log_warn!("删除缓存包 {} 失败: {error}", cached.display()),
-            }
-        }
+        // 安装一结束就删掉下载副本：`download_dir` 是传输暂存，不是仓库。
+        // 只在成功时删，失败时留一份「重试不用再下载」会把小卷占满——34 MB
+        // 的 OpenWrt 上，一次失败的 15.7 MiB 安装就让 temp 一直不清。
+        let downloaded = self.download_dir.join(package_file_parts(
+            &job.name,
+            &job.version,
+            &job.platform,
+            job.device.as_deref(),
+        ));
+        remove_download(&downloaded);
+        remove_download(&net::part_path(&downloaded));
         ToolOutcome::text(json!({ "job": job_json(&job) }).to_string())
     }
 
@@ -1573,6 +1571,49 @@ mod tests {
         assert!(!job_is_current(&state, 1));
     }
 
+    #[test]
+    fn a_failed_install_drops_the_downloaded_package() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-failed-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let job = Job {
+            id: 7,
+            name: "hysteria".into(),
+            version: "16.0.0".into(),
+            platform: "armv7-unknown-linux-musleabihf".into(),
+            device: None,
+            phase: "installing".into(),
+            downloaded: 15,
+            total: Some(15),
+            message: String::new(),
+            done: false,
+            ok: false,
+            started_at: 0,
+        };
+        let store = store_with(&dir, job);
+        let package = dir.join("hysteria-16.0.0-armv7-unknown-linux-musleabihf.spk");
+        fs::write(&package, b"spk").unwrap();
+        fs::write(net::part_path(&package), b"part").unwrap();
+
+        let outcome = store.install_result(&json!({"ok": false, "message": "安装失败"}));
+        assert!(
+            !matches!(outcome, svcd_plugin::ToolOutcome::Error(_)),
+            "install_result must succeed for a job that exists"
+        );
+        assert!(
+            !package.exists(),
+            "a failed install must not keep the downloaded package"
+        );
+        assert!(
+            !net::part_path(&package).exists(),
+            "its .part belongs to the same transfer"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn store_with(dir: &Path, job: Job) -> PluginStore {
         PluginStore {
             settings: settings::Settings::default(),
@@ -1745,7 +1786,8 @@ mod tests {
         .to_string();
         let stop = Arc::new(AtomicBool::new(false));
         let server_stop = Arc::clone(&stop);
-        let (server_archive, server_sums, server_index) = (archive.clone(), sums.clone(), index.clone());
+        let (server_archive, server_sums, server_index) =
+            (archive.clone(), sums.clone(), index.clone());
         let server = thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
             while !server_stop.load(Ordering::SeqCst) {
@@ -1800,7 +1842,9 @@ mod tests {
             _ => panic!("the metadata call must answer with JSON text"),
         }
 
-        match store.release_asset(&json!({"download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zip"})) {
+        match store.release_asset(
+            &json!({"download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zip"}),
+        ) {
             ToolOutcome::Blob { path, name, .. } => {
                 assert_eq!(name, "svcd-0.1.5-x86_64-pc-windows-msvc.zip");
                 assert_eq!(fs::read(path).unwrap(), archive);
@@ -1883,7 +1927,10 @@ mod tests {
                 let value: Value = serde_json::from_str(&text).unwrap();
                 // The mirror had nothing, so the answer came from GitHub.
                 assert_eq!(value["tag"], "v0.2.0");
-                assert_eq!(value["assets"][0]["name"], "svcd-0.2.0-x86_64-pc-windows-msvc.zip");
+                assert_eq!(
+                    value["assets"][0]["name"],
+                    "svcd-0.2.0-x86_64-pc-windows-msvc.zip"
+                );
             }
             _ => panic!("the metadata call must answer with JSON text"),
         }
