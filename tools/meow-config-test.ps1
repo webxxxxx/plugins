@@ -1,0 +1,121 @@
+<#
+meow 的配置层（Windows 版）：pc 形态自动写 tun + fake-ip + mixed-port。
+
+和 tools/meow-config-test.sh 对应，但 meow.ps1 只能在 PowerShell 里跑，所以只取它的
+函数定义（按语法树抽取，不执行脚本最后的 switch），在假布局上调用，再检查 meow.yaml。
+
+用法：pwsh tools/meow-config-test.ps1 [-Repo <仓库根>]
+#>
+param([string]$Repo = (Join-Path $PSScriptRoot '..'))
+
+$ErrorActionPreference = 'Stop'
+$Repo = (Resolve-Path $Repo).Path
+$Script = Join-Path $Repo 'plugins/meow/platforms/meow.ps1'
+$Work = Join-Path ([System.IO.Path]::GetTempPath()) ("meow-config-test-" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $Work | Out-Null
+
+function Fail([string]$Message) {
+    Write-Error "FAIL: $Message"
+    exit 1
+}
+
+# Windows PowerShell 5.1 没有 utf8NoBOM 这个编码名，统一自己写。
+function Write-Text([string]$Path, [string]$Text) {
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Read-Text([string]$Path) {
+    return [System.IO.File]::ReadAllText($Path)
+}
+
+# 只取函数定义，脚本末尾的 switch 不执行（那会去启动 meow）。
+# 返回 scriptblock，由调用方在脚本作用域点源进来——在函数里点源只会定义在函数作用域内。
+function Get-FunctionBlocks([string]$Path) {
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$errors)
+    if ($errors -and $errors.Count) {
+        $errors | ForEach-Object { Write-Error "parse error: $($_.Message)" }
+        exit 1
+    }
+    $blocks = @()
+    foreach ($function in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+        $blocks += [scriptblock]::Create($function.Extent.Text)
+    }
+    return $blocks
+}
+
+# 假插件目录，并把脚本里那些路径变量指过去。
+function New-Fixture([string]$Name) {
+    $plugin = Join-Path $Work $Name
+    $payload = Join-Path $plugin '1.2.0/payload'
+    New-Item -ItemType Directory -Force -Path (Join-Path $payload 'bin') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $payload 'yacd') | Out-Null
+    Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/config.yaml') (Join-Path $payload 'config.yaml')
+    Copy-Item (Join-Path $Repo 'plugins/meow/package/config/config') (Join-Path $plugin 'config')
+
+    $yaml = @(
+        '# 订阅配置（示例）'
+        'mixed-port: 7891'
+        'proxies:'
+        '  - name: node-1'
+        '    type: direct'
+        'tun:'
+        '  enable: false'
+        'dns:'
+        '  enable: true'
+        '  listen: 127.0.0.1:5353'
+        'rules:'
+        '  - MATCH,DIRECT'
+    ) -join "`n"
+    Write-Text (Join-Path $plugin 'meow.yaml') $yaml
+
+    $script:PLUGIN_ROOT = $plugin
+    $script:ROOT = $payload
+    $script:DATA = Join-Path $plugin '.data/meow'
+    $script:PIDFILE = Join-Path $DATA 'meow.pid'
+    $script:CONFIG = Join-Path $plugin 'config'
+    $script:MEOW_CONFIG = Join-Path $plugin 'meow.yaml'
+    $script:TEMPLATE = Join-Path $payload 'config.yaml'
+    $script:MEOW = Join-Path $payload 'bin/meow.exe'
+    New-Item -ItemType Directory -Force -Path $DATA | Out-Null
+    return $plugin
+}
+
+function Expect([string]$Path, [string]$Key, [string]$Value, [string]$Label) {
+    $actual = Get-ConfigValue $Path $Key
+    if ($actual -ne $Value) { Fail "$Label`: $Key 期望 '$Value'，实际 '$actual'" }
+}
+
+foreach ($block in (Get-FunctionBlocks $Script)) { . $block }
+
+# ---- pc：tun + fake-ip + mixed-port 自动写进去，tproxy-port 删掉 ----
+$plugin = New-Fixture 'pc'
+$configCopy = Read-Text (Join-Path $plugin 'config')
+Prepare-Config
+Apply-Settings (Get-Mode) | Out-Null
+if ((Get-BlockScalar $MEOW_CONFIG 'tun' 'enable') -ne 'true') { Fail 'pc: tun.enable 没打开' }
+if ((Get-BlockScalar $MEOW_CONFIG 'dns' 'enhanced-mode') -ne 'fake-ip') { Fail 'pc: dns.enhanced-mode 不是 fake-ip' }
+Expect $MEOW_CONFIG 'mixed-port' '7890' 'pc'
+Expect $MEOW_CONFIG 'tproxy-port' '' 'pc'
+if ((Read-Text $MEOW_CONFIG) -notmatch 'node-1') { Fail 'pc: 订阅内容被弄丢了' }
+if ((Read-Text (Join-Path $plugin 'config')) -ne $configCopy) { Fail 'pc: config 被改了' }
+
+# ---- 用户改 mixed-port，跟着走；重复跑幂等 ----
+Write-Text (Join-Path $plugin 'config') ((Read-Text (Join-Path $plugin 'config')) -replace '(?m)^mixed-port: 7890', 'mixed-port: 1080')
+Apply-Settings (Get-Mode) | Out-Null
+Expect $MEOW_CONFIG 'mixed-port' '1080' 'pc 改端口'
+$before = Read-Text $MEOW_CONFIG
+Apply-Settings (Get-Mode) | Out-Null
+if ((Read-Text $MEOW_CONFIG) -ne $before) { Fail 'pc: 第二次跑改了文件' }
+
+# ---- 旧布局：订阅写在 config 里，第一次启动搬过去 ----
+$plugin = New-Fixture 'migrate'
+Copy-Item (Join-Path $plugin 'meow.yaml') (Join-Path $plugin 'config') -Force
+Remove-Item (Join-Path $plugin 'meow.yaml')
+Prepare-Config
+if (-not (Test-Path (Join-Path $plugin 'meow.yaml'))) { Fail 'migrate: meow.yaml 没生成' }
+if ((Read-Text (Join-Path $plugin 'meow.yaml')) -notmatch 'node-1') { Fail 'migrate: 订阅没迁过去' }
+Expect (Join-Path $plugin 'config') 'proxy-mode' 'pc' 'migrate'
+
+Remove-Item -Recurse -Force $Work
+Write-Output 'meow config layer (windows): ok'

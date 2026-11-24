@@ -1,0 +1,49 @@
+# meow（mihomo 兼容）配置模板。
+#
+# 这个文件是 meow 自己的配置：订阅、代理组、规则都写在这里。第一次启动时会被复制成
+# <插件目录>/meow.yaml，之后就是那一份在跑；本文件只是出厂模板（改了不会自动生效，
+# 想恢复出厂配置就 plugin editconfig meow --reset 之后再重启）。
+#
+# 插件的开关不在这里：proxy-mode / mixed-port / tproxy-port / routing-mark /
+# lan-interface 都在 <插件目录>/config 里，由插件在启动时写进这份配置的受管键
+# （mixed-port、tun、dns、tproxy-port），所以 meow 重写配置也不会把它们弄丢。
+
+mixed-port: 7890
+allow-lan: true
+bind-address: 0.0.0.0
+mode: rule
+log-level: info
+ipv6: true
+
+# 面板：http://127.0.0.1:9090/ui/ ；secret 为空表示本机免密。
+external-controller: 127.0.0.1:9090
+secret: ""
+external-ui: yacd
+
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+  # Windows 的 TUN 捕获要求 fake-ip，插件在 pc 形态会自动写上这两行：
+  # enhanced-mode: fake-ip
+  # fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+
+# 地理数据库放数据目录，别改安装目录；缺失时 meow 会自行下载。
+# 路径用单引号：@DATA@ 在 Windows 上会替换成 C:\ProgramData\...，双引号标量会把
+# \P、\s 当成转义而报 "found unknown escape character"。
+geodata:
+  mmdb-path: '@DATA@/Country.mmdb'
+  asn-path: '@DATA@/GeoLite2-ASN.mmdb'
+  geosite-path: '@DATA@/geosite.dat'
+
+rule-providers:
+  cn_domains:
+    type: file
+    behavior: domain
+    path: cn_domains.yaml
+
+rules:
+  - RULE-SET,cn_domains,DIRECT
+  - MATCH,DIRECT

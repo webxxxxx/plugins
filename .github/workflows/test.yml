@@ -130,3 +130,14 @@ jobs:
             echo '::error::a single-family project must not split its manifest'
             exit 1
           fi
+
+      # meow 的配置层：config（我们的开关）和 meow.yaml（订阅）分开，受管键按
+      # proxy-mode 自动写。两个假布局脚本各自验证一侧，都不需要真的启动 meow。
+      - name: meow 配置层（shell）
+        shell: bash
+        run: sh tools/meow-config-test.sh
+
+      - name: meow 配置层（PowerShell）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/meow-config-test.ps1
