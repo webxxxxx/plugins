@@ -54,7 +54,7 @@ raw 排第一：它给的就是分支当前内容，没有配额。2、3 是两�
 
 成功结果写到插件根目录的 <data_dir>/plugins/plugin-store/catalog.md，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。插件根目录从运行中的 payload 路径推出（<data>/plugins/<id>/<version>/payload/bin/<exe> 往上四级）——svcd 不给插件注入 SVCD_DATA_DIR；手动运行二进制时才退回 SVCD_DATA_DIR，再退回系统临时目录。页面顶部的「列表」会显示这条在线结果来自哪个域名。
 
-下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/；安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk（含 .part 临时文件）并清空任务状态；已经交给宿主安装（installing）后不能删除。下载顺序：
+下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/；交给宿主时用 rename 移进 `$SVCD_TEMP_DIR/incoming`（同一文件系统，不再占第二份 15 MiB；跨设备才降级复制，失败会删掉半成品）。安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk（含 .part 临时文件）并清空任务状态；已经交给宿主安装（installing）后不能删除。下载顺序：
 
 1. 直接下载（自动跟随 GitHub release 的 302）；
 2. 如果 release-assets.githubusercontent.com 被 DNS 污染/无法连接，查询 Cloudflare/Google DNS-over-HTTPS 得到真实地址，用固定 resolver 重试；TLS 仍按原主机名校验；

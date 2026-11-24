@@ -474,8 +474,8 @@ impl PluginStore {
             return ToolOutcome::error(format!("{}: {error}", incoming.display()));
         }
         let target = incoming.join(package_file(&entry));
-        if let Err(error) = fs::copy(&package, &target) {
-            return ToolOutcome::error(format!("{}: {error}", target.display()));
+        if let Err(error) = hand_off(&package, &target) {
+            return ToolOutcome::error(error);
         }
         let updated_job = {
             if let Ok(mut state) = self.state.lock() {
@@ -818,6 +818,35 @@ fn job_is_current(state: &Arc<Mutex<State>>, id: u64) -> bool {
 
 /// Remove a downloaded package or its `.part`, tolerating a download thread
 /// that is still closing the handle: Windows refuses to unlink an open file.
+/// Move the downloaded package into the host's incoming directory.
+///
+/// The download lives under the plugin data root and `$SVCD_TEMP_DIR/incoming`
+/// is normally the same filesystem, so a rename is enough — and it matters:
+/// copying a 15.7 MiB package needs a second 15.7 MiB, which a small `/data`
+/// volume does not have; a failed copy also used to leave a partial file in
+/// `incoming/` that nothing cleaned. A cross-device rename falls back to copy,
+/// and any partial target is removed on failure.
+fn hand_off(package: &Path, target: &Path) -> Result<(), String> {
+    match fs::remove_file(target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("{}: {error}", target.display())),
+    }
+    if fs::rename(package, target).is_ok() {
+        return Ok(());
+    }
+    match fs::copy(package, target) {
+        Ok(_) => {
+            remove_download(package);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(target);
+            Err(format!("{}: {error}", target.display()))
+        }
+    }
+}
+
 fn remove_download(path: &Path) {
     for attempt in 0..20 {
         match fs::remove_file(path) {
@@ -1610,6 +1639,78 @@ mod tests {
         assert!(
             !net::part_path(&package).exists(),
             "its .part belongs to the same transfer"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn package_entry(name: &str, version: &str, platform: &str) -> catalog::Entry {
+        catalog::Entry {
+            name: name.into(),
+            version: version.into(),
+            platform: platform.into(),
+            size: "15.7 MiB".into(),
+            size_bytes: 15,
+            url: "https://example.com/x.spk".into(),
+            device: None,
+        }
+    }
+
+    /// #291: the handoff moves the download instead of copying it (a second
+    /// 15.7 MiB does not fit a small `/data`), and a stale target from an
+    /// earlier attempt is replaced rather than left next to the real package.
+    #[test]
+    fn package_blob_moves_the_download_into_incoming() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-blob-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let job = Job {
+            id: 1,
+            name: "hysteria".into(),
+            version: "16.0.0".into(),
+            platform: "armv7-unknown-linux-musleabihf".into(),
+            device: None,
+            phase: "ready".into(),
+            downloaded: 3,
+            total: Some(3),
+            message: String::new(),
+            done: false,
+            ok: false,
+            started_at: 0,
+        };
+        let store = store_with(&dir, job);
+        store.state.lock().unwrap().entries.push(package_entry(
+            "hysteria",
+            "16.0.0",
+            "armv7-unknown-linux-musleabihf",
+        ));
+        let package = dir.join("hysteria-16.0.0-armv7-unknown-linux-musleabihf.spk");
+        fs::write(&package, b"spk").unwrap();
+        let incoming = dir.join("incoming");
+        fs::create_dir_all(&incoming).unwrap();
+        let stale = incoming.join("hysteria-16.0.0-armv7-unknown-linux-musleabihf.spk");
+        fs::write(&stale, b"stale").unwrap();
+
+        let outcome = store.package_blob(&json!({
+            "name": "hysteria",
+            "version": "16.0.0",
+            "platform": "armv7-unknown-linux-musleabihf"
+        }));
+        match outcome {
+            svcd_plugin::ToolOutcome::Blob { path, .. } => {
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    b"spk",
+                    "the stale target must be replaced by the download"
+                );
+            }
+            _ => panic!("package_blob must hand the package over as a blob"),
+        }
+        assert!(
+            !package.exists(),
+            "the download is moved into incoming, not copied"
         );
         let _ = fs::remove_dir_all(&dir);
     }
