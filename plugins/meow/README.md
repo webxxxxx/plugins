@@ -271,6 +271,18 @@ Rust 1.98.1（vendor 里的 `rust-toolchain.toml`）和 cmake/C++ 是构建依�
 BoringSSL 由 meow-rs 自己静态链接。构建只产出一个二进制（meow 内核），入口是
 `payload/bin/` 里的两个脚本。
 
+本机构建要满足三件事，缺哪件 `build.sh` 都会先说清楚再退出：
+
+| 要的东西 | 说明 |
+| --- | --- |
+| 目标装到 pin 的工具链上 | `rustup target add --toolchain 1.98.1-<本机三元组> <目标>`。装到默认工具链不算数——`rust-toolchain.toml` 把版本固定在 1.98.1 |
+| cmake | BoringSSL 用它构建；Windows 上 `scoop install cmake`，Linux 上 `apt install cmake` |
+| 交叉 C 工具链 | musl 目标需要（`X86_64_MUSL_CROSS` / `AARCH64_CROSS` / `CROSS_PREFIX`）；`build.sh` 会探测 `/usr/soft/*-cross` 和 `/d/soft/x86_64-linux-musl`，找不到就报错 |
+
+只打本机那一个平台：`plugin-tools build --platform <本机三元组>`。不带 `--platform`
+会按 `.plugin.json` 的 7 个平台逐个交叉编译，本机通常编不了 darwin，交叉 musl 也要上面
+那套工具链。
+
 发布流水线按 `.plugin.json` 的 7 个平台构建；Linux musl 三个目标用
 musl cross 工具链编译 BoringSSL，Windows 目标在 windows runner 上编译
 （`wintun.dll` 由 meow 在编译期取回并内嵌），macOS 目标用宿主 Xcode 工具链。
