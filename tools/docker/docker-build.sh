@@ -22,8 +22,8 @@
 #   -r DIR    项目根（→ /work）：默认当前目录的 git 顶层
 #   -w DIR    项目根下干活的位置（默认根），target 落在 <workspace>/<NAME>/target
 #   -n NAME   构建工作目录名，默认取 -w 那个目录的名字
-#   -p TRIPLE 目标平台：自动配好 CC / AR / 链接器和 PATH，省得 cargo 报「linker cc not found」
-#             （不写就从命令里的 --target 读；musl 的 armv7/aarch64 走 /usr/soft 的交叉工具链）
+#   -p TRIPLE 目标平台：容器里按 tools/cross-env.sh 配好 CC / AR / 链接器和 PATH，
+#             省得 cargo 报「linker cc not found」（不写就从命令里的 --target 读）
 #   -t IMAGE  镜像（默认 rust-cross:1.98.1）
 #   -j N      并行度（默认 4）
 set -eu
@@ -31,6 +31,7 @@ set -eu
 SELF=$0
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SCRIPT_REPO=$(CDPATH= cd -- "$SELF_DIR/../.." && pwd)
+TOOLS_DIR=$(CDPATH= cd -- "$SELF_DIR/.." && pwd) # cross-env.sh 在 tools/ 下，容器里挂成 /svcd-tools
 WORKSPACE=${SVCD_BUILD_WORKSPACE:-/usr/soft/build_workspace}
 IMAGE=${SVCD_CROSS_IMAGE:-rust-cross:1.98.1}
 JOBS=${JOBS:-4}
@@ -102,79 +103,16 @@ if [ "$_IS_CARGO" = 1 ] && [ ! -f "$WORKDIR/Cargo.toml" ]; then
     exit 2
 fi
 
-# ---- 目标平台 → C 工具链 ----
-# 交叉编译 Rust 只差一个链接器：musl/arm 的目标没有系统 cc 能链接，cargo 只会说
-# 「linker `cc` not found」。这里按目标把 CC/AR/链接器配好，PATH 也带上工具链目录。
-CROSS_PATH=
-ENVS=
-env_add() { ENVS="$ENVS -e $1"; }
-
-cross_root() { # $1=编译器名 $2..=候选根目录；打印第一个真有它的根
-    _compiler=$1
-    shift
-    for _dir in "$@"; do
-        [ -n "$_dir" ] || continue
-        if [ -x "$_dir/bin/$_compiler" ]; then
-            printf '%s' "$_dir"
-            return 0
-        fi
-    done
-    return 1
-}
-
-target_env() {
-    _triple=$1
-    _upper=$(printf '%s' "$_triple" | tr 'a-z-.' 'A-Z__')
-    _root=
-    _cc=
-    _cxx=
-    _ar=
-
-    case "$_triple" in
-    armv7-unknown-linux-musleabihf)
-        _root=$(cross_root arm-linux-musleabihf-gcc "${CROSS_PREFIX:-}" /usr/soft/arm-linux-musleabihf-cross) || _root=
-        _cc=arm-linux-musleabihf-gcc
-        _cxx=arm-linux-musleabihf-g++
-        _ar=arm-linux-musleabihf-ar
-        ;;
-    aarch64-unknown-linux-musl)
-        _root=$(cross_root aarch64-linux-musl-gcc "${AARCH64_CROSS:-}" /usr/soft/aarch64-linux-musl-cross) || _root=
-        _cc=aarch64-linux-musl-gcc
-        _cxx=aarch64-linux-musl-g++
-        _ar=aarch64-linux-musl-ar
-        ;;
-    x86_64-unknown-linux-musl)
-        # 镜像里有 musl-tools：musl-gcc 够编 C 依赖，也能当 Rust 目标的链接器
-        _cc=musl-gcc
-        _ar=ar
-        ;;
-    x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu)
-        return 0 # 原生（或镜像里本来就有 gcc）
-        ;;
-    x86_64-pc-windows-msvc)
-        echo "docker-build: windows-msvc 要用 cargo xwin build，不是 cargo build（cargo-xwin 已在 /rustbin，XWIN_CACHE_DIR 指到 $WORKSPACE/xwin）" >&2
-        return 0
-        ;;
-    *)
-        return 0
+# ---- 目标平台：交叉工具链的表在 cross-env.sh，容器里再套上去 ----
+# 宿主这边不认识三元组也没关系：把 tools/ 挂成 /svcd-tools，容器里 source 同一份表，
+# 用 svcd_cross_exec 把 CC_/AR_/CARGO_TARGET_*_LINKER 和 PATH 配好再跑命令。
+if [ -n "${TRIPLE:-}" ]; then
+    case "$TRIPLE" in
+    *-pc-windows-msvc)
+        echo "docker-build: windows-msvc 要用 cargo xwin build，不是 cargo build（cargo-xwin 在 /rustbin，XWIN_CACHE_DIR 指到 $WORKSPACE/xwin）" >&2
         ;;
     esac
-
-    if [ -n "$_root" ]; then
-        CROSS_PATH="$CROSS_PATH$_root/bin:"
-    elif [ -n "$_cc" ] && [ "$_cc" != musl-gcc ]; then
-        echo "docker-build: 找不到 $_triple 的交叉工具链（要 $_cc）；/usr/soft 下放一份，或用 CROSS_PREFIX / AARCH64_CROSS 指过去" >&2
-        exit 1
-    fi
-
-    env_add "CC_$_upper=$_cc"
-    env_add "CARGO_TARGET_${_upper}_LINKER=$_cc"
-    if [ -n "$_cxx" ]; then env_add "CXX_$_upper=$_cxx"; fi
-    if [ -n "$_ar" ]; then env_add "AR_$_upper=$_ar"; fi
-    return 0
-}
-
-if [ -n "${TRIPLE:-}" ]; then target_env "$TRIPLE"; fi
+fi
 
 command -v docker >/dev/null 2>&1 || {
     echo "docker-build: 找不到 docker（WSL：apt install docker.io && sudo usermod -aG docker \$USER，重开会话）" >&2
@@ -218,7 +156,7 @@ fi
 SOFT=
 if [ -d /usr/soft ]; then SOFT="-v /usr/soft:/usr/soft"; fi
 
-CONTAINER_PATH="/rustbin:$WORKSPACE/cargo/bin:${CROSS_PATH}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+CONTAINER_PATH="/rustbin:$WORKSPACE/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 echo "docker-build: $ROOT → /work，在 $DIR 里干活${TRIPLE:+，目标 $TRIPLE}（$NAME）" >&2
 
@@ -240,5 +178,6 @@ exec docker run --rm \
     -e XWIN_ACCEPT_LICENSE=1 \
     -e SVCD_IN_DOCKER=1 \
     -e JOBS="$JOBS" \
-    $ENVS \
-    "$IMAGE" "$@"
+    -v "$TOOLS_DIR:/svcd-tools:ro" \
+    "$IMAGE" \
+    sh -c '. /svcd-tools/cross-env.sh && svcd_cross_exec "$0" "$@"' "${TRIPLE:-}" "$@"

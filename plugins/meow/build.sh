@@ -10,6 +10,7 @@
 set -eu
 NAME=$1; VERSION=$2; PLATFORM=$3
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO=$(CDPATH= cd -- "$HERE/../.." && pwd)
 mkdir -p "$HERE/out"
 command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"   # WSL 的非登录 shell 常缺这个
 
@@ -19,7 +20,6 @@ die() { echo "meow: $*" >&2; exit 1; }
 # SVCD_DOCKER=1 时整段编译丢给 tools/docker 的 rust-cross 镜像（clang、libclang、MSVC SDK、
 # 交叉工具链都在里面），宿主机不装任何东西。容器里带着 SVCD_IN_DOCKER=1，不会再递归。
 if [ "${SVCD_DOCKER:-0}" = 1 ] && [ "${SVCD_IN_DOCKER:-0}" != 1 ]; then
-    REPO=$(CDPATH= cd -- "$HERE/../.." && pwd)
     [ -f "$REPO/tools/docker/docker-build.sh" ] || die "SVCD_DOCKER=1 但找不到 tools/docker/docker-build.sh"
     echo "meow: docker 里编 $PLATFORM" >&2
     # 项目根钉成仓库根（-w 是「根下哪个子目录」，不是「当前目录」）；
@@ -52,81 +52,41 @@ if [ -z "${LIBCLANG_PATH:-}" ]; then
     done
 fi
 
-# 交叉工具链的根目录：$1 是环境变量值（可能为空），$2 是编译器名，其余是候选目录。
-# 返回第一个真的装着 $2 的目录；一个都没有就失败。
-cross_root() {
-    _value=$1
-    _compiler=$2
-    shift 2
-    for _dir in "$_value" "$@"; do
-        if [ -n "$_dir" ] && { [ -e "$_dir/bin/$_compiler" ] || [ -e "$_dir/bin/$_compiler.exe" ]; }; then
-            printf '%s' "$_dir"
-            return 0
-        fi
-    done
-    return 1
-}
+# 交叉工具链的映射只有一份：tools/cross-env.sh。PATH、CC_/CXX_/AR_/RANLIB_、
+# CARGO_TARGET_*_LINKER 都由它导出；meow 这边只补 BoringSSL 要的两样：
+# bindgen 的 sysroot，和 cmake 认的编译器全路径。
+. "$REPO/tools/cross-env.sh"
+svcd_cross_apply "$PLATFORM" || die "$SVCD_CROSS_ERROR"
 
 case "$PLATFORM" in
-  armv7-unknown-linux-musleabihf)
-    CROSS=$(cross_root "${CROSS_PREFIX:-}" arm-linux-musleabihf-gcc /usr/soft/arm-linux-musleabihf-cross) ||
-      die "找不到 armv7 交叉工具链：设 CROSS_PREFIX=<root>（里面有 bin/arm-linux-musleabihf-gcc）"
-    export PATH="$CROSS/bin:$PATH"
-    export CC_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-gcc
-    export CXX_armv7_unknown_linux_musleabihf=arm-linux-musleabihf-g++
-    export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=arm-linux-musleabihf-gcc
-    BINDGEN_ARGS="--target=armv7-unknown-linux-musleabihf --sysroot=$CROSS/arm-linux-musleabihf"
+  armv7-unknown-linux-musleabihf|aarch64-unknown-linux-musl|x86_64-unknown-linux-musl)
+    BINDGEN_ARGS="--target=$PLATFORM"
+    # musl-gcc 那条没有 sysroot，硬塞一个反而是错路径
+    if [ -n "$SVCD_CROSS_SYSROOT" ]; then
+      BINDGEN_ARGS="$BINDGEN_ARGS --sysroot=$SVCD_CROSS_SYSROOT"
+    fi
     export BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_ARGS"
-    export BINDGEN_EXTRA_CLANG_ARGS_armv7_unknown_linux_musleabihf="$BINDGEN_ARGS"
-    # 追加到上面那份工具链文件里：BUILD_TESTING 那行要留着。
+    export "BINDGEN_EXTRA_CLANG_ARGS_$(printf '%s' "$PLATFORM" | tr '-' '_')=$BINDGEN_ARGS" ;;
+  x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc|aarch64-apple-darwin|x86_64-apple-darwin) ;;
+  *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
+esac
+
+# BoringSSL 的 cmake 只认绝对路径，armv7 这一支要显式给。追加到上面那份工具链文件里：
+# BUILD_TESTING 那行要留着。
+case "$PLATFORM" in
+  armv7-unknown-linux-musleabihf)
     {
       echo "set(CMAKE_SYSTEM_NAME Linux)"
       echo "set(CMAKE_SYSTEM_PROCESSOR arm)"
-      echo "set(CMAKE_C_COMPILER $CROSS/bin/arm-linux-musleabihf-gcc)"
-      echo "set(CMAKE_CXX_COMPILER $CROSS/bin/arm-linux-musleabihf-g++)"
-      echo "set(CMAKE_AR $CROSS/bin/arm-linux-musleabihf-ar)"
-      echo "set(CMAKE_RANLIB $CROSS/bin/arm-linux-musleabihf-ranlib)"
-      echo "set(CMAKE_FIND_ROOT_PATH $CROSS)"
+      echo "set(CMAKE_C_COMPILER $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-gcc)"
+      echo "set(CMAKE_CXX_COMPILER $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-g++)"
+      echo "set(CMAKE_AR $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-ar)"
+      echo "set(CMAKE_RANLIB $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-ranlib)"
+      echo "set(CMAKE_FIND_ROOT_PATH $SVCD_CROSS_ROOT)"
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)"
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)"
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)"
     } >> "$TC" ;;
-  aarch64-unknown-linux-musl)
-    A=$(cross_root "${AARCH64_CROSS:-}" aarch64-linux-musl-gcc /usr/soft/aarch64-linux-musl-cross) ||
-      die "找不到 aarch64 交叉工具链：设 AARCH64_CROSS=<root>（里面有 bin/aarch64-linux-musl-gcc）"
-    export PATH="$A/bin:$PATH"
-    export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
-    export CXX_aarch64_unknown_linux_musl=aarch64-linux-musl-g++
-    export AR_aarch64_unknown_linux_musl=aarch64-linux-musl-ar
-    export RANLIB_aarch64_unknown_linux_musl=aarch64-linux-musl-ranlib
-    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
-    BINDGEN_ARGS="--target=aarch64-unknown-linux-musl --sysroot=$A/aarch64-linux-musl"
-    export BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_ARGS"
-    export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="$BINDGEN_ARGS" ;;
-  x86_64-unknown-linux-musl)
-    if command -v musl-gcc >/dev/null 2>&1; then
-      # 容器里走这条：musl-tools 给的 musl-gcc，够编 BoringSSL、也能当 Rust 目标的链接器。
-      export CC_x86_64_unknown_linux_musl=musl-gcc
-      export CXX_x86_64_unknown_linux_musl=g++
-      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
-      export BINDGEN_EXTRA_CLANG_ARGS="--target=x86_64-unknown-linux-musl"
-      export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--target=x86_64-unknown-linux-musl"
-      break
-    fi
-    X=$(cross_root "${X86_64_MUSL_CROSS:-${CROSS_PREFIX:-}}" x86_64-linux-musl-gcc \
-        /usr/soft/x86_64-linux-musl-cross /d/soft/x86_64-linux-musl) ||
-      die "找不到 x86_64 musl 交叉工具链：设 X86_64_MUSL_CROSS=<root>（里面有 bin/x86_64-linux-musl-gcc）"
-    export PATH="$X/bin:$PATH"
-    export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
-    export CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
-    export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
-    export RANLIB_x86_64_unknown_linux_musl=x86_64-linux-musl-ranlib
-    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
-    BINDGEN_ARGS="--target=x86_64-unknown-linux-musl --sysroot=$X/x86_64-linux-musl"
-    export BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_ARGS"
-    export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="$BINDGEN_ARGS" ;;
-  x86_64-unknown-linux-gnu|x86_64-pc-windows-msvc|aarch64-apple-darwin|x86_64-apple-darwin) ;;
-  *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
 esac
 cd "$HERE/vendor/meow-rs"
 

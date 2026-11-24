@@ -6,6 +6,7 @@
 | 脚本 | 干什么 |
 | --- | --- |
 | `tools/docker/docker-build.sh` | 在镜像里跑**任意命令**（cargo build、插件的 build.sh、plugin-tools 自己），任何仓库都能用 |
+| `tools/cross-env.sh` | 目标三元组 → C 交叉工具链的**唯一一张表**：插件的 build.sh 和容器入口都 source 它 |
 | `tools/pack.sh` | 打包插件：编 + staging + bundle，产物统一拷到 `dist/` |
 
 `docker-build.sh` 以前叫 `run.sh`，旧名字现在还留着一个转发脚本，老调用不会失效。
@@ -85,8 +86,9 @@ sh /mnt/d/learn/harmess_workspace/plugins/tools/docker/docker-build.sh -- \
 ```
 
 第三条不用写 `-r`/`-w`/`-p`：项目根取当前目录（这里是 plugin-manager 的 git 顶层），
-`--target` 从命令里认出来，然后自动带上 `CC_armv7_unknown_linux_musleabihf`、
-`CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER` 和 `/usr/soft/...-cross/bin` 的 PATH。
+`--target` 从命令里认出来，容器里由 `tools/cross-env.sh` 套上 `CC_armv7_unknown_linux_musleabihf`、
+`CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER` 和 `/usr/soft/...-cross/bin` 的 PATH
+（`tools/` 会挂成 `/svcd-tools`，所以别的仓库也能用这张表）。
 
 windows 目标不一样，要用 `cargo xwin build`（链接器是 lld-link + 容器里的 MSVC SDK）：
 
@@ -121,6 +123,13 @@ sh tools/pack.sh sshd                            # 别的插件（build.sh 支�
    `-r` 要给全：`-w` 是「项目根下的子目录」，不跟着当前目录走（不写 `-r` 时才按当前目录的
    git 顶层推）。
 
+   交叉目标再 source 一次那张表（容器里 `docker-build.sh` 已经替你做过了，宿主直编要自己做）：
+
+   ```sh
+   . "$REPO/tools/cross-env.sh"
+   svcd_cross_apply "$PLATFORM" || die "$SVCD_CROSS_ERROR"
+   ```
+
 2. `plugin-tools build.json` 里的命令不用改，`plugin-tools` 只是执行它。
 
 3. 纯 Rust 的 crate（比如 `tools/cli`、宿主 `svcd`）不用这套包装：站在它的仓库里
@@ -132,7 +141,7 @@ sh tools/pack.sh sshd                            # 别的插件（build.sh 支�
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `error: could not find Cargo.toml in /work` | 脚本原先把项目根算成它自己所在的仓库，在别的仓库里敲就挂错了 | 现在默认取当前目录的 git 顶层；跨仓库/子目录用 `-r`、`-w` |
-| `crt1.o: relocations in generic ELF (EM: 40)` / `file in wrong format` | C 依赖（ring、openssl 之类）还是用宿主 `cc` 编的，目标文件是 x86_64 | 给目标配 `CC_<triple>` / `AR_<triple>` / `CARGO_TARGET_<TRIPLE>_LINKER`；`plugins/plugin-store/build.sh` 是现成写法，或者 `SVCD_DOCKER=1` 直接丢进容器 |
+| `crt1.o: relocations in generic ELF (EM: 40)` / `file in wrong format` | C 依赖（ring、openssl 之类）还是用宿主 `cc` 编的，目标文件是 x86_64 | `source tools/cross-env.sh && svcd_cross_apply <triple>` 就配好了（照 `plugins/plugin-store/build.sh` 抄两行）；或者 `SVCD_DOCKER=1` 交给容器，用的也是这张表 |
 | `linker 'cc' not found`（musl / arm 目标） | 容器里没有能链接该目标的 cc | 写 `-p <triple>`（或命令里带 `--target`），脚本自动配 CC/AR/链接器和 PATH |
 | `permission denied /var/run/docker.sock` | 用户不在 docker 组 | `sudo usermod -aG docker $USER`，重开 WSL |
 | 拉镜像卡住 | `registry-mirrors` 里的 USTC 已停服 | 换成 `docker.m.daocloud.io` / `1panel.live` / `xuanyuan.me` / `1ms.run` |
