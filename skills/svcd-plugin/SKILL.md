@@ -12,9 +12,21 @@ description: 新增或修改 svcd 插件前读：支持哪两种语言、SDK 与
 ### 1. 起项目
 
 ```bash
-plugin-tools template wireguard          # 数字菜单选语言（1-4）与平台（1-7）
-plugin-tools template wireguard --lang rust --platforms x86_64-unknown-linux-musl --webui
+plugin-tools template wireguard          # 先选平台（1-7），再按平台选语言
+plugin-tools template wireguard --lang rust --platforms x86_64-unknown-linux-musl --ui web
 ```
+
+语言跟着平台走（全 unix：rust/c/shell/powershell；全 Windows：rust/c/powershell；跨家族：
+rust/c/script），非交互时缺参数直接报错并列出允许集——不会停下来等输入。
+
+页面形态用 `--ui headerless|web|gui` 选，就是清单里 `ui.type` 的三个值（与 manage 的
+`{type: web / gui / headerless, entry?}` 一致）：`headerless` 不带页面、清单写
+`{"type": "headerless"}` 且没有 `entry`；`web` / `gui` 带模板页面与 toolkit，`entry` 是
+`index.html`。值只认这三个，没有别名。
+
+生成到哪、模板从哪来都可以指定：`--dir <path>`（相对当前目录，默认 `plugins`）、
+`--template-repo <本地目录|git 地址>`（默认从 cwd 向上找，git 地址按 URL 缓存，
+`--refresh` 强制重 clone）、`--conf <JSON>`（把这些参数写进文件，命令行优先）。
 
 完成判据：`package/manifest.json`、`build.json`、`.plugin.json` 都存在，且目录里**没有** `target/`、`dist/`、`out/`。清单里 `schema` 写成 `1`（打包器也会恒定盖成 `1`），`id` 是身份（不写则取项目目录名）。
 
@@ -70,6 +82,7 @@ plugin start <id>
 | `c` | `templates/c` | 无（编译成静态二进制） | `samples/hello-c` |
 | `shell` | `templates/shell` | 目标机有 `sh` | `samples/hello-shell` |
 | `powershell` | `templates/powershell` | Windows 的 `powershell` 或 Linux/macOS 的 `pwsh` | `samples/hello-powershell` |
+| `script` | `templates/script` | unix 有 `sh`、Windows 有 `powershell`；两套脚本写同一组能力 | 无（`template` 现生成） |
 
 四个示例实现**同一组能力**（`echo` / `get_stats` / `count_text` / `get_file_info` /
 `create_report`），可以逐行对照；每份 README 末尾都有一张「演示了宿主哪些能力」的表：
@@ -89,7 +102,17 @@ SSE、WebSocket、日志——以及它们分别由哪个能力触发。SDK 提�
 
 两种语言共用同一套契约和同一个 Web toolkit；**前端不认识后端语言**。
 
-加第三种语言不需要改工具：在 `templates/<lang>/` 放模板，并写一份 `build.json`，`plugin-tools build` 就会照着做。
+加语言不需要改工具：在 `templates/<lang>/` 放模板，并写一份 `build.json`，`plugin-tools build` 就会照着做。
+例外是 `script`：它要同时 vendor 两份 SDK，所以在工具里有一条 `vendor_sdk` 分支。
+
+`template` 先选平台、再选语言，可选语言由平台集合决定（全 unix：rust/c/shell/powershell；
+全 Windows：rust/c/powershell；跨家族：rust/c/script）。非交互时一次给全参数即可，
+stdin 不是终端时不会提问：
+
+```bash
+plugin-tools template wireguard --platforms x86_64-unknown-linux-musl,x86_64-pc-windows-msvc \
+  --lang script --desc "wireguard plugin" --ui web --dir plugins
+```
 
 ## 契约速查
 
@@ -238,6 +261,8 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **源码留在 `package/` 外面。** `package/` 是打包根，打包器不过滤任何文件：放进去的 `src/`、`Cargo.toml`、`.gitkeep` 都会进 `.spk`。构建产物由 `build.json` 的 `artifact` 复制进 `payload/bin/`；同一目录里上一个平台留下的同名产物（`demo` ↔ `demo.exe`）会在构建前被清掉，否则两种架构会一起进包。
 
+**平台差异写进 `platforms/`，不要为它加启动壳。** `.spk` 是按平台产出的（打包器盖 `platform`），而 manifest 的 `exec` / `lifecycle` / `interpreter` 各只有一个；脚本入口又必须挑解释器：POSIX 用 `sh`、Windows 用 `powershell`。需要按平台换入口时，`package/manifest.json` 只留平台无关的字段，入口写进与 `package/` 同级的 `platforms/<家族>.json`（`unix` / `windows`，一个家族一份；`template` 就生成这两份）：同名顶层键整段替换，`null` 删除，`id` / `version` 不许改。同家族里个别三元组真不一样时再加 `platforms/<三元组>.json` 当例外层，它压在家族之上；除此之外 `platforms/` 里只认 7 个三元组和这两个家族名，别的名字直接报错。`platforms/` 下还可以直接放入口脚本，构建时按扩展名分家族（`.sh` → unix，`.ps1`/`.cmd`/`.bat` → windows）复制进 `payload/bin/`，别的平台那份不进包；`platforms/lib/` 是同一件事的库版本，SDK 副本放那里、构建时按同样规则进 `payload/lib/`，所以 Linux 包里不会带 `SvcdPlugin.ps1`。`plugin-tools build` 按平台合并后再交给 `plugin bundle`，副本里缺了清单指的文件会立刻报错（没有 `platforms/` 的插件也查：Windows 上 `rust` / `c` 的产物是 `<name>.exe`，构建会把 `exec.path` 改成实际产物名写进副本，签名 job 从 tar 重打包时没有 `--exec` 可传）。发布流水线因此要从 `--stage dist/stage` 打 tar —— 签名 job 会重新 bundle 那个目录，平台清单必须在那之前就进包。
+
 **能力清单一处改全。** 加/删能力时同时改 manifest 的 `capabilities[]` 和代码分支；Rust 用 `cargo test` 兜底，shell 靠 `case` 与清单人工对齐。
 
 **`id` 是身份，`name` 是显示名。** `schema` 恒为 `1`（打包器盖章，源清单写别的值也会被覆盖），`id` 只能是 `[a-z0-9][a-z0-9_-]{0,63}`（不能是 `svc`）：安装目录、日志文件名、`<id>.<能力>` 工具名、`/plugin-ui/<id>/` 都用它。源清单省略 `id` 时取项目目录名；`name` 随便写，中文也行，缺省等于 `id`；命令与 API 只认 `id`，不按显示名解析。
@@ -258,7 +283,7 @@ SDK 没有 raw 实现。
 
 **大对象走 blob，不走 JSON。** 参数传 `{"$blob": id}`，结果返回 `$blobPath`；1 MiB 帧只装小 JSON。
 
-**vendored 副本别手改。** `package/payload/lib/svcd-plugin.sh` 和 `payload/web/plugin-ui.mjs` 是 `sdk/` 的副本；改完 `sdk/` 后跑 `plugin-tools sync`。它只刷新插件已经带着的那几份，不会给不用工具包的页面塞一份 `plugin-ui.mjs`。
+**vendored 副本别手改。** `package/payload/lib/svcd-plugin.sh`（`script` 项目里是 `platforms/lib/`）、`payload/web/plugin-ui.mjs` 和 `src/svcd_plugin.h` 都是 `sdk/` 的副本；改完 `sdk/` 后跑 `plugin-tools sync`。它只刷新插件已经带着的那几份，不会给不用工具包的页面塞一份 `plugin-ui.mjs`。
 
 ## 做不到的事
 

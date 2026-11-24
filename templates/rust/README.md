@@ -58,7 +58,7 @@ C / shell / PowerShell 模板仍只支持协议 1 的 JSON 线；raw 只有 Rust
 ## 命令（在仓库根或插件目录内都行）
 
 ```bash
-plugin-tools template <name> --lang rust --webui   # 只创建项目
+plugin-tools template <name> --lang rust --ui web   # 只创建项目（--ui headerless 不带页面）
 plugin-tools build                                 # 构建 + 打包（默认本机三元组，未签名）
 plugin-tools build --platform aarch64-unknown-linux-musl
 plugin-tools build --key ~/.svcd-dev/dev.pem       # 打成签名包

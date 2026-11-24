@@ -146,9 +146,15 @@ jobs:
           set -euo pipefail
           tools="tools/cli/target/release/plugin-tools"
           if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi
-          "$tools" template smoke-shell --lang shell --platforms "${{ matrix.platform }}" --dir .scaffold
-          spk=".scaffold/smoke-shell/dist/smoke-shell-0.1.0-${{ matrix.platform }}.spk"
-          (cd .scaffold/smoke-shell && "../../$tools" build)
+          # 语言得配平台：shell 到不了 Windows，那台上用 PowerShell 模板。
+          lang=shell
+          case "${{ matrix.platform }}" in
+            *windows*) lang=powershell ;;
+          esac
+          name="smoke-$lang"
+          "$tools" template "$name" --lang "$lang" --platforms "${{ matrix.platform }}" --dir .scaffold
+          spk=".scaffold/$name/dist/$name-0.1.0-${{ matrix.platform }}.spk"
+          (cd ".scaffold/$name" && "../../$tools" build)
           "$tools" check "$spk"
 
       - uses: actions/upload-artifact@v7

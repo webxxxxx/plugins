@@ -1,0 +1,35 @@
+{
+  "interpreter": {
+    "name": "powershell",
+    "args": [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File"
+    ]
+  },
+  "exec": {
+    "path": "payload/bin/meow.ps1",
+    "ready": "exec"
+  },
+  "lifecycle": {
+    "start": {
+      "path": "payload/bin/meow.ps1",
+      "args": [
+        "start"
+      ]
+    },
+    "stop": {
+      "path": "payload/bin/meow.ps1",
+      "args": [
+        "stop"
+      ]
+    },
+    "status": {
+      "path": "payload/bin/meow.ps1",
+      "args": [
+        "status"
+      ]
+    }
+  }
+}

@@ -19,7 +19,7 @@ build.json                ← 构建配方
 ## 命令
 
 ```bash
-plugin-tools template <name> --lang c --webui   # 只创建项目
+plugin-tools template <name> --lang c --ui web   # 只创建项目（--ui headerless 不带页面）
 plugin-tools build                               # gcc 编译 + 打包（默认未签名）
 plugin-tools build --platform aarch64-unknown-linux-musl
 ```

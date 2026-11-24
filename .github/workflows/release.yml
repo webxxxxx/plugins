@@ -395,12 +395,16 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ matrix.dir }}"
-          plugin-tools build --platform "${{ matrix.platform }}"
+          # --stage 让带 platforms/ 的插件把「合并后的清单 + payload」落到
+          # dist/stage/package：签名 job 会重新 bundle 这个目录，所以平台清单
+          # 必须在这里就进包，而不是等到签名时。
+          plugin-tools build --platform "${{ matrix.platform }}" --stage dist/stage
       - name: Package the unsigned payload
         shell: bash
         run: |
           set -euo pipefail
-          tar -C "${{ matrix.dir }}" -czf pkg.tgz package
+          # 打的是 stage，不是 package/：前者带着本平台的清单。
+          tar -C "${{ matrix.dir }}/dist/stage" -czf pkg.tgz package
       - uses: actions/upload-artifact@v7
         with:
           name: pkg-${{ matrix.plugin }}-${{ matrix.platform }}

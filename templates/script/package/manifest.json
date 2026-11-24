@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "__NAME__",
+  "name": "__NAME__",
+  "version": "0.1.0",
+  "desc": "__DESC__",
+  "protocol": 1,
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "capabilities": [
+    {
+      "name": "uname",
+      "desc": "Kernel and machine identity",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "date",
+      "desc": "Current UTC time",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "utc": { "type": "string" }
+        },
+        "required": ["utc"]
+      }
+    }
+  ]
+}

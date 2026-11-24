@@ -13,7 +13,7 @@ package/
 ## 命令
 
 ```bash
-plugin-tools template <name> --lang powershell --webui
+plugin-tools template <name> --lang powershell --ui web
 plugin-tools build                # 无编译，直接打包（默认未签名）
 ```
 
@@ -25,9 +25,10 @@ plugin-tools build                # 无编译，直接打包（默认未签名�
 | Linux / macOS | `pwsh`（PowerShell 7） |
 
 `plugin-tools template` 会根据 `--platforms` 自动写：Windows 用 `powershell`，
-Linux / macOS 用 `pwsh`。同一项目不允许同时选 Windows 和非 Windows 平台，
-因为一个 manifest 只能有一个解释器名；需要两边就 scaffold 两个项目。
-目标机必须确实装了对应的解释器。
+Linux / macOS 用 `pwsh`。同一个项目里不能混两个家族——不是清单表达不了（家族覆盖
+`platforms/unix.json` / `platforms/windows.json` 就能表达），而是 unix 侧得先装 `pwsh`，
+那通常不是你想要的东西；
+跨家族请用 `script` 模板或 Rust / C。目标机必须确实装了对应的解释器。
 
 ## 边界
 

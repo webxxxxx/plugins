@@ -1,0 +1,29 @@
+{
+  "interpreter": {
+    "name": "sh"
+  },
+  "exec": {
+    "path": "payload/bin/meow.sh",
+    "ready": "exec"
+  },
+  "lifecycle": {
+    "start": {
+      "path": "payload/bin/meow.sh",
+      "args": [
+        "start"
+      ]
+    },
+    "stop": {
+      "path": "payload/bin/meow.sh",
+      "args": [
+        "stop"
+      ]
+    },
+    "status": {
+      "path": "payload/bin/meow.sh",
+      "args": [
+        "status"
+      ]
+    }
+  }
+}

@@ -60,4 +60,11 @@ cd "$HERE/vendor/meow-rs"
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/svcd-meow-target}
 JOBS=${JOBS:-4}
 cargo build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow
-cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow" "$HERE/out/$NAME"
+case "$PLATFORM" in
+  *windows*) cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow.exe" "$HERE/out/$NAME.exe" ;;
+  *)         cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow" "$HERE/out/$NAME" ;;
+esac
+
+# 入口的平台差异不归配方管：Linux 的 exec/lifecycle 是 meow.sh，Windows 的是
+# meow.ps1，那份清单差异写在 platforms/unix.json 与 platforms/windows.json，
+# 由 plugin-tools 打包时合并。这里只出一个内核二进制。

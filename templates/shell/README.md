@@ -20,19 +20,21 @@ manifest 的 `capabilities[]` 是 MCP 面上暴露的工具；`handle()` 里的 
 ## 命令
 
 ```bash
-plugin-tools template <name> --lang shell --webui   # 只创建项目
+plugin-tools template <name> --lang shell --ui web   # 只创建项目（--ui headerless 不带页面）
 plugin-tools build                                   # 打包（默认本机三元组，未签名）
 plugin-tools build --platform aarch64-unknown-linux-musl
 plugin-tools check dist/xxx.spk
 ```
 
-`--webui` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是
+`--ui web` 会带上 `package/payload/web/` 并在 manifest 里写 `ui`；它调用的就是
 `uname` / `date` 两个能力，和后端是 shell 还是 rust 无关。
 
 `pack` 的 `interpreter.name` 写的是 `sh`，且**故意不写 `version`**：`sh` 会走 `--version`
 探测，而 Debian 的 sh 是 dash，探测会报非法选项、安装直接被拒。
 
-Windows 上要求 `PATH` 里能找到 `sh`（Git Bash / MSYS）；否则请用 PowerShell 模板。
+`plugin-tools template` 不会给 Windows 平台提供 `shell`：菜单按平台过滤，只有纯 unix
+的项目才有这一项。真要 Windows 上也跑，得自己保证 `PATH` 里有 `sh`（Git Bash / MSYS），
+或者改用 `powershell` / `script` 模板。
 
 ## 边界
 

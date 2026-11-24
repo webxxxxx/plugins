@@ -2,6 +2,32 @@
 # 安装后位于 <plugins>/meow/config，用 `plugin editconfig meow` 编辑。
 # 加代理节点后，把 rules 的 MATCH 改成对应代理组/节点名。
 
+# 运行形态（插件自己的键，meow 不认识、也不会用它）：
+#   pc      本机透明代理
+#           Linux：配 tproxy-port，meow 自己装/拆 nft output 规则
+#                  （需要 root + nftables；只劫持本机 TCP，DNS 不劫持）
+#           Windows：配 tun:（Wintun + fake-ip，需要管理员权限）
+#   router  网关：插件用 iptables nat 劫持 LAN 的转发流量（只有 Linux 支持；
+#           路由器内核没有 nf_tables 也能用，见 README）
+# 注意：meow 订阅刷新 / 面板保存会重写这份文件，未知键（包括 proxy-mode）会被
+# 删掉；插件把值镜像到数据目录兜底，丢了仍沿用上次的值并在日志里告警。
+proxy-mode: pc
+
+# 仅 router 形态：被劫持的 LAN 网口（缺省 br0）
+# lan-interface: br0
+
+# 本机透明代理（proxy-mode: pc）——Linux / macOS 用这组：
+# tproxy-port: 7893
+# routing-mark: 9527     # meow 自己出向的 SO_MARK，避免被自己的规则再抓一次
+
+# 本机透明代理（proxy-mode: pc）——Windows 用这组（TUN/Wintun）：
+# tun:
+#   enable: true
+#   auto-route: true
+#   dns-hijack:
+#     - any:53
+# 配 TUN 时 dns.enhanced-mode 必须是 fake-ip（见下面 dns 段）。
+
 mixed-port: 7890
 allow-lan: true
 bind-address: 0.0.0.0
@@ -17,6 +43,9 @@ external-ui: yacd
 dns:
   enable: true
   listen: 127.0.0.1:5353
+  # Windows 的 TUN 捕获要求 fake-ip（Linux 上用 tproxy 时按需开）：
+  # enhanced-mode: fake-ip
+  # fake-ip-range: 198.18.0.1/16
   nameserver:
     - 223.5.5.5
     - 119.29.29.29

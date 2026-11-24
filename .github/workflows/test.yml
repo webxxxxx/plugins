@@ -78,9 +78,19 @@ jobs:
           set -euo pipefail
           tools="tools/cli/target/debug/plugin-tools"
           if [ -x "$tools.exe" ]; then tools="$tools.exe"; fi
-          for language in rust c shell powershell; do
-            "$tools" template "smoke-$language" --lang "$language" --webui \
-              --platforms x86_64-pc-windows-msvc --dir .scaffold --force
+          # 平台决定可选语言：shell 只出 unix，跨家族只有 rust/c/script。
+          scaffold() {
+            language=$1
+            platforms=$2
+            "$tools" template "smoke-$language" --lang "$language" --ui web \
+              --platforms "$platforms" --dir .scaffold --force
+          }
+          scaffold rust x86_64-unknown-linux-musl
+          scaffold c x86_64-unknown-linux-musl
+          scaffold shell x86_64-unknown-linux-musl
+          scaffold powershell x86_64-pc-windows-msvc
+          scaffold script x86_64-unknown-linux-musl,x86_64-pc-windows-msvc
+          for language in rust c shell powershell script; do
             test -f ".scaffold/smoke-$language/package/manifest.json"
             test -f ".scaffold/smoke-$language/build.json"
             test -f ".scaffold/smoke-$language/.plugin.json"
@@ -100,5 +110,23 @@ jobs:
           test -f .scaffold/smoke-shell/package/payload/lib/svcd-plugin.sh
           if [ -f .scaffold/smoke-shell/package/payload/lib/SvcdPlugin.ps1 ]; then
             echo '::error::shell plugin must not ship the PowerShell module'
+            exit 1
+          fi
+          # `script` ships both scripts and both SDKs as source, one per family,
+          # outside package/ — the build picks the family's half.
+          test -f .scaffold/smoke-script/platforms/smoke-script.sh
+          test -f .scaffold/smoke-script/platforms/smoke-script.ps1
+          test -f .scaffold/smoke-script/platforms/lib/svcd-plugin.sh
+          test -f .scaffold/smoke-script/platforms/lib/SvcdPlugin.ps1
+          test -f .scaffold/smoke-script/platforms/unix.json
+          test -f .scaffold/smoke-script/platforms/windows.json
+          if [ -d .scaffold/smoke-script/package/payload/lib ]; then
+            echo '::error::a script project must not vendor the SDK inside package/'
+            exit 1
+          fi
+          # A single-family project keeps its entry in the shared manifest.
+          test -f .scaffold/smoke-shell/package/payload/bin/smoke-shell.sh
+          if [ -d .scaffold/smoke-shell/platforms ]; then
+            echo '::error::a single-family project must not split its manifest'
             exit 1
           fi

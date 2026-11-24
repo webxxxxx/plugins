@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<title>__NAME__</title>
+<style>
+  body { font: 14px/1.6 system-ui, sans-serif; margin: 2rem; max-width: 46rem; }
+  pre { background: #f4f4f4; padding: .8rem; border-radius: 6px; min-height: 2rem; }
+  code { background: #f4f4f4; padding: .1rem .3rem; border-radius: 4px; }
+  button { margin-right: .5rem; }
+</style>
+
+<h1>__NAME__</h1>
+<p>这是一个 <strong>script</strong> 插件的 Web UI：Unix 走 <code>payload/bin/__NAME__.sh</code>，
+Windows 走 <code>payload/bin/__NAME__.ps1</code>，两边实现同一组能力。静态文件由 svcd
+反代，能力调用走 <code>POST ./rpc</code>，事件推送走 <code>./events</code>（SSE）。</p>
+
+<div>
+  <button id="uname">uname</button>
+  <button id="date">date</button>
+</div>
+<pre id="out">（等待调用）</pre>
+
+<script type="module">
+import { pluginUI } from './plugin-ui.mjs';
+const ui = pluginUI();
+const out = document.getElementById('out');
+for (const name of ['uname', 'date']) {
+  document.getElementById(name).addEventListener('click', async () => {
+    try {
+      const r = await ui.invoke(name, {});
+      out.textContent = typeof r === 'string' ? r : JSON.stringify(r, null, 2);
+    } catch (e) {
+      out.textContent = String(e);
+    }
+  });
+}
+</script>
+</html>

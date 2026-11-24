@@ -253,3 +253,534 @@ fn the_recipe_expands_the_id_into_file_names() {
     assert!(root.join("package/payload/bin/demo").is_file());
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// A platform whose script language differs gets only its few keys merged in,
+/// into a staged copy: the authored manifest is the base for every other
+/// platform, and `platforms/` must never travel as payload.
+#[test]
+fn a_platform_overlay_is_merged_into_a_staged_copy() {
+    let root = project("overlay", MANIFEST);
+    let stage = root.join("dist/stage");
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-pc-windows-msvc.json"),
+        r#"{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" },
+  "lifecycle": { "start": { "path": "payload/bin/demo.ps1" } }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("package/payload/bin/demo.ps1"), "# demo\n").unwrap();
+
+    let (output, calls) = run(
+        &root,
+        &[
+            "build",
+            "--platform",
+            "x86_64-pc-windows-msvc",
+            "--stage",
+            stage.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let bundle = calls
+        .iter()
+        .find(|argv| argv[0] == "bundle")
+        .expect("bundle ran");
+    assert_eq!(Path::new(&bundle[1]), stage.join("package"), "{bundle:?}");
+
+    let bytes = std::fs::read(stage.join("package/manifest.json")).unwrap();
+    let staged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(staged["interpreter"]["name"], "powershell");
+    assert_eq!(staged["exec"]["path"], "payload/bin/demo.ps1");
+    assert_eq!(staged["lifecycle"]["start"]["path"], "payload/bin/demo.ps1");
+    // Whatever the overlay did not name still comes from the base.
+    assert_eq!(staged["version"], "1.0.0");
+    assert!(staged["capabilities"].is_array(), "{staged}");
+    // The payload came along, and the overlay did not.
+    assert!(stage.join("package/payload/bin/demo").is_file());
+    assert!(stage.join("package/payload/bin/demo.ps1").is_file());
+    assert!(!stage.join("package/platforms").exists());
+    // The authored manifest is untouched, so the next platform still starts
+    // from `sh`.
+    assert_eq!(
+        plugin_tools::read_manifest(&root).unwrap().exec.path,
+        "payload/bin/demo"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `id` and `version` name the artifact and the release, so they cannot differ
+/// per platform; the build must stop before the host is called.
+#[test]
+fn an_overlay_cannot_change_the_package_identity() {
+    let root = project("overlay-identity", MANIFEST);
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-pc-windows-msvc.json"),
+        r#"{"version":"2.0.0"}"#,
+    )
+    .unwrap();
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-pc-windows-msvc"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("must not change"), "{}", stderr(&output));
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `--stage` is where the release pipeline tars the package from, so it cannot
+/// hold several platforms at one path.
+#[test]
+fn a_stage_holds_one_package() {
+    let root = project("stage-many", MANIFEST);
+    let (output, calls) = run(
+        &root,
+        &["build", "--stage", root.join("dist/stage").to_str().unwrap()],
+    );
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("--stage"), "{}", stderr(&output));
+    assert!(calls.is_empty(), "{calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// `MANIFEST` without the entry: what a plugin with a per-platform entry keeps
+/// in `package/manifest.json`.
+fn neutral_manifest() -> String {
+    MANIFEST.replace(
+        "  \"exec\": { \"path\": \"payload/bin/demo\", \"ready\": \"notify\" },\n",
+        "",
+    )
+}
+
+/// A neutral manifest plus one overlay per platform: each package gets its own
+/// entry, and the authored manifest stays free of both.
+#[test]
+fn each_platform_gets_its_own_manifest() {
+    let root = project("per-platform", &neutral_manifest());
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-unknown-linux-gnu.json"),
+        r#"{
+  "interpreter": { "name": "sh" },
+  "exec": { "path": "payload/bin/demo.sh", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-pc-windows-msvc.json"),
+        r#"{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("package/payload/bin/demo.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(root.join("package/payload/bin/demo.ps1"), "# demo\n").unwrap();
+
+    let staged_of = |tag: &str, platform: &str| -> serde_json::Value {
+        let stage = root.join(format!("dist/{tag}"));
+        let (output, _calls) = run(
+            &root,
+            &[
+                "build",
+                "--platform",
+                platform,
+                "--stage",
+                stage.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let bytes = std::fs::read(stage.join("package/manifest.json")).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    };
+
+    let linux = staged_of("linux", "x86_64-unknown-linux-gnu");
+    assert_eq!(linux["exec"]["path"], "payload/bin/demo.sh");
+    assert_eq!(linux["interpreter"]["name"], "sh");
+    // The neutral half still comes from `package/manifest.json`.
+    assert_eq!(linux["id"], "demo");
+    assert_eq!(linux["version"], "1.0.0");
+
+    let windows = staged_of("windows", "x86_64-pc-windows-msvc");
+    assert_eq!(windows["exec"]["path"], "payload/bin/demo.ps1");
+    assert_eq!(windows["interpreter"]["name"], "powershell");
+
+    let bytes = std::fs::read(root.join("package/manifest.json")).unwrap();
+    let base: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        base.get("exec").is_none(),
+        "the authored manifest must stay platform-neutral: {base}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The scripts under `platforms/` travel with their own family only: the other
+/// one never enters the package, so nothing has to be filtered out later.
+#[test]
+fn platform_scripts_only_travel_with_their_family() {
+    let root = project("platform-scripts", &neutral_manifest());
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-unknown-linux-gnu.json"),
+        r#"{
+  "interpreter": { "name": "sh" },
+  "exec": { "path": "payload/bin/demo.sh", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-pc-windows-msvc.json"),
+        r#"{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    // Neither script is in `package/`: the build has to bring them in.
+    std::fs::write(root.join("platforms/demo.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(root.join("platforms/demo.ps1"), "# demo\n").unwrap();
+
+    for (tag, platform, mine, theirs) in [
+        ("linux", "x86_64-unknown-linux-gnu", "demo.sh", "demo.ps1"),
+        ("windows", "x86_64-pc-windows-msvc", "demo.ps1", "demo.sh"),
+    ] {
+        let stage = root.join(format!("dist/{tag}"));
+        let (output, _calls) = run(
+            &root,
+            &[
+                "build",
+                "--platform",
+                platform,
+                "--stage",
+                stage.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let bin = stage.join("package/payload/bin");
+        assert!(bin.join(mine).is_file(), "{platform} needs {mine}");
+        assert!(!bin.join(theirs).exists(), "{platform} must not ship {theirs}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The same rule for `platforms/lib/`: a script project keeps both SDKs, and each
+/// package gets only the one its script loads.
+#[test]
+fn platform_libs_only_travel_with_their_family() {
+    let root = project("platform-libs", &neutral_manifest());
+    std::fs::create_dir_all(root.join("platforms/lib")).unwrap();
+    std::fs::write(
+        root.join("platforms/unix.json"),
+        r#"{
+  "interpreter": { "name": "sh" },
+  "exec": { "path": "payload/bin/demo.sh", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("platforms/windows.json"),
+        r#"{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("platforms/demo.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(root.join("platforms/demo.ps1"), "# demo\n").unwrap();
+    std::fs::write(root.join("platforms/lib/svcd-plugin.sh"), "# unix sdk\n").unwrap();
+    std::fs::write(root.join("platforms/lib/SvcdPlugin.ps1"), "# windows sdk\n").unwrap();
+
+    for (tag, platform, mine, theirs) in [
+        (
+            "linux",
+            "x86_64-unknown-linux-gnu",
+            "svcd-plugin.sh",
+            "SvcdPlugin.ps1",
+        ),
+        (
+            "windows",
+            "x86_64-pc-windows-msvc",
+            "SvcdPlugin.ps1",
+            "svcd-plugin.sh",
+        ),
+    ] {
+        let stage = root.join(format!("dist/{tag}"));
+        let (output, _calls) = run(
+            &root,
+            &[
+                "build",
+                "--platform",
+                platform,
+                "--stage",
+                stage.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let lib = stage.join("package/payload/lib");
+        assert!(lib.join(mine).is_file(), "{platform} needs {mine}");
+        assert!(!lib.join(theirs).exists(), "{platform} must not ship {theirs}");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A library whose extension names no family belongs to no package, so it is
+/// refused instead of shipped to everyone or silently dropped.
+#[test]
+fn a_library_without_a_family_is_refused() {
+    let root = project("lib-no-family", &MANIFEST);
+    std::fs::create_dir_all(root.join("platforms/lib")).unwrap();
+    std::fs::write(root.join("platforms/lib/README.md"), "notes\n").unwrap();
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-unknown-linux-gnu"]);
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("platforms/lib/README.md"), "{text}");
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A `script` project keeps everything platform-specific outside `package/`, so
+/// its payload only exists once the stage has picked this platform's half. The
+/// "would ship nothing" guard has to judge the stage, not the source tree.
+#[test]
+fn a_payload_that_only_exists_after_staging_is_allowed() {
+    let root = project("late-payload", &neutral_manifest());
+    // Nothing in `package/` but the manifest: headerless UI, no entry yet.
+    std::fs::remove_dir_all(root.join("package/payload")).unwrap();
+    std::fs::create_dir_all(root.join("platforms/lib")).unwrap();
+    std::fs::write(
+        root.join("platforms/unix.json"),
+        r#"{
+  "interpreter": { "name": "sh" },
+  "exec": { "path": "payload/bin/demo.sh", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("platforms/windows.json"),
+        r#"{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("platforms/demo.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(root.join("platforms/demo.ps1"), "# demo\n").unwrap();
+    std::fs::write(root.join("platforms/lib/svcd-plugin.sh"), "# unix sdk\n").unwrap();
+    std::fs::write(root.join("platforms/lib/SvcdPlugin.ps1"), "# windows sdk\n").unwrap();
+
+    let stage = root.join("dist/linux");
+    let (output, _calls) = run(
+        &root,
+        &[
+            "build",
+            "--platform",
+            "x86_64-unknown-linux-gnu",
+            "--stage",
+            stage.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let package = stage.join("package");
+    assert!(package.join("payload/bin/demo.sh").is_file());
+    assert!(package.join("payload/lib/svcd-plugin.sh").is_file());
+    assert!(!package.join("payload/lib/SvcdPlugin.ps1").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The guard still fires when there is nothing to ship even after staging.
+#[test]
+fn a_package_with_no_payload_at_all_is_still_refused() {
+    let root = project("empty-payload", &MANIFEST);
+    std::fs::remove_dir_all(root.join("package/payload")).unwrap();
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-unknown-linux-gnu"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("is empty"), "{}", stderr(&output));
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A stage whose manifest names a payload file nothing supplied must stop the
+/// build with the platform and the path named, not install and fail later.
+#[test]
+fn a_stage_missing_its_entry_names_the_platform() {
+    let root = project("missing-entry", &neutral_manifest());
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-pc-windows-msvc.json"),
+        r#"{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-pc-windows-msvc"]);
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("payload/bin/demo.ps1"), "{text}");
+    assert!(text.contains("x86_64-pc-windows-msvc"), "{text}");
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// The same check applies when no overlay was merged: a plugin can name the POSIX
+/// script in `package/manifest.json` and still be built for Windows, where that
+/// script never travels.
+#[test]
+fn a_staged_copy_without_an_overlay_still_checks_its_entry() {
+    let root = project(
+        "base-missing-entry",
+        &MANIFEST.replace("payload/bin/demo", "payload/bin/demo.sh"),
+    );
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    // Only the unix half exists, so a Windows stage brings no script at all.
+    std::fs::write(root.join("platforms/demo.sh"), "#!/bin/sh\n").unwrap();
+    let stage = root.join("dist/windows");
+    let (output, calls) = run(
+        &root,
+        &[
+            "build",
+            "--platform",
+            "x86_64-pc-windows-msvc",
+            "--stage",
+            stage.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("payload/bin/demo.sh"), "{text}");
+    assert!(text.contains("x86_64-pc-windows-msvc"), "{text}");
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A family overlay serves every triple in it: three platforms that differ in
+/// nothing do not need three files.
+#[test]
+fn one_family_overlay_serves_every_platform_in_it() {
+    let root = project("family-overlay", &neutral_manifest());
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/unix.json"),
+        r#"{
+  "interpreter": { "name": "sh" },
+  "exec": { "path": "payload/bin/demo.sh", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("platforms/windows.json"),
+        r#"{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("platforms/demo.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(root.join("platforms/demo.ps1"), "# demo\n").unwrap();
+
+    for (tag, platform, entry, interpreter) in [
+        ("gnu", "x86_64-unknown-linux-gnu", "payload/bin/demo.sh", "sh"),
+        ("mac", "aarch64-apple-darwin", "payload/bin/demo.sh", "sh"),
+        (
+            "windows",
+            "x86_64-pc-windows-msvc",
+            "payload/bin/demo.ps1",
+            "powershell",
+        ),
+    ] {
+        let stage = root.join(format!("dist/{tag}"));
+        let (output, _calls) = run(
+            &root,
+            &[
+                "build",
+                "--platform",
+                platform,
+                "--stage",
+                stage.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{}", stderr(&output));
+        let bytes = std::fs::read(stage.join("package/manifest.json")).unwrap();
+        let staged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(staged["exec"]["path"], entry, "{platform}");
+        assert_eq!(staged["interpreter"]["name"], interpreter, "{platform}");
+        // The identity half still comes from the shared manifest.
+        assert_eq!(staged["id"], "demo");
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A triple overlay is the exception layer: it lands on top of its family.
+#[test]
+fn a_triple_overlay_wins_over_its_family() {
+    let root = project("triple-over-family", &neutral_manifest());
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/unix.json"),
+        r#"{
+  "interpreter": { "name": "sh" },
+  "exec": { "path": "payload/bin/demo.sh", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("platforms/x86_64-unknown-linux-gnu.json"),
+        r#"{
+  "exec": { "path": "payload/bin/demo-gnu.sh", "ready": "notify" }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("platforms/demo.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(root.join("platforms/demo-gnu.sh"), "#!/bin/sh\n").unwrap();
+
+    let stage = root.join("dist/gnu");
+    let (output, _calls) = run(
+        &root,
+        &[
+            "build",
+            "--platform",
+            "x86_64-unknown-linux-gnu",
+            "--stage",
+            stage.to_str().unwrap(),
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    let bytes = std::fs::read(stage.join("package/manifest.json")).unwrap();
+    let staged: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(staged["exec"]["path"], "payload/bin/demo-gnu.sh");
+    // The family layer is still under it.
+    assert_eq!(staged["interpreter"]["name"], "sh");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// An overlay named after neither a triple nor a family would never be read, so
+/// it is a typo and stops the build.
+#[test]
+fn an_overlay_named_after_nothing_is_refused() {
+    let root = project("bogus-overlay", &neutral_manifest());
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(root.join("platforms/freebsd.json"), "{}").unwrap();
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-unknown-linux-gnu"]);
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("platforms/freebsd.json"), "{text}");
+    // The message has to say what a legal name looks like.
+    assert!(text.contains("unix") && text.contains("x86_64-pc-windows-msvc"), "{text}");
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A neutral manifest with no overlay supplies no entry at all, and the error
+/// has to say where the entry belongs.
+#[test]
+fn a_manifest_without_an_entry_says_where_the_entry_goes() {
+    let root = project("no-entry", &neutral_manifest());
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-unknown-linux-gnu"]);
+    assert!(!output.status.success());
+    let text = stderr(&output);
+    assert!(text.contains("platforms/<triple>.json"), "{text}");
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}

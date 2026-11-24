@@ -1,6 +1,6 @@
 # 插件仓库
 
-四种语言的插件模板（Rust / C / Shell / PowerShell）、它们共用的协议壳，以及本地打包与校验的工具。
+五种语言的插件模板（Rust / C / Shell / PowerShell / script）、它们共用的协议壳，以及本地打包与校验的工具。
 插件作者只写核心逻辑，其余在 SDK 里。
 
 插件下载列表：[docs/plugins.md](docs/plugins.md)（CI 在每次发布后自动更新，只列每个插件/平台的最新稳定版）。
@@ -35,7 +35,7 @@ sdk/c/            单头文件协议壳
 sdk/shell/        POSIX sh 协议壳（随插件拷进包里）
 sdk/powershell/   PowerShell 协议壳（随插件拷进包里）
 sdk/web/          浏览器侧 toolkit（ESM，无构建步骤）：invoke / SSE / WS / 上传下载
-templates/        rust / c / shell / powershell 四种模板源
+templates/        rust / c / shell / powershell / script 五种模板源
 samples/hello-rust             Rust 参考实现：五能力 + 配置 + 通知 + UI
 samples/hello-c           C 同款（单头文件 SDK）
 samples/hello-shell       Shell 同款（POSIX sh + awk）
@@ -72,7 +72,7 @@ cd tools/cli && cargo build --release
 
 ## CI
 
-`.github/workflows/test.yml` 在两个操作系统上跑 SDK、工具链与 Rust 样例的测试，并给四种语言各脚手架一次；`.github/workflows/build.yml` 先构建宿主的 `plugin` CLI，再用它打包每份样例并 `verify`，产物作为 artifact 上传。没有 Node、没有 daemon，跑的全是 `plugin bundle` 的本地路径。
+`.github/workflows/test.yml` 在两个操作系统上跑 SDK、工具链与 Rust 样例的测试，并给五种语言各脚手架一次（平台按语言挑：shell 只出 unix，script 出跨家族的两种）；`.github/workflows/build.yml` 先构建宿主的 `plugin` CLI，再用它打包每份样例并 `verify`，产物作为 artifact 上传。没有 Node、没有 daemon，跑的全是 `plugin bundle` 的本地路径。
 
 发布工作流的 PR 构建只跑改动过的插件：`plugins/<name>/**` 命中谁就构建谁；改了 `sdk/`、`templates/` 或 `tools/cli/` 时回退到全部插件。
 
@@ -242,24 +242,95 @@ curl -fsS "$QINIU_DOMAIN/index.json" | jq -r '.packages[] | "\(.plugin) \(.versi
 ## 两条命令
 
 ```bash
-plugin-tools template wireguard                 # 数字菜单：语言 1-4 → 平台 1-7
+plugin-tools template wireguard                 # 先选平台（1-7，可多选），再选语言
 cd plugins/wireguard && plugin-tools build      # 构建 + 打包（默认未签名）
 ```
 
-非交互（CI 用）：
+**先选平台，再选语言**：能选哪些语言由平台集合决定，菜单里只出现能干活的那些。
+
+| 平台集合 | 可选语言 |
+| --- | --- |
+| 全 unix（Linux / macOS） | rust / c / shell / powershell（`pwsh`） |
+| 全 Windows | rust / c / powershell |
+| 两个家族都有 | rust / c / script |
+
+`script` 是给「一次出两个家族的包、但不想写编译型语言」准备的：同一组能力写两遍
+（`platforms/<name>.sh` 与 `platforms/<name>.ps1`），每个家族一份清单指向自己那侧
+（`platforms/unix.json` / `platforms/windows.json`），SDK 也各放一份在
+`platforms/lib/` 下，打包时另一侧根本不进包。见 `templates/script/README.md`。
+
+非交互（CI / 脚本 / AI 调用）一次给全参数，stdin 不是终端时**绝不提问**：`--platforms` 与
+`--lang` 都必填，缺哪个就直接报错并列出可选值——猜本机三元组正是让 AI 建错平台的原因。
 
 ```bash
-plugin-tools template wireguard --lang c --platforms x86_64-unknown-linux-musl,x86_64-pc-windows-msvc --webui
+plugin-tools template wireguard \
+  --platforms x86_64-unknown-linux-musl,x86_64-pc-windows-msvc \
+  --lang script --desc "wireguard plugin" --ui web --dir plugins
 ```
+
+`--platforms` 与 `--lang` 只在交互模式下可以省略（省略 `--platforms` 取本机三元组）。
+
+### 模板从哪来、项目放哪
+
+| 参数 | 作用 |
+| --- | --- |
+| `--dir <path>` | 项目生成到哪（相对当前目录，默认 `plugins`） |
+| `--template-repo <path\|url>` | 模板仓库：本地目录（含 `templates/` + `sdk/`）或 git 地址 |
+| `--refresh` | git 地址时强制重新 clone（默认按 URL 复用缓存） |
+| `--ui <kind>` | 清单里的 `ui.type`：`headerless` / `web` / `gui`（就是 manage 认的那三个值） |
+| `--conf <file>` | 从 JSON 读上面这些参数（还有 `lang` / `platforms` / `desc` / `ui` / `force`） |
+
+配置文件只写一部分也行：没写的那几项照旧从命令行取（`platforms` / `desc` / `ui` …），
+命令行给了就覆盖文件里的；`--ui headerless` / `--no-force` 用来关掉文件里打开的东西。
+`PLUGIN_TOOLS_REPO` 环境变量在没有 `--template-repo` 时生效。
+模板仓库是 git 地址时，`git clone --depth 1` 到系统临时目录下按 URL 命名的缓存里，
+第二次直接用缓存。
+
+```bash
+# 一次给全：AI / 脚本调用不会停下来提问
+plugin-tools template wireguard \
+  --platforms x86_64-unknown-linux-musl,x86_64-pc-windows-msvc \
+  --lang script --desc "wireguard plugin" --ui web \
+  --template-repo git@github.com:me/plugins.git \
+  --dir /opt/plugins
+```
+
+```json
+// --conf plugin-tools.json：只写一次，之后每次 template 带上它
+{
+  "dir": "plugins",
+  "template_repo": "https://github.com/me/plugins.git",
+  "lang": "script",
+  "platforms": ["x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"],
+  "desc": "wireguard plugin",
+  "ui": "web"
+}
+```
+
+`ui` 的值就是清单里 `ui.type` 的三个值（与 manage 的 `{type: web / gui / headerless, entry?}`
+一致）：
+
+| 值 | `package/payload/web/` | 清单 |
+| --- | --- | --- |
+| `headerless` | 不生成 | `{"type": "headerless"}`，**没有 entry** |
+| `web` | 模板页面 + `plugin-ui.mjs` | `{"type": "web", "entry": "index.html"}` |
+| `gui` | 同上（桌面 WebView 加载同一批文件） | `{"type": "gui", "entry": "index.html"}` |
+
+`web` 与 `gui` 的文件完全一样——manage 对两者都是从 `payload/web/` 取文件，区别只在
+是浏览器打开还是桌面 WebView 加载。值只认这三个，没有别名：`headless`、`none` 都会被拒。
+
+等价写法：文件里只留 `dir` / `template_repo`，平台、语言、描述、UI 每次从命令行给。
 
 `plugin-tools build` 不给 `--key` 时产出未签名包，宿主需要 `allow_insecure_install = on`；
 发布路径是 CI 用发布钥调 `plugin bundle --key`。
 
 `build` 不给 `--platform` 时按 `.plugin.json` 的 `platforms` 逐个打；没写 `platforms` 的插件视为 7 个平台通用。本地开发用 `--platform <本机三元组>` 只打一个。`check <file.spk>` 走 `plugin verify`。
 
-交叉到 musl 目标（x86_64 / aarch64 / armv7）时，先跑 `tools/cross/install.sh <triple>`：它把 musl.cc 的工具链下到 `~/.svcd-cross`（可复用），并交代 `CARGO_TARGET_<TRIPLE>_LINKER`、`CC_<triple>`、`CC` 与 `PATH`——在 CI 里写 `$GITHUB_ENV` / `$GITHUB_PATH`，本地打印 `export` 行（`eval "$(tools/cross/install.sh …)"`）。C 的 `build.json` 用 `{cc}` 取编译器（`$CC` 优先，否则 `gcc`），所以同一份配方既能本机编也能交叉编；仓库 CI、四份模板和四份样例的 workflow 都调这个脚本。
+`--stage <dir>` 把包写到 `<dir>/package` 并从那里打包（发布流水线拿它打 tar，见下面「一个家族一份清单」），必须与 `--platform` 一起用。
 
-每个插件（含四份样例和四份模板）都带自己的 `.github/workflows/build.yml`：平台列表从 `.plugin.json` 读，没写就 7 个全build，每个平台在自己的 runner 上构建并上传 `.spk`。插件独立成仓库后直接就是它的 CI。
+交叉到 musl 目标（x86_64 / aarch64 / armv7）时，先跑 `tools/cross/install.sh <triple>`：它把 musl.cc 的工具链下到 `~/.svcd-cross`（可复用），并交代 `CARGO_TARGET_<TRIPLE>_LINKER`、`CC_<triple>`、`CC` 与 `PATH`——在 CI 里写 `$GITHUB_ENV` / `$GITHUB_PATH`，本地打印 `export` 行（`eval "$(tools/cross/install.sh …)"`）。C 的 `build.json` 用 `{cc}` 取编译器（`$CC` 优先，否则 `gcc`），所以同一份配方既能本机编也能交叉编；仓库 CI、五份模板和四份样例的 workflow 都调这个脚本。
+
+每个插件（含四份样例和五份模板）都带自己的 `.github/workflows/build.yml`：平台列表从 `.plugin.json` 读，没写就 7 个全build，每个平台在自己的 runner 上构建并上传 `.spk`。插件独立成仓库后直接就是它的 CI。
 
 ## 插件只写核心逻辑
 
@@ -331,6 +402,54 @@ ui.subscribe({ onMessage: (method, params) => {} }); // 推送
 ```
 
 加一门语言 = 加一个模板目录 + 一份 `build.json`，`plugin-tools build` 不用改。
+
+### 一个家族一份清单：`platforms/`
+
+`.spk` 是按平台产出的：打包器给每个包盖 `platform`，所以「跨平台」是源码级的事实，
+manifest 是包级的事实。而 manifest 的 `exec` / `lifecycle` / `interpreter` 各只有一个，
+入口又往往是脚本：POSIX 的要 `sh`，PowerShell 的要 `powershell`，一个值不可能同时是两者。
+
+跨 OS 家族的脚本插件，让 `package/manifest.json` 只留平台无关的字段，入口写进与
+`package/` 同级的 `platforms/`。文件按**家族**命名，同一家族的所有三元组共用一份
+（`plugin-tools template` 生成的就是这两份，跟选了几个平台无关）：
+
+```json
+// platforms/unix.json —— 所有 unix 三元组共用（linux / darwin）
+{
+  "interpreter": { "name": "sh" },
+  "exec": { "path": "payload/bin/demo.sh", "ready": "notify" }
+}
+```
+
+```json
+// platforms/windows.json
+{
+  "interpreter": { "name": "powershell", "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"] },
+  "exec": { "path": "payload/bin/demo.ps1", "ready": "notify" }
+}
+```
+
+真有个三元组和同家族不一样时，再加 `platforms/<三元组>.json` 当例外层——它压在家族
+之上（比如某个平台的入口脚本、或者一份 `lifecycle`）。所以 meow 的 7 个平台是 2 份
+清单，不是 7 份。
+
+`platforms/` 里还可以直接放**入口脚本**（`demo.sh` / `demo.ps1`）：它们不在 `package/` 里，
+构建时按扩展名挑家族（`.sh` → unix，`.ps1`/`.cmd`/`.bat` → windows）复制进
+`payload/bin/`，别的平台的脚本从头到尾不进包——不需要事后过滤，也不会漏删。
+`platforms/lib/` 是同一件事的库版本：那里放 SDK 副本（`svcd-plugin.sh` /
+`SvcdPlugin.ps1`），构建时按同样的家族规则进 `payload/lib/`，所以 Linux 包里不会带着
+`SvcdPlugin.ps1`。
+
+`plugin-tools build` 的合并顺序是 `package/manifest.json` → `platforms/<家族>.json` →
+`platforms/<三元组>.json`：每一层都是同一套规则，同名顶层键整段替换（`lifecycle` 是一个
+键，要么全写要么不写），`null` 表示删掉这个键，`id` 与 `version` 不许改（它们决定产物名）。
+文件名只认 7 个三元组和 `unix` / `windows`，别的名字直接报错——没人会读到的覆盖文件
+就是拼错了。合并也在临时目录里的副本上完成，
+`package/manifest.json` 保持原样给下个平台用；副本里缺了清单指的文件就直接报错，不留到
+安装期。`--stage <dir>` 把这个副本固定到 `<dir>/package`，发布流水线打 tar 的就是它。
+没有 `platforms/` 的插件行为不变，但副本同样要过这道检查：`rust` / `c` 在 Windows 上
+产出 `<name>.exe`，构建时会把清单里的 `exec.path` 改成实际产物名写进副本——签名作业
+从 tar 里重打包时没有 `--exec` 可传，清单是唯一的载体。
 
 已知还需要宿主侧放宽的两点（会挡流水线）：
 

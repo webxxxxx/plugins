@@ -42,6 +42,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform }}
+      - name: Put Git for Windows' sh on PATH
+        # build.json 的命令是 `sh build.sh`；Windows runner 的默认 shell 是 pwsh，
+        # Git 的 bin/usr/bin 不一定在 PATH 上。补上再走 plugin-tools build。
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($dir in @('C:\Program Files\Git\bin', 'C:\Program Files\Git\usr\bin')) {
+            if (Test-Path $dir) { $dir | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8 }
+          }
       - name: Install plugin-tools
         shell: bash
         run: |
