@@ -10,21 +10,23 @@ Windows 用 `meow.ps1`（PowerShell），打包时合并进清单，见下面的
 
 ## 平台与形态
 
-透明代理的形态由配置里的顶层键 `proxy-mode` 选（缺省 `pc`）：
+透明代理的形态由配置里的顶层键 `proxy-mode` 选（缺省 `pc`）；页面顶部的代理类型
+`off` / `tun` / `tproxy` 就是它的三个取值 `off` / `pc` / `router`：
 
-| 平台 | `pc`：本机透明代理 | `router`：网关（LAN） |
-| --- | --- | --- |
-| Linux | `tproxy-port` → meow 自己装 nft `output` 链（root + nftables） | 插件用 iptables nat `prerouting` 劫持 LAN 转发（root + iptables，**只有 iptables 的内核也能用**） |
-| Windows 11 | `tun:` → Wintun 适配器 + fake-ip（管理员权限） | 不支持（没有 iptables） |
-| macOS | `tproxy-port` → pf（实验性，只拦 loopback） | 不支持（插件不装 pf 网关规则） |
+| 平台 | `off`：不接管 | `pc`：本机透明代理 | `router`：网关（LAN） |
+| --- | --- | --- | --- |
+| Linux | 只开 `mixed-port`（HTTP/SOCKS） | `tproxy-port` → meow 自己装 nft `output` 链（root + nftables） | 插件用 iptables nat `prerouting` 劫持 LAN 转发（root + iptables，**只有 iptables 的内核也能用**） |
+| Windows 11 | 只开 `mixed-port`，`tun.enable` 关掉 | `tun:` → Wintun 适配器 + fake-ip（管理员权限） | 不支持（没有 iptables） |
+| macOS | 只开 `mixed-port` | `tproxy-port` → pf（实验性，只拦 loopback） | 不支持（插件不装 pf 网关规则） |
 
 `proxy-mode` 是插件自己的键，meow 不认识它、也不会用它。路由器那类固件内核常常
 `# CONFIG_NF_TABLES is not set`、也没有 `nft` 和 `addrtype` 匹配，meow 内置防火墙
 在 listener 启动阶段就会失败，所以网关只能走 `router`；Windows 上反过来，本机
 透明代理只有 TUN 一条路。
 
-两种形态都要求足够的权限：Linux 的 nft/iptables 要 root，Windows 的 Wintun 要
-管理员。
+`off` 不启动 tun、也不开 tproxy：需要代理的软件自己指到 `mixed-port` 就行，系统流量
+完全不动。`pc` / `router` 都要求足够的权限：Linux 的 nft/iptables 要 root，Windows 的
+Wintun 要管理员。
 
 ## 入口：清单只写这个包是什么，入口按平台挑
 
@@ -93,17 +95,20 @@ package/
 
 ## 运行方式
 
-- `mixed-port: 7890`：HTTP/SOCKS5 混合代理（`pc` 形态下浏览器也可以直接用它）。
+- `mixed-port: 7890`：HTTP/SOCKS5 混合代理（浏览器可以直接用它，`off` 形态只有它）。
 - `external-controller: 127.0.0.1:9090`，YACD 在 `http://127.0.0.1:9090/ui/`。
-- svcd 控制台的「打开」入口由 `manifest.ui` + `payload/web/index.html` 提供；
-  页面会自动跳到 `http://<当前主机>:9090/ui/`。
+- svcd 控制台的「打开」入口是我们自己的页面（`payload/web/index.html`）：顶部是**代理类型**
+  （`off` / `tun` / `tproxy`），下面用 iframe 嵌 meow 自带的 YACD；面板地址按当前浏览器访问的
+  主机名拼（`http://<当前主机>:9090/ui/`），`127.0.0.1` / `localhost` / 局域网地址都能用。
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
   改到代理组后即可用面板切换。
 
-宿主的 `lifecycle.start` 是前台进程，所以 `pc` 形态直接 `exec meow`；`router`
-形态要先起进程、等 tproxy 端口监听、再挂规则，所以它把 meow 放到后台并
-`wait`，直到进程退出才返回。启动前都会先跑 `meow -t` 校验配置，失败就返回
-非零而不是秒退。`stop` 按 pidfile 结束进程，`status` 输出一行 JSON。
+宿主的 `lifecycle.start` 是常驻前台进程，但它现在是**看护进程**：meow 是自己的子进程，
+能力通道跑在后台（页面上的代理类型调的就是它）。`pc` / `off` 形态起进程就返回；`router`
+形态还要等 tproxy 端口监听、挂好 iptables 规则。启动前会跑 `meow -t` 校验配置，失败就返回
+非零而不是秒退。孩子自己退出时看护循环跟着退出（宿主据此重启或报错）；页面切了代理类型
+就让孩子退出，看护循环读到新的 `proxy-mode` 后按新形态重启。`stop` 按 pidfile 结束进程，
+`status` 输出一行 JSON。
 
 ## 配置
 
@@ -124,9 +129,17 @@ meow **不读** `config`，所以这里的开关永远不会被它重写掉；�
 
 ### proxy-mode：填一个键，其余自动
 
+页面上只有三个值：`off` / `tun` / `tproxy`，落盘永远是 `proxy-mode`：
+
+| 页面上的代理类型 | `proxy-mode` | 含义 |
+| --- | --- | --- |
+| `off` | `off` | 不启动 tun，也不开 tproxy：meow 只当普通 HTTP/SOCKS 代理（`mixed-port`） |
+| `tun` | `pc` | 本机透明代理：Windows 走 TUN + fake-ip，Linux/macOS 走 `tproxy-port` |
+| `tproxy` | `router` | 网关：iptables 劫持 LAN，只有 Linux 有（Windows 上页面会把这个选项标成「仅 Linux」） |
+
 ```yaml
-proxy-mode: pc          # pc | router（Windows 只认 pc）
-mixed-port: 7890        # HTTP + SOCKS 同一个口
+proxy-mode: pc          # off | pc | router（Windows 只认 off / pc）
+mixed-port: 7890        # HTTP + SOCKS 同一个口，off 形态下只有它
 tproxy-port: 7893       # Linux 的 pc / router 用；Windows 走 TUN
 routing-mark: 9527      # Linux pc 的出向 SO_MARK
 lan-interface: br0      # router：被劫持的 LAN 网口
@@ -135,12 +148,14 @@ dns-port: 1053          # router：LAN DNS 劫持的目标端口
 
 | 形态 | 平台 | 插件自动写进 `meow.yaml` |
 | --- | --- | --- |
+| `off` | 全部 | 关掉 `tun`，删掉 `tproxy-port` / `routing-mark`，只留 `mixed-port` |
 | `pc` | Windows | `tun.enable` / `auto-route` / `dns-hijack: [any:53]` + `dns.enhanced-mode: fake-ip` + `fake-ip-range`（TUN 和 fake-ip 必须成对，缺一个 meow 一条路由都不装） |
 | `pc` | Linux / macOS | `tproxy-port` + `routing-mark`，并关掉 `tun` |
 | `router` | Linux | 关 `tun`，`dns.listen: 0.0.0.0:<dns-port>`，`listeners:` 里没有 tproxy 入口时补一条（`firewall: false`） |
 
-切形态只改 `config` 里的 `proxy-mode` 再 `plugin restart meow`。从 `router` 切回 `pc`
-时 `stop` 会先把残留的 nat 规则撤掉，不会留一个指向死端口的劫持。
+切形态有两条路：页面上选一下（写 `config` → 重启 meow，几秒钟，插件本身不用重启），或者
+自己改 `config` 里的 `proxy-mode` 再 `plugin restart meow`。从 `router` 切回 `pc` 时 `stop`
+会先把残留的 nat 规则撤掉，不会留一个指向死端口的劫持。
 
 ## 本机透明代理（proxy-mode: pc）
 
@@ -179,8 +194,9 @@ routing-mark: 9527     # meow 自己出向的 SO_MARK，避免被自己的规则
 
 ### Windows 11
 
-Windows 上没有 nftables/pf，本机透明代理只有 **TUN（Wintun）** 一条路。`config` 里
-`proxy-mode: pc` 就够了，插件每次 `start` 都把这几行写进 `meow.yaml`（不用手填）：
+Windows 上没有 nftables/pf，本机透明代理只有 **TUN（Wintun）** 一条路。页面上的
+代理类型选 `tun`（也就是 `proxy-mode: pc`）就够了，插件每次 `start` 都把这几行写进
+`meow.yaml`（不用手填）：
 
 ```yaml
 # <插件目录>/meow.yaml —— 插件自动维护这几行
@@ -196,6 +212,7 @@ dns:
 
 - 宿主进程要以管理员运行（Wintun 适配器要提权）。没提权时插件会在日志里提示，
   meow 自己也会失败退出。
+- 选 `off` 就把 `tun.enable` 关掉：不建 TUN 适配器、不动路由和 DNS，只有 `mixed-port` 能代理。
 - `mixed-port` 也只写在 `config` 里，插件把它带到 `meow.yaml`。
 - 订阅里带进来的 `tproxy-port` / `routing-mark` 会被删掉：那是 Linux nftables / pf 的路。
 - `wintun.dll` 不用手动放：meow 会优先找 exe 旁边的，找不到就释放内置的一份。
@@ -285,13 +302,19 @@ Clear-DnsClientCache
 
 ```bash
 # Linux/macOS：只读配置，不动 meow 进程
-sh <插件目录>/<版本>/payload/bin/meow.sh mode        # 打印解析出来的形态/端口/网口
-sh <插件目录>/<版本>/payload/bin/meow.sh fw status   # 看规则在不在
-sh <插件目录>/<版本>/payload/bin/meow.sh fw down     # 手动撤规则
+sh <插件目录>/<版本>/payload/bin/meow.sh mode         # 打印解析出来的形态/端口/网口
+sh <插件目录>/<版本>/payload/bin/meow.sh status       # 一行 JSON（running / mode / proxy / 端口）
+sh <插件目录>/<版本>/payload/bin/meow.sh set-mode tun  # 和页面上的选择器同一条路：写 config 再重启孩子
+sh <插件目录>/<版本>/payload/bin/meow.sh fw status    # 看规则在不在
+sh <插件目录>/<版本>/payload/bin/meow.sh fw down      # 手动撤规则
 
 # Windows
 powershell -NoProfile -ExecutionPolicy Bypass -File <插件目录>\<版本>\payload\bin\meow.ps1 mode
+powershell -NoProfile -ExecutionPolicy Bypass -File <插件目录>\<版本>\payload\bin\meow.ps1 status
 ```
+
+页面上的代理类型调的是插件能力 `mode`（不带参数读，带 `{"mode":"tun"}` 写）；
+`svc call meow.mode` 拿到的是同一份 JSON。status / mode 里的 `proxy` 字段就是页面上的标签。
 
 ## 构建
 

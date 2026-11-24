@@ -120,6 +120,48 @@ Expect (Join-Path $plugin 'config') 'proxy-mode' 'pc' 'migrate'
 Remove-Item -Recurse -Force $Work
 Write-Output 'meow config layer (windows): ok'
 
+# ---- 页面上的代理类型：off / tun / tproxy ↔ off / pc / router ----
+# 页面只认这三个标签；落盘的永远是 proxy-mode，所以配置永远能被 meow.sh 读。
+$plugin = New-Fixture 'modes'
+if ((Get-ModeFromLabel 'tun') -ne 'pc') { Fail 'modes: tun 没映射成 pc' }
+if ((Get-ModeFromLabel 'tproxy') -ne 'router') { Fail 'modes: tproxy 没映射成 router' }
+if ((Get-ModeFromLabel 'off') -ne 'off') { Fail 'modes: off 没映射成 off' }
+if ((Get-ModeFromLabel 'turbo') -ne '') { Fail 'modes: 非法标签应该返回空' }
+if ((Get-ModeLabel 'pc') -ne 'tun') { Fail 'modes: pc 没映射回 tun' }
+
+$before = Read-Text $CONFIG
+Set-OurValue 'proxy-mode' 'off'
+if ((Get-Mode) -ne 'off') { Fail 'modes: Set-OurValue 没写进 proxy-mode' }
+if ((Read-Text $CONFIG) -notmatch '(?m)^mixed-port: 7890') { Fail 'modes: Set-OurValue 弄丢了别的键' }
+if ((Read-Text $CONFIG) -notmatch '# meow 插件的设置') { Fail 'modes: Set-OurValue 弄丢了注释' }
+$twice = Read-Text $CONFIG
+Set-OurValue 'proxy-mode' 'off'
+if ((Read-Text $CONFIG) -ne $twice) { Fail 'modes: Set-OurValue 不幂等' }
+
+# off：不启动 tun，也不开 tproxy —— 只剩 mixed-port。
+if (-not (Apply-Settings 'off')) { Fail 'modes: Apply-Settings off 失败' }
+if ((Get-BlockScalar $MEOW_CONFIG 'tun' 'enable') -ne 'false') { Fail 'modes: off 没把 tun 关掉' }
+Expect $MEOW_CONFIG 'mixed-port' '7890' 'modes'
+Expect $MEOW_CONFIG 'tproxy-port' '' 'modes'
+if ((Read-Text $MEOW_CONFIG) -notmatch 'node-1') { Fail 'modes: off 把订阅弄丢了' }
+if (Apply-Settings 'router') { Fail 'modes: Windows 上 router 应该被拒' }
+
+$json = Get-ModeJson
+if ($json -notmatch '"mode":"off"') { Fail "modes: Get-ModeJson 没报出代理类型（$json）" }
+if ($json -notmatch '"running":false') { Fail "modes: Get-ModeJson running 不对（$json）" }
+if ($json -notmatch '"allowed":\["off","tun"\]') { Fail "modes: Get-ModeJson allowed 不对（$json）" }
+
+# 页面走的能力入口：不带 mode 是读，带了非法/不支持的标签要报错且不动配置。
+$read = Invoke-Capability 'mode' @{}
+if ($read -notmatch '"mode":"off"') { Fail "modes: mode 能力读状态不对（$read）" }
+$refused = Invoke-Capability 'mode' @{ mode = 'tproxy' }
+if (-not ($refused -is [hashtable] -and $refused.Error)) { Fail 'modes: Windows 上 tproxy 应该被拒' }
+if ((Get-Mode) -ne 'off') { Fail 'modes: 被拒的 tproxy 改了配置' }
+$bad = Invoke-Capability 'mode' @{ mode = 'turbo' }
+if (-not ($bad -is [hashtable] -and $bad.Error)) { Fail 'modes: 非法标签应该被拒' }
+
+Write-Output 'meow proxy mode capability (windows): ok'
+
 # ---- DNS：meow 把网卡 DNS 改成 127.0.0.1，强杀后没人恢复，stop 要自己修 ----
 # 用两个同名函数把 cmdlet 换掉：既能测保存，也能测恢复，而且不碰本机网络。
 $script:POLUTED = $false

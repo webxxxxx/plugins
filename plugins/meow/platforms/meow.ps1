@@ -14,6 +14,14 @@ Windows 上没有 nftables / pf，本机透明代理只有 TUN（Wintun）一条
 tun 和 dns.fake-ip 打开（这两样必须成对，缺一个 meow 就一条路由都不装）。网关形态
 （proxy-mode: router）依赖 iptables，Windows 不支持。
 
+三种形态就是页面 A 顶部的代理类型选择器：
+  off    不启动 tun，也不开 tproxy：meow 只当普通 HTTP/SOCKS 代理（mixed-port）。
+  tun    就是 proxy-mode: pc —— tun + fake-ip。
+  tproxy 就是 proxy-mode: router —— 只有 Linux 有，Windows 明确拒绝。
+
+start 是常驻的看护进程：meow 是自己的子进程，通道能力（页面调它）在同一进程里；
+孩子意外退出时看门狗结束本进程，宿主会跑 stop 收尾再按策略重启或报错。
+
 日志：stderr 由宿主收集；status 往 stdout 打一行 JSON。
 #>
 param(
@@ -33,8 +41,12 @@ $MEOW_CONFIG = Join-Path $PLUGIN_ROOT 'meow.yaml'                # meow 的配�
 $TEMPLATE = Join-Path $ROOT 'config.yaml'                        # 包里的模板
 $MEOW = Join-Path $HERE 'meow.exe'
 if (-not (Test-Path -LiteralPath $MEOW)) { $MEOW = Join-Path $HERE 'meow' }
+$SDK = Join-Path (Join-Path $ROOT 'lib') 'SvcdPlugin.ps1'
 
 New-Item -ItemType Directory -Force -Path $DATA | Out-Null
+
+# 通道能力（页面 A 的代理类型选择器）用 SDK；sync 会把 sdk/powershell 的副本刷到 payload/lib。
+if (Test-Path -LiteralPath $SDK) { . $SDK }
 
 function Write-Note([string]$Text) {
     [Console]::Error.WriteLine("meow: $Text")
@@ -74,7 +86,48 @@ function Get-OurValue([string]$Key, [string]$Default) {
 function Get-Mode {
     $mode = Get-ConfigValue $CONFIG 'proxy-mode'
     if (-not $mode) { return 'pc' }
+    if ($mode -notin @('off', 'pc', 'router')) {
+        Write-Note "config 里 proxy-mode 只能是 off、pc 或 router（现在是 '$mode'）"
+        return 'pc'
+    }
     return $mode
+}
+
+# 页面上的三个选项 ↔ 实际形态：tun ↔ pc，tproxy ↔ router。
+function Get-ModeLabel([string]$Mode) {
+    switch ($Mode) {
+        'pc' { return 'tun' }
+        'router' { return 'tproxy' }
+        default { return 'off' }
+    }
+}
+
+function Get-ModeFromLabel([string]$Label) {
+    switch ($Label) {
+        'off' { return 'off' }
+        'tun' { return 'pc' }
+        'tproxy' { return 'router' }
+        default { return '' }
+    }
+}
+
+# 只改我们自己的 config：替换同名顶层键，别的行（注释、其它开关）原样保留。
+function Set-OurValue([string]$Key, [string]$Value) {
+    $lines = @()
+    if (Test-Path -LiteralPath $CONFIG) { $lines = @([System.IO.File]::ReadAllLines($CONFIG)) }
+    $pattern = '^' + [regex]::Escape($Key) + ':\s*'
+    $out = @()
+    $done = $false
+    foreach ($line in $lines) {
+        if ($line -match $pattern) {
+            $out += ($Key + ': ' + $Value)
+            $done = $true
+        } else {
+            $out += $line
+        }
+    }
+    if (-not $done) { $out += ($Key + ': ' + $Value) }
+    Write-Lines $CONFIG $out
 }
 
 # 读某个顶层块下的标量（缩进的那一行），去掉引号；没有就返回空串。
@@ -215,27 +268,40 @@ function Prepare-Config {
     Write-Utf8 $MEOW_CONFIG $text.Replace('@DATA@', (Get-DataPath))
 }
 
-# 按形态把受管键写进 meow.yaml：pc 形态要 tun + fake-ip（成对，缺一个就没有路由）。
+# 按形态把受管键写进 meow.yaml：pc 形态要 tun + fake-ip（成对，缺一个就没有路由），
+# off 形态把 tun 关掉、只留 mixed-port。
 function Apply-Settings([string]$Mode) {
     $mixed = Get-OurValue 'mixed-port' '7890'
-    Set-TopKey $MEOW_CONFIG 'mixed-port' $mixed
-
-    if ($Mode -ne 'pc') {
-        Write-Note 'Windows 上不支持 proxy-mode: router —— 网关形态要 iptables，只有 Linux 有'
+    if ($mixed -notmatch '^\d+$') {
+        Write-Note "mixed-port 不是端口：'$mixed'"
         return $false
     }
+    Set-TopKey $MEOW_CONFIG 'mixed-port' $mixed
 
-    # 订阅里带进来的 tproxy-port 在 Windows 上没有意义。
+    # 订阅里带进来的 tproxy 端口在 Windows 上没有意义。
     Remove-TopKey $MEOW_CONFIG 'tproxy-port'
     Remove-TopKey $MEOW_CONFIG 'routing-mark'
 
-    Set-BlockKey $MEOW_CONFIG 'tun' 'enable' 'true'
-    Set-BlockKey $MEOW_CONFIG 'tun' 'auto-route' 'true'
-    Set-BlockKey $MEOW_CONFIG 'tun' 'dns-hijack' '[any:53]'
-    Set-BlockKey $MEOW_CONFIG 'dns' 'enable' 'true'
-    Set-BlockKey $MEOW_CONFIG 'dns' 'enhanced-mode' 'fake-ip'
-    Set-BlockKey $MEOW_CONFIG 'dns' 'fake-ip-range' '198.18.0.1/16'
-    return $true
+    switch ($Mode) {
+        'off' {
+            # 不接管：不启动 tun，也不开 tproxy，meow 只当普通 HTTP/SOCKS 代理。
+            Set-BlockKey $MEOW_CONFIG 'tun' 'enable' 'false'
+            return $true
+        }
+        'pc' {
+            Set-BlockKey $MEOW_CONFIG 'tun' 'enable' 'true'
+            Set-BlockKey $MEOW_CONFIG 'tun' 'auto-route' 'true'
+            Set-BlockKey $MEOW_CONFIG 'tun' 'dns-hijack' '[any:53]'
+            Set-BlockKey $MEOW_CONFIG 'dns' 'enable' 'true'
+            Set-BlockKey $MEOW_CONFIG 'dns' 'enhanced-mode' 'fake-ip'
+            Set-BlockKey $MEOW_CONFIG 'dns' 'fake-ip-range' '198.18.0.1/16'
+            return $true
+        }
+        default {
+            Write-Note 'Windows 上不支持 tproxy（proxy-mode: router）—— 网关形态要 iptables，只有 Linux 有'
+            return $false
+        }
+    }
 }
 
 # ---- 进程与网络 ----
@@ -335,10 +401,10 @@ function Quote-Arg([string]$Value) {
     return $Value
 }
 
-function Start-Meow {
+function Start-MeowChild {
     if (-not (Test-Path -LiteralPath $MEOW -PathType Leaf)) {
         Write-Note "missing $MEOW"
-        return 1
+        return 0
     }
     if (-not (Test-Elevated)) {
         Write-Note '需要管理员权限：TUN/Wintun 适配器要提权，否则 meow 会起不来'
@@ -348,31 +414,122 @@ function Start-Meow {
     if ($LASTEXITCODE -ne 0) {
         Write-Note '配置校验失败（meow -t）：'
         foreach ($line in $validate) { [Console]::Error.WriteLine("  $line") }
-        return 1
+        return 0
     }
 
+    $mode = Get-Mode
     $meowArgs = @('-d', $ROOT, '-f', $MEOW_CONFIG, '--ext-ui', (Join-Path $ROOT 'yacd'))
     $quoted = ($meowArgs | ForEach-Object { Quote-Arg $_ }) -join ' '
-    Write-Note "meow starting mode=pc (data=$ROOT, config=$MEOW_CONFIG)"
-    # Start-Process -Wait 拿不到启动瞬间的 PID（而那正是 stop 要的），所以用
-    # ProcessStartInfo：先拿 Id 写 pidfile，再阻塞等退出。
+    Write-Note "meow starting mode=$mode (data=$ROOT, config=$MEOW_CONFIG)"
+    # meow 的日志默认走 stdout，而 stdout 是我们的协议口：不能让它混进去，
+    # 也不能让它继承通道的 stdin（那会跟宿主抢帧）。日志落到数据目录里的一份文件。
+    $meowLog = Join-Path $DATA 'meow.out.log'
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $MEOW
     $psi.Arguments = $quoted
     $psi.UseShellExecute = $false
     $psi.WorkingDirectory = $ROOT
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardInput = $true
     $proc = [System.Diagnostics.Process]::Start($psi)
+    if (-not $proc) {
+        Write-Note '起 meow 失败'
+        return 0
+    }
     Write-Utf8 $PIDFILE ("{0}`n" -f $proc.Id)
-    $proc.WaitForExit()
-    $code = $proc.ExitCode
-    # 被 stop 强杀时 Windows 给的是 0xFFFFFFFF（-1）；归一成 1，宿主日志好读。
-    if ($code -lt 0) { $code = 1 }
-    Remove-Item -LiteralPath $PIDFILE -ErrorAction SilentlyContinue
-    Clear-TunRoutes
-    # meow 自己退出时会恢复 DNS；它崩了就不会，这里补一刀（没残留就什么都不做）。
-    Restore-DnsState
-    Write-Note "meow exited rc=$code"
-    return $code
+    # 用一个 runspace 把它的 stdout 抄进日志文件：主线程要留在通道读循环里。
+    $pump = [PowerShell]::Create()
+    $null = $pump.AddScript({
+        param($Reader, $Log)
+        try {
+            while ($null -ne ($line = $Reader.ReadLine())) {
+                [System.IO.File]::AppendAllText($Log, $line + "`n")
+            }
+        } catch { }
+    }).AddArgument($proc.StandardOutput).AddArgument($meowLog)
+    $null = $pump.BeginInvoke()
+    return $proc.Id
+}
+
+# 孩子自己死了（不是我们在切换）就结束本进程：宿主看到 exit，会先跑 stop 收尾、再按策略
+# 重启或报错。PowerShell 没有 fork，主线程又阻塞在通道读上，所以用一个 runspace 盯 pidfile；
+# 主动切换期间挂 hold 文件，看门狗就不把「孩子被我们杀掉」当成崩溃。
+function Start-Watchdog {
+    $hold = Join-Path $DATA 'switching'
+    $script:WATCHER = [PowerShell]::Create()
+    $null = $script:WATCHER.AddScript({
+        param($PidFile, $HoldFile)
+        Start-Sleep -Seconds 3
+        while ($true) {
+            Start-Sleep -Seconds 2
+            if (Test-Path -LiteralPath $HoldFile) { continue }
+            $text = ''
+            try { $text = [System.IO.File]::ReadAllText($PidFile) } catch { }
+            $child = 0
+            if (-not [int]::TryParse($text.Trim(), [ref]$child)) { [Environment]::Exit(1) }
+            if (-not (Get-Process -Id $child -ErrorAction SilentlyContinue)) { [Environment]::Exit(1) }
+        }
+    }).AddArgument($PIDFILE).AddArgument($hold)
+    $null = $script:WATCHER.BeginInvoke()
+}
+
+# ---- 能力：代理类型（页面 A 的顶部选择器） ----
+
+# 读：{"mode":"off|tun|tproxy","proxy-mode":"off|pc|router","running":bool,"allowed":[...]}
+function Get-ModeJson {
+    $mode = Get-Mode
+    $running = if (Get-RunningPid) { 'true' } else { 'false' }
+    $mixed = ''
+    if (Test-Path -LiteralPath $MEOW_CONFIG -PathType Leaf) {
+        $value = Get-ConfigValue $MEOW_CONFIG 'mixed-port'
+        if ($value -match '^\d+$') { $mixed = ',"mixed-port":' + $value }
+    }
+    return '{"mode":"' + (Get-ModeLabel $mode) + '","proxy-mode":"' + $mode +
+        '","running":' + $running + ',"allowed":["off","tun"]' + $mixed + '}'
+}
+
+# 写：把页面上的代理类型落成 proxy-mode，重启孩子。成功返回 $true。
+function Switch-Mode([string]$Label) {
+    $target = Get-ModeFromLabel $Label
+    if (-not $target) {
+        Write-Note "代理类型只能是 off / tun / tproxy（收到 '$Label'）"
+        return $false
+    }
+    if ($target -eq 'router') {
+        Write-Note 'Windows 上没有 tproxy：网关形态要 iptables，只有 Linux 有'
+        return $false
+    }
+    if ((Get-Mode) -eq $target -and (Get-RunningPid)) { return $true }
+
+    $hold = Join-Path $DATA 'switching'
+    New-Item -ItemType File -Force -Path $hold | Out-Null
+    try {
+        Set-OurValue 'proxy-mode' $target
+        $null = Stop-Meow
+        if (-not (Apply-Settings (Get-Mode))) { return $false }
+        $null = Clear-TunRoutes
+        $null = Restore-DnsState
+        $null = Save-DnsState
+        return [bool](Start-MeowChild)
+    } finally {
+        Remove-Item -LiteralPath $hold -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-Capability($Name, $Arguments) {
+    if ($Name -ne 'mode') { return @{ Text = "unknown tool: $Name"; Error = $true } }
+    $label = ''
+    # 宿主给的是 ConvertFrom-Json 的 PSCustomObject，测试里给的是 hashtable，两种都认。
+    if ($Arguments) {
+        if ($Arguments -is [System.Collections.IDictionary]) {
+            if ($Arguments.Contains('mode')) { $label = [string]$Arguments['mode'] }
+        } elseif ($Arguments.PSObject.Properties['mode']) {
+            $label = [string]$Arguments.mode
+        }
+    }
+    if (-not $label) { return (Get-ModeJson) }
+    if (-not (Switch-Mode $label)) { return @{ Text = '切换代理类型失败（原因见日志）'; Error = $true } }
+    return (Get-ModeJson)
 }
 
 function Stop-Meow {
@@ -413,9 +570,10 @@ function Show-Status {
     $tunJson = if ($tun) { 'true' } else { 'false' }
     $mixedJson = ''
     if ($mixed -match '^\d+$') { $mixedJson = ',"mixed-port":' + $mixed }
+    $proxyJson = ',"proxy":"' + (Get-ModeLabel $mode) + '"'
     # 两个分支只差前半句，信封只写一次。
     $head = if ($pidValue) { '"running":true,"pid":' + $pidValue } else { '"running":false' }
-    Write-Output ('{' + $head + ',"mode":"' + $mode + '","controller":"127.0.0.1:9090","tun":' + $tunJson + $mixedJson + '}')
+    Write-Output ('{' + $head + ',"mode":"' + $mode + '"' + $proxyJson + ',"controller":"127.0.0.1:9090","tun":' + $tunJson + $mixedJson + '}')
 }
 
 function Show-Mode {
@@ -441,13 +599,26 @@ switch ($Action) {
             Write-Note "already running (pid $running)"
             exit 1
         }
+        if (-not (Test-Path -LiteralPath $SDK)) {
+            Write-Note "缺少通道 SDK（$SDK），页面上的代理类型开关不可用"
+            exit 1
+        }
         # 上一次被强杀留下的路由和 loopback DNS 先清掉，否则新的 tun 起来也接管不了，
         # 而且残留的 DNS 会让这台机器看起来“彻底断网”。
-        Clear-TunRoutes
-        Restore-DnsState
+        $null = Clear-TunRoutes
+        $null = Restore-DnsState
         # 记下启动前真实的 DNS，停止（或崩溃）后用它恢复。必须在 meow 改 DNS 之前。
-        Save-DnsState
-        exit (Start-Meow)
+        $null = Save-DnsState
+        Remove-Item -LiteralPath (Join-Path $DATA 'switching') -ErrorAction SilentlyContinue
+        if (-not (Start-MeowChild)) { exit 1 }
+        Start-Watchdog
+        # 常驻：从 stdin 收帧、往 stdout 回结果，直到宿主 shutdown（或看门狗结束本进程）。
+        try {
+            Invoke-SvcdPlugin -Handler ${function:Invoke-Capability} -Capabilities @('mode')
+        } finally {
+            $null = Stop-Meow
+        }
+        exit 0
     }
     'stop' {
         Stop-Meow

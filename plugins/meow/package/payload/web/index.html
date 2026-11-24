@@ -1,26 +1,165 @@
 <!doctype html>
 <html lang="zh">
 <meta charset="utf-8">
-<title>meow · YACD</title>
+<title>meow</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
   html, body { height: 100%; margin: 0; }
-  body { display: grid; place-items: center; font: 14px/1.6 system-ui, sans-serif; color: #333; }
-  a { color: #2563eb; }
+  body {
+    display: flex; flex-direction: column;
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Noto Sans SC", sans-serif;
+    background: #f6f7f9; color: #1f2328;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 9px 14px; background: #fff; border-bottom: 1px solid #dcdfe4;
+  }
+  h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .02em; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  select {
+    font: inherit; padding: 3px 8px; border-radius: 6px;
+    border: 1px solid #c9ced6; background: #fff; color: inherit;
+  }
+  select:disabled { opacity: .55; }
+  #status { color: #57606a; }
+  #status.up { color: #1a7f37; }
+  #status.down { color: #9a6700; }
+  #status.bad { color: #cf222e; }
+  #note { margin-left: auto; color: #6e7781; }
+  main { position: relative; flex: 1; min-height: 0; }
+  iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
+  #overlay {
+    position: absolute; inset: 0; display: none; place-items: center;
+    padding: 24px; text-align: center; color: #57606a;
+  }
+  main.down #overlay { display: grid; }
+  main.down iframe { visibility: hidden; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #0d1117; color: #e6edf3; }
+    header { background: #161b22; border-color: #30363d; }
+    select { background: #0d1117; border-color: #3d444d; }
+    #status, #note, #overlay { color: #9198a1; }
+    iframe { background: #0d1117; }
+  }
 </style>
 <body>
-  <div>
-    <p>正在打开 meow 控制台…</p>
-    <p><a id="fallback" href="#">如果页面没有自动跳转，点这里</a></p>
-  </div>
-  <script>
-    // YACD 由 meow 自己在 external-controller 上提供；这里只做一个跳转入口。
-    // 用当前浏览器访问的主机名，兼容 127.0.0.1 / localhost / 局域网地址。
+  <header>
+    <h1>meow</h1>
+    <label>代理类型
+      <select id="mode" disabled>
+        <option value="off">off（不接管）</option>
+        <option value="tun">tun（本机 TUN）</option>
+        <option value="tproxy">tproxy（网关）</option>
+      </select>
+    </label>
+    <span id="status">读取状态…</span>
+    <span id="note">下面是 meow 自己的面板（YACD）</span>
+  </header>
+  <main id="panel" class="down">
+    <iframe id="ui" title="meow 面板" referrerpolicy="no-referrer"></iframe>
+    <div id="overlay"><p id="overlay-text">meow 没在运行，起来之后这里就是它的面板。</p></div>
+  </main>
+
+  <script type="module">
+    // 这个页面是壳：顶上是代理类型（off / tun / tproxy），下面 iframe 嵌 meow 自带的 YACD。
+    // 选代理类型 → 调插件能力 mode → 写进 config 的 proxy-mode → 看护进程按新形态重启 meow。
+    import { pluginUI } from './plugin-ui.mjs';
+
+    const ui = pluginUI();
+    const select = document.getElementById('mode');
+    const statusEl = document.getElementById('status');
+    const panel = document.getElementById('panel');
+    const iframe = document.getElementById('ui');
+    const overlayText = document.getElementById('overlay-text');
+
+    const NAMES = { off: 'off（不接管）', tun: 'tun（本机 TUN）', tproxy: 'tproxy（网关）' };
+
+    // YACD 由 meow 自己在 external-controller 上提供；用当前浏览器访问的主机名，
+    // 兼容 127.0.0.1 / localhost / 局域网地址。
     const raw = location.hostname || '127.0.0.1';
-    const host = (raw === '[::1]' || raw === '::1') ? '127.0.0.1' : raw;
-    const target = 'http://' + host + ':9090/ui/';
-    document.getElementById('fallback').href = target;
-    location.replace(target);
+    const host = (raw === '[::1]' || raw === '::1' || raw === '::') ? '127.0.0.1' : raw;
+    const PANEL = `http://${host}:9090/ui/`;
+
+    let last = {};
+
+    function say(text, kind = '') {
+      statusEl.textContent = text;
+      statusEl.className = kind;
+    }
+
+    function render(state) {
+      last = state || {};
+      const allowed = Array.isArray(last.allowed) ? last.allowed : ['off', 'tun', 'tproxy'];
+      for (const option of select.options) {
+        const ok = allowed.includes(option.value);
+        option.disabled = !ok;
+        option.textContent = ok ? NAMES[option.value] : `${NAMES[option.value]}（仅 Linux）`;
+      }
+      if (last.mode) select.value = last.mode;
+      select.disabled = false;
+
+      if (last.running) {
+        const port = last['mixed-port'] ? ` · mixed ${last['mixed-port']}` : '';
+        say(`运行中${port}`, 'up');
+        showPanel(true);
+      } else {
+        say('meow 未运行', 'down');
+        showPanel(false);
+      }
+    }
+
+    function showPanel(up) {
+      panel.classList.toggle('down', !up);
+      if (!up) return;
+      // 加时间戳强制重载：切形态之后旧面板是断的，同一个 URL 赋值浏览器不一定重新拉。
+      iframe.src = `${PANEL}?t=${Date.now()}`;
+    }
+
+    async function read() {
+      return JSON.parse(await ui.invoke('mode'));
+    }
+
+    async function waitReady() {
+      for (let i = 0; i < 30; i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        try {
+          const state = await read();
+          if (state.running) {
+            render(state);
+            say(`运行中 · ${NAMES[state.mode] || state.mode}`, 'up');
+            return;
+          }
+        } catch {
+          // 正在重启，插件进程这一刻可能不回话，继续等。
+        }
+      }
+      say('等 meow 起来超时，稍后刷新页面', 'bad');
+    }
+
+    select.addEventListener('change', async () => {
+      const wanted = select.value;
+      select.disabled = true;
+      say(`切到 ${NAMES[wanted] || wanted}…`, 'down');
+      try {
+        await ui.invoke('mode', { mode: wanted });
+      } catch (error) {
+        say(`切换失败：${error.message}`, 'bad');
+        select.value = last.mode || '';
+        select.disabled = false;
+        return;
+      }
+      await waitReady();
+    });
+
+    try {
+      render(await read());
+    } catch (error) {
+      select.disabled = true;
+      say('插件没在运行', 'bad');
+      overlayText.textContent = `连不上插件进程（${error.message}）。先 plugin start meow，再刷新这一页。`;
+      panel.classList.add('down');
+    }
   </script>
 </body>
-</html>

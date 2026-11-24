@@ -1,5 +1,5 @@
 #!/bin/sh
-# meow 的配置层：proxy-mode 决定往 meow.yaml 里写什么。
+# meow 的配置层：proxy-mode 决定往 meow.yaml 里写什么，页面上的代理类型走 set-mode。
 #
 # 只用一个假布局（伪 meow / 伪规则脚本）跑 meow.sh 的配置相关子命令，然后检查
 # 生成出来的 meow.yaml：受管键对不对、订阅和注释有没有被动过、config 有没有被写。
@@ -15,17 +15,19 @@ fail() {
     exit 1
 }
 
-# 假插件目录：<root>/plugin/{config,meow.yaml} + <root>/plugin/1.2.0/payload/{bin,config.yaml}
+# 假插件目录：<root>/plugin/{config,meow.yaml} + <root>/plugin/1.2.0/payload/{bin,lib,config.yaml}
 fixture() {
     _root=$1
     rm -rf "$_root"
     _plugin="$_root/plugin"
     _bin="$_plugin/1.2.0/payload/bin"
-    mkdir -p "$_bin" "$_plugin/1.2.0/payload/yacd"
+    mkdir -p "$_bin" "$_plugin/1.2.0/payload/yacd" "$_plugin/1.2.0/payload/lib"
     cp "$REPO/plugins/meow/platforms/meow.sh" "$_bin/meow.sh"
+    cp "$REPO/plugins/meow/platforms/lib/svcd-plugin.sh" "$_plugin/1.2.0/payload/lib/svcd-plugin.sh"
     cp "$REPO/plugins/meow/package/payload/config.yaml" "$_plugin/1.2.0/payload/config.yaml"
     cp "$REPO/plugins/meow/package/config/config" "$_plugin/config"
-    printf '#!/bin/sh\nexit 0\n' > "$_bin/meow"
+    # 伪 meow：校验（-t）立刻成功，真正启动就赖着不退，好让看护循环有东西可等。
+    printf '#!/bin/sh\ncase " $* " in *" -t "*) exit 0 ;; esac\nwhile :; do sleep 1; done\n' > "$_bin/meow"
     printf '#!/bin/sh\necho "fw-stub: $*"\n' > "$_bin/meow-fw.sh"
     chmod +x "$_bin/meow" "$_bin/meow.sh" "$_bin/meow-fw.sh"
     cat > "$_plugin/meow.yaml" <<'YAML'
@@ -67,6 +69,34 @@ sed -i 's/^mixed-port: 7890/mixed-port: 1080/' "$_plugin/config"
 run_meow mode >/dev/null
 grep -qx 'mixed-port: 1080' "$_plugin/meow.yaml" || fail 'pc: 改 config 的 mixed-port 没生效'
 
+# ---- off：只留 mixed-port，tproxy/mark/tun 全撤 ----
+fixture "$WORK/off"
+run_meow set-mode off >/dev/null
+grep -qx 'proxy-mode: off' "$_plugin/config" || fail 'off: config 里的 proxy-mode 没改成 off'
+run_meow mode >/dev/null
+grep -qx 'mixed-port: 7890' "$_plugin/meow.yaml" || fail 'off: mixed-port 没写进去'
+grep -qx 'tproxy-port:.*' "$_plugin/meow.yaml" && fail 'off: 不该有 tproxy-port'
+grep -qx 'routing-mark:.*' "$_plugin/meow.yaml" && fail 'off: 不该有 routing-mark'
+grep -A1 -x 'tun:' "$_plugin/meow.yaml" | grep -qx '  enable: false' || fail 'off: tun 没关掉'
+
+# ---- 页面上的三个值 ↔ 形态：tun=pc / tproxy=router / off=off ----
+fixture "$WORK/labels"
+run_meow set-mode tun >/dev/null
+grep -qx 'proxy-mode: pc' "$_plugin/config" || fail 'labels: tun 没落成 pc'
+if [ "$(uname -s)" = Linux ]; then
+    run_meow set-mode tproxy >/dev/null
+    grep -qx 'proxy-mode: router' "$_plugin/config" || fail 'labels: tproxy 没落成 router'
+else
+    # 网关形态只有 Linux 有；别的平台要明确拒绝，而不是写进 config。
+    if run_meow set-mode tproxy >/dev/null 2>&1; then fail 'labels: 非 Linux 上 tproxy 应该被拒'; fi
+    grep -qx 'proxy-mode: pc' "$_plugin/config" || fail 'labels: 被拒的 tproxy 改了 config'
+fi
+run_meow set-mode off >/dev/null
+grep -qx 'proxy-mode: off' "$_plugin/config" || fail 'labels: off 没落成 off'
+if run_meow set-mode turbo >/dev/null 2>&1; then fail 'labels: 非法值应该被拒'; fi
+grep -qx 'proxy-mode: off' "$_plugin/config" || fail 'labels: 非法值把 config 改了'
+run_meow status | grep -q '"proxy":"off"' || fail 'labels: status 没报出代理类型'
+
 # ---- router：删掉顶层 tproxy-port，DNS 绑 0.0.0.0，自带一条 tproxy 入口 ----
 fixture "$WORK/router"
 sed -i 's/^proxy-mode: pc/proxy-mode: router/' "$_plugin/config"
@@ -90,5 +120,48 @@ run_meow mode >/dev/null
 [ -f "$_plugin/meow.yaml" ] || fail 'migrate: meow.yaml 没生成'
 grep -q 'node-1' "$_plugin/meow.yaml" || fail 'migrate: 订阅没迁过去'
 grep -qx 'proxy-mode: pc' "$_plugin/config" || fail 'migrate: config 没恢复成开关文件'
+
+# ---- 通道：页面调 mode 读状态、切代理类型，看护循环按新形态重启 ----
+# 串起 meow.sh start 的完整形态：帧从 stdin 进，回复从 stdout 出，切完必须自己重启。
+# 只在 Linux 上跑：MSYS/Cygwin 的 fork + 信号模型撑不起「后台读管道 + 前台 wait」，测出来的
+# 是仿真层的脾气，不是脚本的行为。CI 与 WSL 都走 Linux 这一支。
+if [ "$(uname -s)" != Linux ]; then
+    echo "skip: 通道测试只在 Linux 上跑（当前 $(uname -s)）" >&2
+else
+fixture "$WORK/channel"
+cat > "$WORK/feed.sh" <<'FEED'
+sleep 1
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mode","arguments":{}}}'
+sleep 1
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mode","arguments":{"mode":"off"}}}'
+sleep 3
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"svcd.shutdown"}'
+FEED
+MEOW_SH="$_plugin/1.2.0/payload/bin/meow.sh"
+if timeout 25 sh -c 'sh "$1" | SVCD_DATA_DIR="$2" sh "$3" start' sh \
+    "$WORK/feed.sh" "$_plugin/.data" "$MEOW_SH" \
+    > "$WORK/channel.out" 2> "$WORK/channel.err"; then
+    :
+else
+    fail "channel: 看护进程没干净退出（$(cat "$WORK/channel.err")）"
+fi
+channel_has() {
+    grep -qF "$1" "$WORK/channel.out" && return 0
+    {
+        echo "--- channel.out"
+        cat "$WORK/channel.out"
+        echo "--- channel.err"
+        cat "$WORK/channel.err"
+    } >&2
+    fail "channel: $2"
+}
+
+# 能力结果是 JSON 里的字符串，引号会被转义：文件里是 \"mode\":\"tun\"。
+channel_has 'mode\":\"tun\"' '读状态没回代理类型'
+channel_has 'changing\":true' '切代理类型没回执'
+grep -qx 'proxy-mode: off' "$_plugin/config" || fail 'channel: 切完没落到 config'
+grep -q 'proxy-mode pc → off' "$WORK/channel.err" || fail 'channel: 看护循环没按新形态重启'
+[ -f "$_plugin/.data/meow/meow.pid" ] && fail 'channel: 退出后还留着 pidfile'
+fi
 
 echo "meow config layer: ok"
