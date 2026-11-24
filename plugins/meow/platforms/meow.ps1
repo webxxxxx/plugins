@@ -261,6 +261,67 @@ function Clear-TunRoutes {
     }
 }
 
+# meow 在 Windows 上为了 TUN 的 DNS 劫持，会把**所有网卡的 DNS 改成 127.0.0.1 / ::1**，
+# 只在它自己正常退出时（Drop）恢复。我们 stop 是强杀、关机更是直接终止进程，恢复不会
+# 发生：网卡 DNS 停在 loopback，整机解析不了域名，重启也不会好（网卡 DNS 是持久设置），
+# 只有“网络重置”能救。所以启动前记一份真实 DNS，停止后（和每次启动前）自己恢复。
+$DNS_BACKUP = Join-Path $DATA 'dns-backup.json'
+
+function Get-LoopbackDnsAdapters {
+    $found = @()
+    foreach ($family in 'IPv4', 'IPv6') {
+        $found += Get-DnsClientServerAddress -AddressFamily $family -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ServerAddresses -and
+                (($_.ServerAddresses -contains '127.0.0.1') -or ($_.ServerAddresses -contains '::1'))
+            }
+    }
+    return $found
+}
+
+# 启动前把各网卡真实的 DNS 存下来（跳过 loopback，那说明上一次没恢复干净）。
+function Save-DnsState {
+    $entries = @()
+    foreach ($family in 'IPv4', 'IPv6') {
+        $entries += Get-DnsClientServerAddress -AddressFamily $family -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.ServerAddresses -and
+                -not ($_.ServerAddresses -contains '127.0.0.1') -and
+                -not ($_.ServerAddresses -contains '::1')
+            } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    Alias   = $_.InterfaceAlias
+                    Family  = $family
+                    Servers = @($_.ServerAddresses)
+                }
+            }
+    }
+    if ($entries.Count -eq 0) { return }
+    $json = ConvertTo-Json -InputObject @($entries) -Depth 4
+    Write-Utf8 $DNS_BACKUP $json
+}
+
+# 只处理被 meow 改成 loopback 的网卡：先重置回 DHCP（和 meow 自己的安全网一致），
+# 再用我们存的那份精确恢复。没有 loopback 残留时什么都不做。
+function Restore-DnsState {
+    $stale = @(Get-LoopbackDnsAdapters)
+    if ($stale.Count -eq 0) { return }
+    foreach ($entry in $stale) {
+        Set-DnsClientServerAddress -InterfaceAlias $entry.InterfaceAlias -ResetServerAddresses -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $DNS_BACKUP) {
+        try {
+            $backup = Get-Content -LiteralPath $DNS_BACKUP -Raw | ConvertFrom-Json
+            foreach ($entry in @($backup)) {
+                Set-DnsClientServerAddress -InterfaceAlias $entry.Alias -ServerAddresses @($entry.Servers) -ErrorAction SilentlyContinue
+            }
+        } catch { }
+    }
+    Clear-DnsClientCache -ErrorAction SilentlyContinue
+    Write-Note '已把 meow 改过的网卡 DNS 恢复回去'
+}
+
 function Test-Elevated {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -308,6 +369,8 @@ function Start-Meow {
     if ($code -lt 0) { $code = 1 }
     Remove-Item -LiteralPath $PIDFILE -ErrorAction SilentlyContinue
     Clear-TunRoutes
+    # meow 自己退出时会恢复 DNS；它崩了就不会，这里补一刀（没残留就什么都不做）。
+    Restore-DnsState
     Write-Note "meow exited rc=$code"
     return $code
 }
@@ -317,6 +380,8 @@ function Stop-Meow {
     if (-not $procId) {
         Remove-Item -LiteralPath $PIDFILE -ErrorAction SilentlyContinue
         Clear-TunRoutes
+        # 进程已经没了，但上次强杀留下的 loopback DNS 可能还在：这里的 stop 也是修复入口。
+        Restore-DnsState
         Write-Output 'not running'
         return
     }
@@ -328,6 +393,8 @@ function Stop-Meow {
     Remove-Item -LiteralPath $PIDFILE -ErrorAction SilentlyContinue
     # 不留半套路由：宁可直连，也别把整机流量导进死网卡。
     Clear-TunRoutes
+    # 强杀时 meow 的 DnsGuard 来不及恢复，网卡 DNS 会停在 loopback，整机就没法解析域名了。
+    Restore-DnsState
     Write-Output "stopped (pid $procId)"
 }
 
@@ -374,8 +441,12 @@ switch ($Action) {
             Write-Note "already running (pid $running)"
             exit 1
         }
-        # 上一次被强杀留下的路由先清掉，否则新的 tun 起来也接管不了。
+        # 上一次被强杀留下的路由和 loopback DNS 先清掉，否则新的 tun 起来也接管不了，
+        # 而且残留的 DNS 会让这台机器看起来“彻底断网”。
         Clear-TunRoutes
+        Restore-DnsState
+        # 记下启动前真实的 DNS，停止（或崩溃）后用它恢复。必须在 meow 改 DNS 之前。
+        Save-DnsState
         exit (Start-Meow)
     }
     'stop' {

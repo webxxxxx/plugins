@@ -119,3 +119,45 @@ Expect (Join-Path $plugin 'config') 'proxy-mode' 'pc' 'migrate'
 
 Remove-Item -Recurse -Force $Work
 Write-Output 'meow config layer (windows): ok'
+
+# ---- DNS：meow 把网卡 DNS 改成 127.0.0.1，强杀后没人恢复，stop 要自己修 ----
+# 用两个同名函数把 cmdlet 换掉：既能测保存，也能测恢复，而且不碰本机网络。
+$script:POLUTED = $false
+$script:DNS_CALLS = New-Object System.Collections.Generic.List[string]
+
+function Get-DnsClientServerAddress {
+    [CmdletBinding()] param([string]$AddressFamily)
+    $servers = if ($script:POLUTED) { @('127.0.0.1') } else { @('192.168.1.1') }
+    [pscustomobject]@{ InterfaceAlias = 'eth0'; AddressFamily = $AddressFamily; ServerAddresses = $servers }
+}
+
+function Set-DnsClientServerAddress {
+    [CmdletBinding()] param([string]$InterfaceAlias, [switch]$ResetServerAddresses, [string[]]$ServerAddresses)
+    if ($ResetServerAddresses) {
+        $script:DNS_CALLS.Add("reset:$InterfaceAlias")
+    } else {
+        $script:DNS_CALLS.Add("set:$InterfaceAlias=$($ServerAddresses -join ',')")
+    }
+}
+
+function Clear-DnsClientCache { [CmdletBinding()] param() }
+
+$plugin = New-Fixture 'dns'
+$script:DNS_BACKUP = Join-Path $DATA 'dns-backup.json'
+
+Save-DnsState
+if (-not (Test-Path $script:DNS_BACKUP)) { Fail 'dns: 没保存备份' }
+if ((Read-Text $script:DNS_BACKUP) -match '127.0.0.1') { Fail 'dns: 备份里不该有 loopback' }
+
+$script:DNS_CALLS.Clear()
+Restore-DnsState
+if ($script:DNS_CALLS.Count -ne 0) { Fail 'dns: 没被污染时不该动网卡' }
+
+$script:POLUTED = $true
+$script:DNS_CALLS.Clear()
+Restore-DnsState
+$calls = $script:DNS_CALLS -join ' '
+if ($calls -notmatch 'reset:eth0') { Fail "dns: 没把 loopback 重置回 DHCP（$calls）" }
+if ($calls -notmatch 'set:eth0=192\.168\.1\.1') { Fail "dns: 没按备份恢复（$calls）" }
+
+Write-Output 'meow dns guard (windows): ok'

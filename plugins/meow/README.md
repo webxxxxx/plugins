@@ -200,8 +200,9 @@ dns:
 - 订阅里带进来的 `tproxy-port` / `routing-mark` 会被删掉：那是 Linux nftables / pf 的路。
 - `wintun.dll` 不用手动放：meow 会优先找 exe 旁边的，找不到就释放内置的一份。
 - **`stop` / 异常退出后不会把电脑断网**：TUN 适配器是持久的，被强杀的 meow 来不及撤
-  `auto-route` 装的路由，路由留着就会把整机流量导进一个没人读的网卡。插件在
-  `stop` 之后、以及每次 `start` 之前都会把 `meow-tun*` 上的路由清干净。
+  `auto-route` 装的路由和它改过的 DNS，两样都会把整机弄成“上不了网”。插件在 `stop`
+  之后、以及每次 `start` 之前都会清 `meow-tun*` 上的路由，并把被改成 `127.0.0.1` / `::1`
+  的网卡 DNS 恢复回去（`start` 前先存一份真实 DNS，恢复时先重置回 DHCP 再按备份写回）。
 - 只捕获 fake-ip 网段（域名流量）；直连 IP 字面量不走 TUN，这是 meow 在 Windows
   上的既有边界（见 `vendor/meow-rs/docs/tun.md`）。
 - 验证：`Get-NetRoute -InterfaceAlias 'meow-tun'` 能看到 `0.0.0.0/1` 和
@@ -255,6 +256,30 @@ dns:
 - 为什么规则不用 meow 自带的：固件内核没有 nf_tables / nft；为什么不用
   `addrtype`：内核没编 `xt_ADDRTYPE`。所以这里用 iptables 写，语义与 meow
   内置的托管规则一致（见 `vendor/meow-rs/scripts/tproxy-gateway-linux.sh`）。
+
+## 停止后上不了网（Windows）
+
+两种残留，都来自“被强杀的进程来不及收拾”：
+
+| 残留 | 症状 | 插件怎么处理 |
+| --- | --- | --- |
+| `meow-tun` 上的路由 | 有网卡、网页全超时 | `stop` 后 + 每次 `start` 前清掉 `meow-tun*` 的路由 |
+| 网卡 DNS 被改成 `127.0.0.1` / `::1` | `ping 223.5.5.5` 通、打不开网页（解析失败） | `stop` 后 + 每次 `start` 前恢复（先重置回 DHCP，再按启动前存的备份写回） |
+
+关机/任务管理器结束进程这类情况插件没有机会跑，下次 `plugin start meow` 会自愈；
+已经卡住了想立刻救回来，管理员 PowerShell 里两条就够：
+
+```powershell
+foreach ($fam in 'IPv4','IPv6') {
+  Get-DnsClientServerAddress -AddressFamily $fam |
+    Where-Object { $_.ServerAddresses -and ($_.ServerAddresses -match '127\.0\.0\.1|::1') } |
+    ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_.InterfaceAlias -ResetServerAddresses }
+}
+Clear-DnsClientCache
+```
+
+（meow 的源码里这段逻辑是 `tun` 的 `DnsGuard`：设置时把所有网卡 DNS 改成 loopback，
+正常退出时恢复；所以问题只出在强杀。）
 
 ## 调试
 
