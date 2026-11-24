@@ -16,11 +16,16 @@
 | `x86_64-unknown-linux-musl` | 镜像里 `musl-gcc`（debian 的 musl-tools） |
 | `aarch64-unknown-linux-musl` | 宿主 `/usr/soft/aarch64-linux-musl-cross`，挂进容器共用 |
 | `armv7-unknown-linux-musleabihf` | 宿主 `/usr/soft/arm-linux-musleabihf-cross`，同上 |
-| `x86_64-pc-windows-msvc` | `cargo-xwin` + 预下载的 MSVC CRT/SDK（不连微软） |
+| `x86_64-pc-windows-msvc` | `cargo-xwin` + MSVC CRT/SDK（第一次编时下到 `build_workspace/xwin`，约 1.1G，之后复用） |
 | macOS 两个目标 | **不在镜像里**：要 Xcode，只能在 mac 上编（CI 的 macOS runner） |
 
-镜像里有 clang/llvm/libclang（bindgen 用）、nasm（BoringSSL 的 x86_64 Windows 汇编）、
-cmake、perl、rustup 1.98.1。
+镜像里有 clang 19 / llvm / libclang（bindgen 用）、nasm（BoringSSL 的 x86_64 Windows
+汇编）、musl-tools、ninja、unzip/python3。**Rust 工具链不在镜像里**：`run.sh` 把宿主机的
+`~/.rustup` 和 `~/.cargo/bin` 挂进去，版本由各仓库的 `rust-toolchain.toml` 决定，
+`rustup target add` 也只在宿主机做一次。
+
+基础镜像是 debian **trixie**（clang 19）：bookworm 只有 clang 14，而 xwin 带下来的 MSVC
+STL 要求 Clang ≥ 19。
 
 ## 挂载：路径都在 WSL 里，别用 /mnt/d 当编译目录
 
@@ -99,6 +104,20 @@ sh tools/pack.sh sshd                            # 别的插件（build.sh 支�
 
 3. 纯 Rust 的 crate（比如 `tools/cli`、宿主 `svcd`）不用这套包装，直接
    `sh tools/docker/run.sh -w <dir> -- cargo build --release --target …` 就行。
+
+## 卡点（都是真踩过的，写在这省下次）
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| `permission denied /var/run/docker.sock` | 用户不在 docker 组 | `sudo usermod -aG docker $USER`，重开 WSL |
+| 拉镜像卡住 | `registry-mirrors` 里的 USTC 已停服 | 换成 `docker.m.daocloud.io` / `1panel.live` / `xuanyuan.me` / `1ms.run` |
+| `rustup` 装 1.98.1 报 404 | rsproxy / tuna 都没同步这个版本（它比它们新） | 工具链走官方 `static.rust-lang.org`（国内实测 3MB/s），crates 索引才用 rsproxy |
+| `missing manifest in toolchain` | 装工具链时被打断 | `rustup toolchain uninstall 1.98.1` 再 `install`（`--target` 一次带全） |
+| `rustup` 只读挂载下报 `Read-only file system` | 它要往 `RUSTUP_HOME/tmp` 写临时文件 | `~/.rustup` 挂**可写**（同 uid，安全） |
+| cmake 找不到 Ninja | cargo-xwin 的 C 依赖用 Ninja | 镜像里装 `ninja-build` |
+| BoringSSL 的 `third_party/benchmark` configure 失败 | 交叉时它的平台探测不了；`CMAKE_TOOLCHAIN_FILE` 被 cargo-xwin 顶掉 | build.sh 把 `BUILD_TESTING OFF` 钉进 BoringSSL 的 `CMakeLists.txt`（幂等） |
+| `static_assert ... expected Clang 19.0.0 or newer` | bookworm 的 clang 14 太旧 | 基础镜像换 trixie（clang 19） |
+| `powershell.exe: command not found`（fetch-wintun.sh） | 容器里没有 powershell，脚本退回 python 解压 | 镜像里装 `unzip`（和 `python3`） |
 
 ## 边界
 

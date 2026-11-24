@@ -11,3 +11,6 @@ __pycache__/
 
 # Rust 工具链的构建产物
 /tools/cli/target/
+
+# 本机在容器里编出来的 plugin-tools 副本
+bin/
