@@ -20,10 +20,11 @@ die() { echo "meow: $*" >&2; exit 1; }
 # 交叉工具链都在里面），宿主机不装任何东西。容器里带着 SVCD_IN_DOCKER=1，不会再递归。
 if [ "${SVCD_DOCKER:-0}" = 1 ] && [ "${SVCD_IN_DOCKER:-0}" != 1 ]; then
     REPO=$(CDPATH= cd -- "$HERE/../.." && pwd)
-    [ -f "$REPO/tools/docker/run.sh" ] || die "SVCD_DOCKER=1 但找不到 tools/docker/run.sh"
+    [ -f "$REPO/tools/docker/docker-build.sh" ] || die "SVCD_DOCKER=1 但找不到 tools/docker/docker-build.sh"
     echo "meow: docker 里编 $PLATFORM" >&2
-    # 工作目录留在仓库根，脚本按相对路径找自己（容器里跑的还是这个文件）
-    exec sh "$REPO/tools/docker/run.sh" -w . -n meow -- \
+    # 项目根钉成仓库根（-w 是「根下哪个子目录」，不是「当前目录」）；
+    # 容器里的 cwd 就是 /work，所以下面按仓库相对路径找自己
+    exec sh "$REPO/tools/docker/docker-build.sh" -r "$REPO" -w . -n meow -- \
         sh plugins/meow/build.sh "$NAME" "$VERSION" "$PLATFORM"
 fi
 

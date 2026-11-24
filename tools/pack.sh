@@ -63,7 +63,7 @@ fi
 TOOLS=${PLUGIN_TOOLS:-$REPO/bin/plugin-tools}
 if [ ! -x "$TOOLS" ]; then
     echo "pack: 在容器里编 plugin-tools…" >&2
-    sh "$REPO/tools/docker/run.sh" -w tools/cli -n plugin-tools -- cargo build --release --locked ||
+    sh "$REPO/tools/docker/docker-build.sh" -r "$REPO" -w tools/cli -n plugin-tools -- cargo build --release --locked ||
         die "plugin-tools 编译失败"
     mkdir -p "$REPO/bin"
     cp "$WORKSPACE/plugin-tools/target/release/plugin-tools" "$REPO/bin/plugin-tools"
@@ -73,7 +73,10 @@ fi
 # ---- 宿主的 plugin（bundle 用） ----
 if [ -z "${SVCD_PLUGIN_BIN:-}" ]; then
     for candidate in "$REPO/bin/plugin" "$REPO/bin/plugin.exe" "$(command -v plugin 2>/dev/null || true)"; do
-        [ -n "$candidate" ] && [ -x "$candidate" ] && SVCD_PLUGIN_BIN=$candidate && break
+        if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+            SVCD_PLUGIN_BIN=$candidate
+            break
+        fi
     done
     if [ -z "${SVCD_PLUGIN_BIN:-}" ]; then
         die "找不到宿主的 plugin 二进制。编一个放进 bin/：

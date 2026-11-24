@@ -5,8 +5,10 @@
 
 | 脚本 | 干什么 |
 | --- | --- |
-| `tools/docker/run.sh` | 在镜像里跑**任意命令**（cargo build、插件的 build.sh、plugin-tools 自己） |
+| `tools/docker/docker-build.sh` | 在镜像里跑**任意命令**（cargo build、插件的 build.sh、plugin-tools 自己），任何仓库都能用 |
 | `tools/pack.sh` | 打包插件：编 + staging + bundle，产物统一拷到 `dist/` |
+
+`docker-build.sh` 以前叫 `run.sh`，旧名字现在还留着一个转发脚本，老调用不会失效。
 
 ## 能出哪些目标
 
@@ -20,7 +22,7 @@
 | macOS 两个目标 | **不在镜像里**：要 Xcode，只能在 mac 上编（CI 的 macOS runner） |
 
 镜像里有 clang 19 / llvm / libclang（bindgen 用）、nasm（BoringSSL 的 x86_64 Windows
-汇编）、musl-tools、ninja、unzip/python3。**Rust 工具链不在镜像里**：`run.sh` 把宿主机的
+汇编）、musl-tools、ninja、unzip/python3。**Rust 工具链不在镜像里**：`docker-build.sh` 把宿主机的
 `~/.rustup` 和 `~/.cargo/bin` 挂进去，版本由各仓库的 `rust-toolchain.toml` 决定，
 `rustup target add` 也只在宿主机做一次。
 
@@ -30,7 +32,7 @@ STL 要求 Clang ≥ 19。
 ## 挂载：路径都在 WSL 里，别用 /mnt/d 当编译目录
 
 ```
-<仓库>                       → /work        源码；产物写回 out/、dist/
+<项目根>                     → /work        源码；产物写回 out/、dist/
 /usr/soft                    → /usr/soft    宿主的交叉工具链，容器和宿主机共用一份
 /usr/soft/build_workspace    → 同一路径     cargo 的 registry 缓存 + 每个项目的 target
 ```
@@ -38,11 +40,14 @@ STL 要求 Clang ≥ 19。
 `build_workspace` 落在 WSL 的 ext4 上：`/mnt/d` 走 drvfs，编译又慢、又容易把 WSL 那点内存吃光
 （meow 在 /mnt/d 上编过一次就直接 OOM）。
 
+`/work` 挂的是**项目根**，默认取你当前目录所属的 git 顶层 —— 在哪个仓库里敲就在哪个仓库里编，
+`plugin-manager` 这种别的仓库直接进去用，不用搬脚本：`-r` 换根、`-w` 往下走子目录。
+
 目录结构：
 
 ```
 /usr/soft/build_workspace/
-├── cargo/                 registry + 国内镜像配置（run.sh 缺了就写）
+├── cargo/                 registry + 国内镜像配置（docker-build.sh 缺了就写）
 ├── <项目名>/target/       每个项目各自的 target（projects: meow、plugin-tools、…）
 ```
 
@@ -66,14 +71,27 @@ docker build -f tools/docker/rust-cross.Dockerfile -t rust-cross:1.98.1 .
 ### 编一个二进制
 
 ```sh
-# 直接在仓库根跑 cargo
-sh tools/docker/run.sh -- cargo build --release --target x86_64-pc-windows-msvc
-
-# 用插件自己的 build.sh（它在 SVCD_DOCKER=1 时会自己进来，这里手动写全）
-sh tools/docker/run.sh -w plugins/meow -n meow -- sh plugins/meow/build.sh meow 1.3.0 aarch64-unknown-linux-musl
+# 本项目里编插件：用它自己的 build.sh（SVCD_DOCKER=1 时它自己会进来，这里手动写全）
+sh tools/docker/docker-build.sh -r "$PWD" -w plugins/meow -n meow -- \
+    sh plugins/meow/build.sh meow 1.3.0 aarch64-unknown-linux-musl
 
 # 编工具本身，例如 plugin-tools（产物在 /usr/soft/build_workspace/plugin-tools/target/release）
-sh tools/docker/run.sh -w tools/cli -n plugin-tools -- cargo build --release --locked
+sh tools/docker/docker-build.sh -r "$PWD" -w tools/cli -n plugin-tools -- cargo build --release --locked
+
+# 别的仓库：进那个仓库直接敲，项目根自动跟过去（把 tools/docker 加进 PATH 就能省掉路径）
+cd ~/src/plugin-manager
+sh /mnt/d/learn/harmess_workspace/plugins/tools/docker/docker-build.sh -- \
+    cargo build --release --target armv7-unknown-linux-musleabihf
+```
+
+第三条不用写 `-r`/`-w`/`-p`：项目根取当前目录（这里是 plugin-manager 的 git 顶层），
+`--target` 从命令里认出来，然后自动带上 `CC_armv7_unknown_linux_musleabihf`、
+`CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER` 和 `/usr/soft/...-cross/bin` 的 PATH。
+
+windows 目标不一样，要用 `cargo xwin build`（链接器是 lld-link + 容器里的 MSVC SDK）：
+
+```sh
+sh tools/docker/docker-build.sh -r "$PWD" -- cargo xwin build --release --target x86_64-pc-windows-msvc
 ```
 
 ### 打包插件
@@ -95,20 +113,26 @@ sh tools/pack.sh sshd                            # 别的插件（build.sh 支�
    ```sh
    if [ "${SVCD_DOCKER:-0}" = 1 ] && [ "${SVCD_IN_DOCKER:-0}" != 1 ]; then
        REPO=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
-       exec sh "$REPO/tools/docker/run.sh" -w <项目在仓库里的目录> -n <项目名> -- \
+       exec sh "$REPO/tools/docker/docker-build.sh" -r "$REPO" -w <项目在仓库里的目录> -n <项目名> -- \
            sh <同一个脚本> "$@"
    fi
    ```
 
+   `-r` 要给全：`-w` 是「项目根下的子目录」，不跟着当前目录走（不写 `-r` 时才按当前目录的
+   git 顶层推）。
+
 2. `plugin-tools build.json` 里的命令不用改，`plugin-tools` 只是执行它。
 
-3. 纯 Rust 的 crate（比如 `tools/cli`、宿主 `svcd`）不用这套包装，直接
-   `sh tools/docker/run.sh -w <dir> -- cargo build --release --target …` 就行。
+3. 纯 Rust 的 crate（比如 `tools/cli`、宿主 `svcd`）不用这套包装：站在它的仓库里
+   `docker-build.sh -- cargo build --release --target …` 就行，项目根和目标都会自己认。
+   只想编本仓库的子目录时用 `-w tools/cli`。
 
 ## 卡点（都是真踩过的，写在这省下次）
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
+| `error: could not find Cargo.toml in /work` | 脚本原先把项目根算成它自己所在的仓库，在别的仓库里敲就挂错了 | 现在默认取当前目录的 git 顶层；跨仓库/子目录用 `-r`、`-w` |
+| `linker 'cc' not found`（musl / arm 目标） | 容器里没有能链接该目标的 cc | 写 `-p <triple>`（或命令里带 `--target`），脚本自动配 CC/AR/链接器和 PATH |
 | `permission denied /var/run/docker.sock` | 用户不在 docker 组 | `sudo usermod -aG docker $USER`，重开 WSL |
 | 拉镜像卡住 | `registry-mirrors` 里的 USTC 已停服 | 换成 `docker.m.daocloud.io` / `1panel.live` / `xuanyuan.me` / `1ms.run` |
 | `rustup` 装 1.98.1 报 404 | rsproxy / tuna 都没同步这个版本（它比它们新） | 工具链走官方 `static.rust-lang.org`（国内实测 3MB/s），crates 索引才用 rsproxy |
