@@ -72,11 +72,15 @@ fi
 
 # ---- 宿主的 plugin（bundle 用） ----
 if [ -z "${SVCD_PLUGIN_BIN:-}" ]; then
-    for candidate in "$REPO/bin/plugin" "$REPO/../meow-dist/host-linux/plugin" "$(command -v plugin 2>/dev/null || true)"; do
+    for candidate in "$REPO/bin/plugin" "$REPO/bin/plugin.exe" "$(command -v plugin 2>/dev/null || true)"; do
         [ -n "$candidate" ] && [ -x "$candidate" ] && SVCD_PLUGIN_BIN=$candidate && break
     done
-    [ -n "${SVCD_PLUGIN_BIN:-}" ] ||
-        die "找不到宿主的 plugin 二进制：用 SVCD_PLUGIN_BIN=/path/to/plugin 指一个"
+    if [ -z "${SVCD_PLUGIN_BIN:-}" ]; then
+        die "找不到宿主的 plugin 二进制。编一个放进 bin/：
+      在 plugin-manager 源码里 cargo build --release --bin svcd
+      然后 cp target/release/svcd $REPO/bin/plugin
+    或者 SVCD_PLUGIN_BIN=/path/to/plugin 指一个"
+    fi
     export SVCD_PLUGIN_BIN
 fi
 
