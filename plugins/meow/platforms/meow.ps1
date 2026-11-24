@@ -80,20 +80,26 @@ function Get-ConfigValue([string]$Path, [string]$Key) {
     return ''
 }
 
-# tun 块里的 enable:；没有 tun 块就是 false。
-function Get-TunEnabled([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    $inTun = $false
+# 读某个顶层块下的标量（缩进两格的那一行），去掉引号；没有就返回空串。
+function Get-BlockScalar([string]$Path, [string]$Block, [string]$Key) {
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    $inBlock = $false
+    $pattern = '^\s+' + [regex]::Escape($Key) + ':\s*(\S+)'
     foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
-        if ($line -match '^\S') {
-            $inTun = ($line -match '^tun:\s*$')
+        if ($line -match '^[^\s#]') {
+            $inBlock = ($line -match ('^' + [regex]::Escape($Block) + ':\s*$'))
             continue
         }
-        if ($inTun -and $line -match '^\s+enable:\s*(\S+)') {
-            return (($Matches[1] -replace '["'']', '') -eq 'true')
+        if ($inBlock -and $line -match $pattern) {
+            return ($Matches[1] -replace '["'']', '').Trim()
         }
     }
-    return $false
+    return ''
+}
+
+# tun 块里的 enable:；没有 tun 块就是 false。
+function Get-TunEnabled([string]$Path) {
+    return ((Get-BlockScalar $Path 'tun' 'enable') -eq 'true')
 }
 
 function Get-Mode([string]$Path) {
@@ -148,6 +154,10 @@ function Start-Meow([string]$Config) {
     }
     if (-not (Get-TunEnabled $Config)) {
         Write-Note '没有开启 tun: enable: true —— Windows 上本机透明代理只能走 TUN（Wintun），否则只有 mixed 代理'
+    } elseif ((Get-BlockScalar $Config 'dns' 'enhanced-mode') -ne 'fake-ip') {
+        # TUN 的 auto-route 只接管 fake-ip 网段：DNS 不是 fake-ip 时 meow 一条路由都不装，
+        # 进程看起来在跑，系统流量却全走直连——不说清楚就会当成“订阅没生效”。
+        Write-Note 'tun 开了但 dns.enhanced-mode 不是 fake-ip —— meow 不会装路由，系统流量仍走直连；把 dns 段改成 enhanced-mode: fake-ip + fake-ip-range: 198.18.0.1/16'
     }
 
     $validate = & $MEOW -d $ROOT -f $Config -t 2>&1
