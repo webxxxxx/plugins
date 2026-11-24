@@ -51,10 +51,12 @@ dns:
     - 119.29.29.29
 
 # 地理数据库放数据目录，别改安装目录；缺失时 meow 会自行下载。
+# 路径用单引号：@DATA@ 在 Windows 上会替换成 C:\ProgramData\...，双引号标量会把
+# \P、\s 当成转义而报 "found unknown escape character"。
 geodata:
-  mmdb-path: "@DATA@/Country.mmdb"
-  asn-path: "@DATA@/GeoLite2-ASN.mmdb"
-  geosite-path: "@DATA@/geosite.dat"
+  mmdb-path: '@DATA@/Country.mmdb'
+  asn-path: '@DATA@/GeoLite2-ASN.mmdb'
+  geosite-path: '@DATA@/geosite.dat'
 
 rule-providers:
   cn_domains:

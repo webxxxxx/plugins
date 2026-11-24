@@ -40,6 +40,12 @@ function Write-Utf8([string]$Path, [string]$Text) {
     [System.IO.File]::WriteAllText($Path, $Text, $utf8)
 }
 
+# @DATA@ 是写进 YAML 里的：Windows 路径的反斜杠在双引号标量里会被当成转义
+# （\P 直接让配置解析失败）。正斜杠两边都认，也不会让 YAML 翻脸。
+function Get-DataPath {
+    return ($DATA -replace '\\', '/')
+}
+
 # 和 meow.sh 的 prepare_config 等价：活动配置优先；源码 checkout 用模板生成副本。
 function Prepare-Config {
     if (-not (Test-Path -LiteralPath $CONFIG -PathType Leaf)) {
@@ -50,13 +56,13 @@ function Prepare-Config {
         }
         if (-not (Test-Path -LiteralPath $DATA_CONFIG -PathType Leaf)) {
             $text = [System.IO.File]::ReadAllText($template)
-            Write-Utf8 $DATA_CONFIG $text.Replace('@DATA@', $DATA)
+            Write-Utf8 $DATA_CONFIG $text.Replace('@DATA@', (Get-DataPath))
         }
         return $DATA_CONFIG
     }
     $text = [System.IO.File]::ReadAllText($CONFIG)
     if ($text.Contains('@DATA@')) {
-        Write-Utf8 $CONFIG $text.Replace('@DATA@', $DATA)
+        Write-Utf8 $CONFIG $text.Replace('@DATA@', (Get-DataPath))
     }
     return $CONFIG
 }
