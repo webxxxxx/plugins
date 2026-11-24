@@ -107,6 +107,9 @@ package/
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
   改到代理组后即可用面板切换。
 
+清单里 `exec.ready` 是 `notify`：宿主先发一条 `svcd.ping`，收到回复才算启动成功，
+之后这条路才是能力通道（`ready: exec` 的 stdout 只进日志，页面调不到任何能力）。
+
 宿主的 `lifecycle.start` 是常驻前台进程，但它现在是**看护进程**：meow 是自己的子进程，
 能力通道跑在后台（页面上的代理类型调的就是它）。`pc` / `off` 形态起进程就返回；`router`
 形态还要等 tproxy 端口监听、挂好 iptables 规则。启动前会跑 `meow -t` 校验配置，失败就返回

@@ -10,7 +10,7 @@
   },
   "exec": {
     "path": "payload/bin/meow.ps1",
-    "ready": "exec"
+    "ready": "notify"
   },
   "lifecycle": {
     "start": {

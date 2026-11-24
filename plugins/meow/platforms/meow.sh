@@ -18,6 +18,8 @@
 #
 # 宿主把 lifecycle.start 当成常驻前台进程：start 一直不返回，直到 meow 退出；
 # stop/status 执行后退出。路径全部从脚本位置推导，数据目录用 SVCD_DATA_DIR。
+# 清单里 exec.ready 是 notify：宿主先发一条 svcd.ping，收到回复才算启动成功，之后
+# 这条路就是能力通道（ready: exec 的 stdout 只进日志，页面调不到任何能力）。
 #
 # start 现在是「看护进程」而不是把 meow exec 掉：meow 是自己的子进程，通道能力跑在
 # 后台（页面 A 的代理类型选择器调它），孩子退出后前台循环按 config 里的新形态重启。
@@ -541,7 +543,7 @@ supervise() {
         if [ "$MODE" = router ]; then
             load_router_params
             validate_router || return 1
-        elif ! "$HERE/meow" -d "$ROOT" -f "$MEOW_CONFIG" -t >/dev/null 2>&1; then
+        elif ! "$HERE/meow" -d "$ROOT" -f "$MEOW_CONFIG" -t >/dev/null 2>&1 < /dev/null; then
             # pc/off 形态先做一次配置校验，失败就别起一个秒退进程。
             echo 'meow: config validation failed (run meow -t to see details)' >&2
             return 1

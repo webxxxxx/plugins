@@ -22,6 +22,9 @@ tun 和 dns.fake-ip 打开（这两样必须成对，缺一个 meow 就一条路
 start 是常驻的看护进程：meow 是自己的子进程，通道能力（页面调它）在同一进程里；
 孩子意外退出时看门狗结束本进程，宿主会跑 stop 收尾再按策略重启或报错。
 
+清单里 exec.ready 是 notify：宿主先发一条 svcd.ping，收到回复才算启动成功，之后这条路
+才是能力通道（ready: exec 的 stdout 只进日志，页面调不到任何能力）。
+
 日志：stderr 由宿主收集；status 往 stdout 打一行 JSON。
 #>
 param(
