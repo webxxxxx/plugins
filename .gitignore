@@ -1,8 +1,6 @@
 # Build output and local packages never enter git.
 target/
-env.sh
 dist/
-/plugin-store.exe
 node_modules/
 __pycache__/
 *.pyc
