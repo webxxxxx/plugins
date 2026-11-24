@@ -30,6 +30,8 @@ fn main() {
         usage();
         std::process::exit(1);
     };
+    // A dropped option is how `--platform=x` once turned into "build all seven".
+    warn_unknown_options(&args[1..]);
     let result = match verb {
         "template" => template(&args[1..]),
         "build" => build(&args[1..]),
@@ -120,7 +122,50 @@ fn usage() {
     );
 }
 
+/// Every option the four verbs accept. Only used to warn about a typo: an option
+/// nobody reads used to be dropped in silence, and `--platform=x` then built
+/// every platform instead of the one that was asked for.
+const KNOWN_FLAGS: &[&str] = &[
+    "--platforms",
+    "--lang",
+    "--dir",
+    "--template-repo",
+    "--repo",
+    "--refresh",
+    "--conf",
+    "--ui",
+    "--desc",
+    "--force",
+    "--no-force",
+    "--platform",
+    "--key",
+    "--out",
+    "--stage",
+    "--no-verify",
+    "--help",
+    "-h",
+];
+
+fn warn_unknown_options(args: &[String]) {
+    for arg in args {
+        if !arg.starts_with('-') {
+            continue;
+        }
+        let name = arg.split('=').next().unwrap_or(arg);
+        if KNOWN_FLAGS.contains(&name) {
+            continue;
+        }
+        eprintln!("warn: ignoring unknown option {arg} (run plugin-tools with no arguments for the list)");
+    }
+}
+
+/// `--flag value` or `--flag=value`: both spellings are what people type, and a
+/// value that is silently dropped turns `--platform=x` into "build them all".
 fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    let prefix = format!("{name}=");
+    if let Some(value) = args.iter().find_map(|arg| arg.strip_prefix(&prefix)) {
+        return Some(value);
+    }
     let index = args.iter().position(|arg| arg == name)?;
     args.get(index + 1).map(String::as_str)
 }

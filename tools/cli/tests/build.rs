@@ -784,3 +784,38 @@ fn a_manifest_without_an_entry_says_where_the_entry_goes() {
     assert!(calls.is_empty(), "the host must not run: {calls:?}");
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// `--platform=x` is the spelling people type. Dropping the value turned the
+/// build into "every platform in `.plugin.json`", one bundle call per triple.
+#[test]
+fn the_platform_flag_may_be_written_with_equals() {
+    let root = project("equals-flag", &MANIFEST);
+    let (output, calls) = run(&root, &["build", "--platform=x86_64-unknown-linux-gnu"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    // The fake host is called twice: once to bundle, once to verify.
+    let bundles: Vec<_> = calls.iter().filter(|call| call[0] == "bundle").collect();
+    assert_eq!(bundles.len(), 1, "one platform means one package: {calls:?}");
+    assert!(
+        bundles[0].iter().any(|arg| arg == "x86_64-unknown-linux-gnu"),
+        "{:?}",
+        bundles[0]
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// An option nobody reads is said out loud instead of being dropped.
+#[test]
+fn an_unknown_option_is_reported() {
+    let root = project("unknown-flag", &MANIFEST);
+    let (output, _calls) = run(
+        &root,
+        &["build", "--platform", "x86_64-unknown-linux-gnu", "--bogus"],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("ignoring unknown option --bogus"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
