@@ -100,6 +100,10 @@ package/
 - svcd 控制台的「打开」入口是我们自己的页面（`payload/web/index.html`）：顶部是**代理类型**
   （`off` / `tun` / `tproxy`），下面用 iframe 嵌 meow 自带的 YACD；面板地址按当前浏览器访问的
   主机名拼（`http://<当前主机>:9090/ui/`），`127.0.0.1` / `localhost` / 局域网地址都能用。
+- 页面上的选择立刻生效，而且是**持久**的：它写进 `config` 的 `proxy-mode`，插件关掉
+  再开也按它走（不用再手动改文件）。
+- 面板是 meow 自己在 `:9090` 上开的；如果宿主是用 https 打开的，浏览器会拦掉这个
+  http iframe（控制台本身走 http 就没这个问题）。
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
   改到代理组后即可用面板切换。
 

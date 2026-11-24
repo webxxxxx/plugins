@@ -441,11 +441,12 @@ function Start-MeowChild {
     $pump = [PowerShell]::Create()
     $null = $pump.AddScript({
         param($Reader, $Log)
+        $writer = $null
         try {
-            while ($null -ne ($line = $Reader.ReadLine())) {
-                [System.IO.File]::AppendAllText($Log, $line + "`n")
-            }
-        } catch { }
+            $writer = New-Object System.IO.StreamWriter($Log, $true, (New-Object System.Text.UTF8Encoding($false)))
+            $writer.AutoFlush = $true
+            while ($null -ne ($line = $Reader.ReadLine())) { $writer.WriteLine($line) }
+        } catch { } finally { if ($writer) { $writer.Dispose() } }
     }).AddArgument($proc.StandardOutput).AddArgument($meowLog)
     $null = $pump.BeginInvoke()
     return $proc.Id
