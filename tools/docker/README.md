@@ -132,6 +132,7 @@ sh tools/pack.sh sshd                            # 别的插件（build.sh 支�
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `error: could not find Cargo.toml in /work` | 脚本原先把项目根算成它自己所在的仓库，在别的仓库里敲就挂错了 | 现在默认取当前目录的 git 顶层；跨仓库/子目录用 `-r`、`-w` |
+| `crt1.o: relocations in generic ELF (EM: 40)` / `file in wrong format` | C 依赖（ring、openssl 之类）还是用宿主 `cc` 编的，目标文件是 x86_64 | 给目标配 `CC_<triple>` / `AR_<triple>` / `CARGO_TARGET_<TRIPLE>_LINKER`；`plugins/plugin-store/build.sh` 是现成写法，或者 `SVCD_DOCKER=1` 直接丢进容器 |
 | `linker 'cc' not found`（musl / arm 目标） | 容器里没有能链接该目标的 cc | 写 `-p <triple>`（或命令里带 `--target`），脚本自动配 CC/AR/链接器和 PATH |
 | `permission denied /var/run/docker.sock` | 用户不在 docker 组 | `sudo usermod -aG docker $USER`，重开 WSL |
 | 拉镜像卡住 | `registry-mirrors` 里的 USTC 已停服 | 换成 `docker.m.daocloud.io` / `1panel.live` / `xuanyuan.me` / `1ms.run` |
