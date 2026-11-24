@@ -327,7 +327,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <插件目录>\<版本>\payl
 
 ```bash
 plugin-tools build --platform x86_64-unknown-linux-gnu
-plugin-tools check dist/meow-1.2.0-x86_64-unknown-linux-gnu.spk
+plugin-tools check dist/meow-1.3.0-x86_64-unknown-linux-gnu.spk
 ```
 
 Rust 1.98.1（vendor 里的 `rust-toolchain.toml`）和 cmake/C++ 是构建依赖；
