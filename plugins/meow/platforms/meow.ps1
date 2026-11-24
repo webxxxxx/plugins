@@ -6,8 +6,8 @@ powershell；platforms/unix.json 给 unix 三元组，指向同目录的 meow.sh
   powershell -NoProfile -ExecutionPolicy Bypass -File meow.ps1 start|stop|status|mode
 
 两个文件，各管各的：
-  $PLUGIN_ROOT\config     我们的设置（manifest 的 config 指向它）。meow 不读也不改。
-  $PLUGIN_ROOT\meow.yaml  meow 自己的配置（订阅、规则、代理组）。启动时只改受管键
+  $PLUGIN_ROOT\state    我们自己的：只缓存代理类型（页面上的 off / tun / tproxy）。
+  $PLUGIN_ROOT\config    meow 自己的配置（订阅、规则、代理组），meow 用它启动。启动时只改受管键
                           （mixed-port / tun / dns），其余原样保留。
 
 Windows 上没有 nftables / pf，本机透明代理只有 TUN（Wintun）一条路：pc 形态会自动把
@@ -39,9 +39,10 @@ $PLUGIN_ROOT = Split-Path -Parent (Split-Path -Parent $ROOT)     # <插件目录
 if ($env:SVCD_DATA_DIR) { $BASE = $env:SVCD_DATA_DIR } else { $BASE = Join-Path $PLUGIN_ROOT '.data' }
 $DATA = Join-Path $BASE 'meow'
 $PIDFILE = Join-Path $DATA 'meow.pid'
-$CONFIG = Join-Path $PLUGIN_ROOT 'config'                        # 我们的设置
-$MEOW_CONFIG = Join-Path $PLUGIN_ROOT 'meow.yaml'                # meow 的配置
-$TEMPLATE = Join-Path $ROOT 'config.yaml'                        # 包里的模板
+$CONFIG = Join-Path $PLUGIN_ROOT 'config'            # meow 的配置：meow 用它启动，宿主的 editconfig 改它
+$LEGACY_CONFIG = Join-Path $PLUGIN_ROOT 'meow.yaml'  # 1.2/1.3 的布局：meow 的配置曾放这里
+$TEMPLATE = Join-Path $ROOT 'config.yaml'            # 包里的出厂模板
+$STATE = Join-Path $PLUGIN_ROOT 'state'              # 我们自己的：只缓存代理类型
 $MEOW = Join-Path $HERE 'meow.exe'
 if (-not (Test-Path -LiteralPath $MEOW)) { $MEOW = Join-Path $HERE 'meow' }
 $SDK = Join-Path (Join-Path $ROOT 'lib') 'SvcdPlugin.ps1'
@@ -80,17 +81,11 @@ function Get-ConfigValue([string]$Path, [string]$Key) {
     return ''
 }
 
-function Get-OurValue([string]$Key, [string]$Default) {
-    $value = Get-ConfigValue $CONFIG $Key
-    if (-not $value -or $value -eq 'null') { return $Default }
-    return $value
-}
-
 function Get-Mode {
-    $mode = Get-ConfigValue $CONFIG 'proxy-mode'
+    $mode = Get-ConfigValue $STATE 'proxy-mode'
     if (-not $mode) { return 'pc' }
     if ($mode -notin @('off', 'pc', 'router')) {
-        Write-Note "config 里 proxy-mode 只能是 off、pc 或 router（现在是 '$mode'）"
+        Write-Note "缓存里 proxy-mode 只能是 off、pc 或 router（现在是 '$mode'）"
         return 'pc'
     }
     return $mode
@@ -115,9 +110,9 @@ function Get-ModeFromLabel([string]$Label) {
 }
 
 # 只改我们自己的 config：替换同名顶层键，别的行（注释、其它开关）原样保留。
-function Set-OurValue([string]$Key, [string]$Value) {
+function Set-StateValue([string]$Key, [string]$Value) {
     $lines = @()
-    if (Test-Path -LiteralPath $CONFIG) { $lines = @([System.IO.File]::ReadAllLines($CONFIG)) }
+    if (Test-Path -LiteralPath $STATE) { $lines = @([System.IO.File]::ReadAllLines($STATE)) }
     $pattern = '^' + [regex]::Escape($Key) + ':\s*'
     $out = @()
     $done = $false
@@ -130,7 +125,7 @@ function Set-OurValue([string]$Key, [string]$Value) {
         }
     }
     if (-not $done) { $out += ($Key + ': ' + $Value) }
-    Write-Lines $CONFIG $out
+    Write-Lines $STATE $out
 }
 
 # 读某个顶层块下的标量（缩进的那一行），去掉引号；没有就返回空串。
@@ -151,7 +146,7 @@ function Get-BlockScalar([string]$Path, [string]$Block, [string]$Key) {
     return ''
 }
 
-# ---- meow.yaml 的小编辑 ----
+# ---- meow 配置的小编辑 ----
 # 只做三件事：改顶层标量、删顶层键、改块内标量。注释、顺序、缩进都原样保留——
 # 这份文件里有订阅和规则，不能被重新序列化。
 
@@ -230,74 +225,93 @@ function Get-DataPath {
 }
 
 # 这份文件看起来是不是 meow 的配置（旧布局把两者放在同一个文件里）。
-function Test-MeowConfig([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    foreach ($line in [System.IO.File]::ReadAllLines($Path)) {
-        if ($line -match '^(proxies|proxy-groups|rules|mixed-port|tun|listeners):') { return $true }
-    }
-    return $false
-}
-
-function Write-OurConfig([string]$Mode) {
+# 我们的全部状态就这一份：代理类型。配置在 <插件目录>/config（meow 自己的那份）。
+function Write-State([string]$Mode) {
     $text = @(
-        '# meow 插件的设置：meow 自己不读这个文件，也不会改它（订阅和规则在 meow.yaml 里）。',
-        '# 改完 plugin restart meow 生效。',
+        '# meow 插件的状态：只记代理类型，页面上的 off / tun / tproxy 就是它。',
+        '# meow 的配置在 <插件目录>/config（订阅、代理组、规则、端口都在那里）。',
         "proxy-mode: $Mode",
-        'mixed-port: 7890',
-        '',
-        '# 本机 mixed 代理端口之外，还有透明代理端口（Windows 走 TUN，不看这些）。',
-        'tproxy-port: 7893',
-        'routing-mark: 9527',
         ''
     ) -join "`r`n"
-    Write-Utf8 $CONFIG $text
+    Write-Utf8 $STATE $text
 }
 
-# 保证 meow.yaml 存在：旧布局（订阅写在 config 里）就迁过来，否则用包里的模板。
+function Set-ModeCache([string]$Mode) {
+    if (-not (Test-Path -LiteralPath $STATE -PathType Leaf)) { Write-State $Mode; return }
+    Set-StateValue 'proxy-mode' $Mode
+}
+
+# 老布局里我们的键混在 meow 的配置里：搬进 state，再从配置里删掉。
+function Migrate-State([string]$Path) {
+    foreach ($key in 'proxy-mode', 'lan-interface', 'dns-port') {
+        $value = Get-ConfigValue $Path $key
+        if (-not $value -or $value -eq 'null') { continue }
+        if ($key -eq 'proxy-mode') {
+            if ($value -in @('off', 'pc', 'router')) { Set-ModeCache $value }
+            else { Write-Note "迁移时忽略未知的 proxy-mode '$value'" }
+        } else {
+            Set-StateValue $key $value
+        }
+    }
+}
+
+# meow 不认识我们的键（proxy-mode 现在住在 state，另外两个是 router 的可选项）。
+function Remove-OurKeys([string]$Path) {
+    Remove-TopKey $Path 'proxy-mode'
+    Remove-TopKey $Path 'lan-interface'
+    Remove-TopKey $Path 'dns-port'
+}
+
+# 保证 <插件目录>/config 是 meow 的配置且干净（迁移同 meow.sh）。
 function Prepare-Config {
-    if (Test-Path -LiteralPath $MEOW_CONFIG -PathType Leaf) { return }
-    if (Test-MeowConfig $CONFIG) {
-        $mode = Get-Mode
-        Copy-Item -LiteralPath $CONFIG -Destination $MEOW_CONFIG -Force
-        Write-OurConfig $mode
-        Write-Note "已把旧配置迁到 $MEOW_CONFIG，设置留在 $CONFIG"
-        return
+    if (Test-Path -LiteralPath $LEGACY_CONFIG -PathType Leaf) {
+        if (Test-Path -LiteralPath $CONFIG -PathType Leaf) { Migrate-State $CONFIG }
+        Move-Item -LiteralPath $LEGACY_CONFIG -Destination $CONFIG -Force
+        Write-Note "已把 meow.yaml 搬回 config（代理类型记在 $STATE）"
     }
-    if (-not (Test-Path -LiteralPath $TEMPLATE -PathType Leaf)) {
-        Write-Note 'payload/config.yaml missing'
-        exit 1
+    if (-not (Test-Path -LiteralPath $CONFIG -PathType Leaf)) {
+        if (-not (Test-Path -LiteralPath $TEMPLATE -PathType Leaf)) {
+            Write-Note 'payload/config.yaml missing'
+            exit 1
+        }
+        $text = [System.IO.File]::ReadAllText($TEMPLATE)
+        Write-Utf8 $CONFIG $text.Replace('@DATA@', (Get-DataPath))
     }
-    $text = [System.IO.File]::ReadAllText($TEMPLATE)
-    Write-Utf8 $MEOW_CONFIG $text.Replace('@DATA@', (Get-DataPath))
+    # 更老的布局把我们的键和订阅写在一起：先搬进 state，再从配置里摘掉。
+    Migrate-State $CONFIG
+    Remove-OurKeys $CONFIG
+    if (-not (Test-Path -LiteralPath $STATE -PathType Leaf)) { Write-State (Get-Mode) }
 }
 
-# 按形态把受管键写进 meow.yaml：pc 形态要 tun + fake-ip（成对，缺一个就没有路由），
+# 按形态把受管键写进 meow 的配置：pc 形态要 tun + fake-ip（成对，缺一个就没有路由），
 # off 形态把 tun 关掉、只留 mixed-port。
 function Apply-Settings([string]$Mode) {
-    $mixed = Get-OurValue 'mixed-port' '7890'
+    # 端口以 meow 的配置为准（用户改成别的就跟着走），没有才用默认值。
+    $mixed = Get-ConfigValue $CONFIG 'mixed-port'
+    if (-not $mixed -or $mixed -eq 'null') { $mixed = '7890' }
     if ($mixed -notmatch '^\d+$') {
         Write-Note "mixed-port 不是端口：'$mixed'"
         return $false
     }
-    Set-TopKey $MEOW_CONFIG 'mixed-port' $mixed
+    Set-TopKey $CONFIG 'mixed-port' $mixed
 
     # 订阅里带进来的 tproxy 端口在 Windows 上没有意义。
-    Remove-TopKey $MEOW_CONFIG 'tproxy-port'
-    Remove-TopKey $MEOW_CONFIG 'routing-mark'
+    Remove-TopKey $CONFIG 'tproxy-port'
+    Remove-TopKey $CONFIG 'routing-mark'
 
     switch ($Mode) {
         'off' {
             # 不接管：不启动 tun，也不开 tproxy，meow 只当普通 HTTP/SOCKS 代理。
-            Set-BlockKey $MEOW_CONFIG 'tun' 'enable' 'false'
+            Set-BlockKey $CONFIG 'tun' 'enable' 'false'
             return $true
         }
         'pc' {
-            Set-BlockKey $MEOW_CONFIG 'tun' 'enable' 'true'
-            Set-BlockKey $MEOW_CONFIG 'tun' 'auto-route' 'true'
-            Set-BlockKey $MEOW_CONFIG 'tun' 'dns-hijack' '[any:53]'
-            Set-BlockKey $MEOW_CONFIG 'dns' 'enable' 'true'
-            Set-BlockKey $MEOW_CONFIG 'dns' 'enhanced-mode' 'fake-ip'
-            Set-BlockKey $MEOW_CONFIG 'dns' 'fake-ip-range' '198.18.0.1/16'
+            Set-BlockKey $CONFIG 'tun' 'enable' 'true'
+            Set-BlockKey $CONFIG 'tun' 'auto-route' 'true'
+            Set-BlockKey $CONFIG 'tun' 'dns-hijack' '[any:53]'
+            Set-BlockKey $CONFIG 'dns' 'enable' 'true'
+            Set-BlockKey $CONFIG 'dns' 'enhanced-mode' 'fake-ip'
+            Set-BlockKey $CONFIG 'dns' 'fake-ip-range' '198.18.0.1/16'
             return $true
         }
         default {
@@ -413,7 +427,7 @@ function Start-MeowChild {
         Write-Note '需要管理员权限：TUN/Wintun 适配器要提权，否则 meow 会起不来'
     }
 
-    $validate = & $MEOW -d $ROOT -f $MEOW_CONFIG -t 2>&1
+    $validate = & $MEOW -d $ROOT -f $CONFIG -t 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Note '配置校验失败（meow -t）：'
         foreach ($line in $validate) { [Console]::Error.WriteLine("  $line") }
@@ -421,9 +435,9 @@ function Start-MeowChild {
     }
 
     $mode = Get-Mode
-    $meowArgs = @('-d', $ROOT, '-f', $MEOW_CONFIG, '--ext-ui', (Join-Path $ROOT 'yacd'))
+    $meowArgs = @('-d', $ROOT, '-f', $CONFIG, '--ext-ui', (Join-Path $ROOT 'yacd'))
     $quoted = ($meowArgs | ForEach-Object { Quote-Arg $_ }) -join ' '
-    Write-Note "meow starting mode=$mode (data=$ROOT, config=$MEOW_CONFIG)"
+    Write-Note "meow starting mode=$mode (data=$ROOT, config=$CONFIG)"
     # meow 的日志默认走 stdout，而 stdout 是我们的协议口：不能让它混进去，
     # 也不能让它继承通道的 stdin（那会跟宿主抢帧）。日志落到数据目录里的一份文件。
     $meowLog = Join-Path $DATA 'meow.out.log'
@@ -479,17 +493,21 @@ function Start-Watchdog {
 
 # ---- 能力：代理类型（页面 A 的顶部选择器） ----
 
-# 读：{"mode":"off|tun|tproxy","proxy-mode":"off|pc|router","running":bool,"allowed":[...]}
+# 读：{"mode":"off|tun|tproxy","proxy-mode":"off|pc|router","running":bool,"secret":...}
+# secret 是 meow 面板要的密钥（订阅里常常自带），页面把它传给 iframe，面板就不用每次手输。
 function Get-ModeJson {
     $mode = Get-Mode
     $running = if (Get-RunningPid) { 'true' } else { 'false' }
     $mixed = ''
-    if (Test-Path -LiteralPath $MEOW_CONFIG -PathType Leaf) {
-        $value = Get-ConfigValue $MEOW_CONFIG 'mixed-port'
+    $secret = ''
+    if (Test-Path -LiteralPath $CONFIG -PathType Leaf) {
+        $value = Get-ConfigValue $CONFIG 'mixed-port'
         if ($value -match '^\d+$') { $mixed = ',"mixed-port":' + $value }
+        $secret = Get-ConfigValue $CONFIG 'secret'
     }
+    $secret = $secret.Replace('\', '\\').Replace('"', '\"')
     return '{"mode":"' + (Get-ModeLabel $mode) + '","proxy-mode":"' + $mode +
-        '","running":' + $running + ',"allowed":["off","tun"]' + $mixed + '}'
+        '","running":' + $running + ',"allowed":["off","tun"]' + ',"secret":"' + $secret + '"' + $mixed + '}'
 }
 
 # 写：把页面上的代理类型落成 proxy-mode，重启孩子。成功返回 $true。
@@ -508,7 +526,7 @@ function Switch-Mode([string]$Label) {
     $hold = Join-Path $DATA 'switching'
     New-Item -ItemType File -Force -Path $hold | Out-Null
     try {
-        Set-OurValue 'proxy-mode' $target
+        Set-ModeCache $target
         $null = Stop-Meow
         if (-not (Apply-Settings (Get-Mode))) { return $false }
         $null = Clear-TunRoutes
@@ -561,13 +579,13 @@ function Stop-Meow {
 
 function Show-Status {
     $mode = 'pc'
-    if (Test-Path -LiteralPath $CONFIG -PathType Leaf) { $mode = Get-Mode }
+    if (Test-Path -LiteralPath $STATE -PathType Leaf) { $mode = Get-Mode }
 
     $tun = $false
     $mixed = ''
-    if (Test-Path -LiteralPath $MEOW_CONFIG -PathType Leaf) {
-        $tun = ((Get-BlockScalar $MEOW_CONFIG 'tun' 'enable') -eq 'true')
-        $mixed = Get-ConfigValue $MEOW_CONFIG 'mixed-port'
+    if (Test-Path -LiteralPath $CONFIG -PathType Leaf) {
+        $tun = ((Get-BlockScalar $CONFIG 'tun' 'enable') -eq 'true')
+        $mixed = Get-ConfigValue $CONFIG 'mixed-port'
         if ($mixed -eq 'null') { $mixed = '' }
     }
     $pidValue = Get-RunningPid
@@ -581,13 +599,13 @@ function Show-Status {
 }
 
 function Show-Mode {
-    Write-Output "config: $CONFIG"
-    Write-Output "meow  : $MEOW_CONFIG"
+    Write-Output "config: $STATE"
+    Write-Output "meow  : $CONFIG"
     Write-Output ("mode  : " + (Get-Mode))
-    if (Test-Path -LiteralPath $MEOW_CONFIG -PathType Leaf) {
-        Write-Output ("tun   : " + (Get-BlockScalar $MEOW_CONFIG 'tun' 'enable'))
-        Write-Output ("dns   : " + (Get-BlockScalar $MEOW_CONFIG 'dns' 'enhanced-mode'))
-        Write-Output ("mixed : " + (Get-ConfigValue $MEOW_CONFIG 'mixed-port'))
+    if (Test-Path -LiteralPath $CONFIG -PathType Leaf) {
+        Write-Output ("tun   : " + (Get-BlockScalar $CONFIG 'tun' 'enable'))
+        Write-Output ("dns   : " + (Get-BlockScalar $CONFIG 'dns' 'enhanced-mode'))
+        Write-Output ("mixed : " + (Get-ConfigValue $CONFIG 'mixed-port'))
     }
     Write-Output "meow  : $MEOW"
     Write-Output "data  : $DATA"

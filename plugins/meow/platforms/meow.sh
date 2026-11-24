@@ -2,13 +2,13 @@
 # meow：包装 vendor/meow-rs 编译出来的二进制。
 #
 # 两个文件，各管各的：
-#   <插件目录>/config     我们的设置（manifest 的 config 指向它）。meow 不读、也不改，
-#                         所以 proxy-mode / mixed-port 这类开关永远不会被它重写掉。
-#   <插件目录>/meow.yaml  meow 自己的配置（订阅、规则、代理组）。我们只在启动时改它
-#                         受管的几个键（mixed-port / tun / dns / tproxy-port），其余
-#                         原样保留；第一次启动从包里的 payload/config.yaml 生成。
+#   <插件目录>/config   meow 自己的配置（订阅、代理组、规则），meow 就是用这份启动的；
+#                       宿主的 editconfig 改的也是它。我们只在启动时改受管的几个键
+#                       （mixed-port / tun / dns / tproxy-port），其余原样保留。
+#                       第一次安装从包里的 payload/config.yaml 生成。
+#   <插件目录>/state    我们自己的：只缓存代理类型（proxy-mode），页面上的选择器写它。
 #
-# 运行形态由 config 里的 proxy-mode 决定（缺省 pc），受管键按形态自动写进 meow.yaml：
+# 运行形态由 state 里的 proxy-mode 决定（缺省 pc），受管键按形态自动写进 meow 的 config：
 #   off    不接管流量：只开 mixed-port 当普通 HTTP/SOCKS 代理，tproxy / tun 都不开。
 #   pc     本机透明代理。Linux：tproxy-port + routing-mark（meow 自己装 nft 规则）；
 #          Windows：tun + fake-ip（见 meow.ps1）。页面上的「tun」就是它。
@@ -32,9 +32,10 @@ PLUGIN_ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
 BASE=${SVCD_DATA_DIR:-$PLUGIN_ROOT/.data}
 DATA="$BASE/meow"
 PIDFILE="$DATA/meow.pid"
-CONFIG="$PLUGIN_ROOT/config"                     # 我们的设置
-MEOW_CONFIG="$PLUGIN_ROOT/meow.yaml"             # meow 的配置
-TEMPLATE="$ROOT/config.yaml"                     # 包里的 meow 配置模板
+CONFIG="$PLUGIN_ROOT/config"                     # meow 的配置：meow 就是用它启动的（宿主的 editconfig 改它）
+LEGACY_CONFIG="$PLUGIN_ROOT/meow.yaml"           # 1.2/1.3 的布局：meow 的配置曾放这里
+TEMPLATE="$ROOT/config.yaml"                     # 包里的出厂模板
+STATE="$PLUGIN_ROOT/state"                       # 我们自己的：只缓存代理类型（+ router 的可选覆盖）
 FW="$HERE/meow-fw.sh"
 SDK="$ROOT/lib/svcd-plugin.sh"                   # 宿主 SDK：通道循环与能力分发
 
@@ -43,11 +44,11 @@ mkdir -p "$DATA" 2>/dev/null || true
 # 能力通道（页面 A 的代理类型选择器）用 SDK；sync 会把 sdk/shell 的副本刷到 payload/lib。
 if [ -f "$SDK" ]; then . "$SDK"; fi
 
-# ---- 我们的设置 ----
+# ---- 我们的状态（只缓存代理类型） ----
 
 # 顶层标量：只认行首的 `键: 值`，去掉行尾注释、引号和首尾空白。
 our() {
-    sed -n "s/^$1:[[:space:]]*\([^#]*\).*/\1/p" "$CONFIG" 2>/dev/null \
+    sed -n "s/^$1:[[:space:]]*\([^#]*\).*/\1/p" "$STATE" 2>/dev/null \
         | head -n 1 \
         | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
 }
@@ -67,7 +68,7 @@ mode_of() {
     case "$_mode" in
         '') printf 'pc' ;;
         off|pc|router) printf '%s' "$_mode" ;;
-        *) echo "meow: config 里 proxy-mode 只能是 off、pc 或 router（现在是 '$_mode'）" >&2; return 1 ;;
+        *) echo "meow: 缓存里的 proxy-mode 只能是 off、pc 或 router（现在是 '$_mode'）" >&2; return 1 ;;
     esac
 }
 
@@ -104,7 +105,7 @@ is_port() {
     [ "$1" -ge 1 ] && [ "$1" -le 65535 ]
 }
 
-# ---- meow.yaml 的小编辑 ----
+# ---- meow 配置的小编辑 ----
 # 只做三件事：改顶层标量、删顶层键、改块内的标量。注释、顺序和缩进都原样保留，
 # 因为这份文件里还有订阅和规则，不能被重新序列化。
 
@@ -165,44 +166,68 @@ set_block_key() {
     ' "$1" > "$_tmp" && mv "$_tmp" "$1"
 }
 
-# 这份文件看起来是不是 meow 的配置（旧布局把两者放在同一个文件里）。
-looks_like_meow_config() {
-    [ -f "$1" ] && grep -qE '^(proxies|proxy-groups|rules|mixed-port|tun|listeners):' "$1"
-}
-
-write_our_config() {
+# 我们的全部状态就这一份：代理类型。配置在 <插件目录>/config（meow 自己的那份）。
+write_state() {
     {
-        echo "# meow 插件的设置：meow 不读这个文件，也不会改它。"
-        echo "# 改完 plugin restart meow 生效。"
+        echo "# meow 插件的状态：只记代理类型，页面上的 off / tun / tproxy 就是它。"
+        echo "# meow 的配置在 <插件目录>/config（订阅、代理组、规则、端口都在那里）。"
         echo "proxy-mode: ${1:-pc}"
-        echo "mixed-port: 7890"
-        echo ""
-        echo "# 透明代理端口（Linux pc / router 形态用；Windows 走 TUN，不看这个）。"
-        echo "tproxy-port: 7893"
-        echo "# meow 自己出向的 SO_MARK，避免被自己的规则再抓一次（Linux pc）。"
-        echo "routing-mark: 9527"
-        echo ""
-        echo "# router 形态：被劫持的 LAN 网口，以及劫持 DNS 用的端口。"
-        echo "lan-interface: br0"
-        echo "dns-port: 1053"
-    } > "$CONFIG"
+    } > "$STATE"
 }
 
-# 保证 meow.yaml 存在：旧布局（订阅写在 config 里）就迁过来，否则用包里的模板。
+set_mode_cache() {
+    if [ ! -f "$STATE" ]; then
+        write_state "$1"
+        return 0
+    fi
+    set_key "$STATE" proxy-mode "$1"
+}
+
+# 老布局里我们的键混在 meow 的配置里：搬进 state，再从配置里删掉。
+migrate_state() {
+    for _key in proxy-mode lan-interface dns-port; do
+        _value=$(sed -n "s/^${_key}:[[:space:]]*//p" "$1" 2>/dev/null | head -n 1 |
+            sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        [ -n "$_value" ] || continue
+        if [ "$_key" = proxy-mode ]; then
+            case "$_value" in
+                off|pc|router) set_mode_cache "$_value" ;;
+                *) echo "meow: 迁移时忽略未知的 proxy-mode '$_value'" >&2 ;;
+            esac
+        else
+            if [ ! -f "$STATE" ]; then write_state "$(mode_of 2>/dev/null || printf pc)"; fi
+            set_key "$STATE" "$_key" "$_value"
+        fi
+    done
+    return 0
+}
+
+# meow 不认识我们的键（proxy-mode 现在住在 state，另外两个是 router 的可选项）。
+strip_our_keys() {
+    del_key "$1" proxy-mode
+    del_key "$1" lan-interface
+    del_key "$1" dns-port
+}
+
+# 保证 <插件目录>/config 是 meow 的配置且干净：
+#   1.2/1.3 把 meow 的配置放在 meow.yaml，搬回 config，旧开关搬进 state；
+#   更老的布局把开关和订阅写在一起，把我们那几个键挪走。
 prepare_config() {
-    if [ -f "$MEOW_CONFIG" ]; then
-        return 0
+    if [ -f "$LEGACY_CONFIG" ]; then
+        [ -f "$CONFIG" ] && migrate_state "$CONFIG"
+        mv "$LEGACY_CONFIG" "$CONFIG" || return 1
+        echo "meow: 已把 meow.yaml 搬回 config（代理类型记在 $STATE）" >&2
     fi
-    if looks_like_meow_config "$CONFIG"; then
-        _mode=$(our proxy-mode)
-        cp "$CONFIG" "$MEOW_CONFIG" || return 1
-        # 迁过来之后 config 恢复成“我们的设置”，原来写的 proxy-mode 留着。
-        write_our_config "${_mode:-pc}"
-        echo "meow: 已把旧配置迁到 $MEOW_CONFIG，设置留在 $CONFIG" >&2
-        return 0
+    if [ ! -f "$CONFIG" ]; then
+        [ -f "$TEMPLATE" ] || { echo 'meow: payload/config.yaml missing' >&2; return 1; }
+        sed -e "s#@DATA@#$DATA#g" "$TEMPLATE" > "$CONFIG" || return 1
     fi
-    [ -f "$TEMPLATE" ] || { echo 'meow: payload/config.yaml missing' >&2; return 1; }
-    sed -e "s#@DATA@#$DATA#g" "$TEMPLATE" > "$MEOW_CONFIG" || return 1
+    # 更老的布局把我们的键和订阅写在一起：先搬进 state，再从配置里摘掉。
+    migrate_state "$CONFIG"
+    strip_our_keys "$CONFIG"
+    if [ ! -f "$STATE" ]; then
+        write_state "$(mode_of 2>/dev/null || printf pc)"
+    fi
     return 0
 }
 
@@ -211,8 +236,8 @@ prepare_config() {
 ensure_tproxy_listener() {
     _port=$1
     [ -n "$(tproxy_entry)" ] && return 0
-    if grep -qE '^listeners:[ \t]*$' "$MEOW_CONFIG"; then
-        _tmp="$MEOW_CONFIG.tmp.$$"
+    if grep -qE '^listeners:[ \t]*$' "$CONFIG"; then
+        _tmp="$CONFIG.tmp.$$"
         awk -v port="$_port" '
             { print }
             /^listeners:[ \t]*$/ && !done {
@@ -223,7 +248,7 @@ ensure_tproxy_listener() {
                 print "    firewall: false"
                 done = 1
             }
-        ' "$MEOW_CONFIG" > "$_tmp" && mv "$_tmp" "$MEOW_CONFIG"
+        ' "$CONFIG" > "$_tmp" && mv "$_tmp" "$CONFIG"
         return 0
     fi
     {
@@ -234,47 +259,60 @@ ensure_tproxy_listener() {
         echo "    port: $_port"
         echo "    listen: 0.0.0.0"
         echo "    firewall: false"
-    } >> "$MEOW_CONFIG"
+    } >> "$CONFIG"
     return 0
 }
 
-# 按形态把受管键写进 meow.yaml。这是“启动即用”的实现：用户只用写 proxy-mode 和
-# 端口，tun / fake-ip / tproxy-port / routing-mark 都由这里补齐。
+# 按形态把受管键写进 meow 的配置。这是“启动即用”的实现：你只需要在页面上选代理类型，
+# tun / fake-ip / tproxy-port / routing-mark 都由这里补齐。
+# 端口以 meow 的配置为准（用户改成别的就跟着走），没有才用默认值。
+yaml_number() {
+    _value=$(sed -n "s/^$1:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$CONFIG" 2>/dev/null | head -n 1)
+    printf '%s' "${_value:-$2}"
+}
+
+# 透明代理端口：顶层 tproxy-port，或者 listeners 里那条 tproxy 的端口。
+tproxy_port() {
+    _value=$(sed -n 's/^tproxy-port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" 2>/dev/null | head -n 1)
+    [ -n "$_value" ] || _value=$(tproxy_entry | awk '{print $1}')
+    printf '%s' "${_value:-7893}"
+}
+
 apply_settings() {
     _mode=$1
-    _port=$(our_or mixed-port 7890)
+    _port=$(yaml_number mixed-port 7890)
     is_port "$_port" || { echo "meow: mixed-port 不是端口：'$_port'" >&2; return 1; }
-    set_key "$MEOW_CONFIG" mixed-port "$_port"
+    set_key "$CONFIG" mixed-port "$_port"
     # 订阅里带进来的 tun 块要关掉：三种形态的透明代理都不靠订阅自带的 tun。
-    if grep -qE '^tun:' "$MEOW_CONFIG"; then
-        set_block_key "$MEOW_CONFIG" tun enable false
+    if grep -qE '^tun:' "$CONFIG"; then
+        set_block_key "$CONFIG" tun enable false
     fi
 
     case "$_mode" in
     off)
         # 不接管：只留 mixed-port。tproxy-port 一去掉，meow 就不装 nft 规则。
-        del_key "$MEOW_CONFIG" tproxy-port
-        del_key "$MEOW_CONFIG" routing-mark
+        del_key "$CONFIG" tproxy-port
+        del_key "$CONFIG" routing-mark
         ;;
     pc)
-        _tproxy=$(our_or tproxy-port 7893)
+        _tproxy=$(tproxy_port)
         is_port "$_tproxy" || { echo "meow: tproxy-port 不是端口：'$_tproxy'" >&2; return 1; }
-        set_key "$MEOW_CONFIG" tproxy-port "$_tproxy"
-        _mark=$(our_or routing-mark 9527)
+        set_key "$CONFIG" tproxy-port "$_tproxy"
+        _mark=$(yaml_number routing-mark 9527)
         case "$_mark" in
             *[!0-9]*) echo "meow: routing-mark 只能是数字：'$_mark'" >&2; return 1 ;;
         esac
-        set_key "$MEOW_CONFIG" routing-mark "$_mark"
+        set_key "$CONFIG" routing-mark "$_mark"
         ;;
     router)
         # 入口是 listeners 里的 tproxy 项，顶层 tproxy-port 会和它抢端口。
-        del_key "$MEOW_CONFIG" tproxy-port
-        del_key "$MEOW_CONFIG" routing-mark
-        set_block_key "$MEOW_CONFIG" dns enable true
+        del_key "$CONFIG" tproxy-port
+        del_key "$CONFIG" routing-mark
+        set_block_key "$CONFIG" dns enable true
         _dns=$(our_or dns-port 1053)
         is_port "$_dns" || { echo "meow: dns-port 不是端口：'$_dns'" >&2; return 1; }
-        set_block_key "$MEOW_CONFIG" dns listen "0.0.0.0:$_dns"
-        _tproxy=$(our_or tproxy-port 7893)
+        set_block_key "$CONFIG" dns listen "0.0.0.0:$_dns"
+        _tproxy=$(tproxy_port)
         is_port "$_tproxy" || { echo "meow: tproxy-port 不是端口：'$_tproxy'" >&2; return 1; }
         ensure_tproxy_listener "$_tproxy"
         ;;
@@ -313,7 +351,7 @@ tproxy_entry() {
     { v = value($0, "firewall"); if (v != "") fw = v }
     { v = value($0, "listen");   if (v != "") listen = v }
     END { if (!done && type == "tproxy") print port, fw, listen }
-    ' "$MEOW_CONFIG"
+    ' "$CONFIG"
 }
 
 # dns.listen → "地址 端口"；没有或解析不出就什么都不输出。
@@ -335,7 +373,7 @@ dns_listen() {
         gsub(/^\[|\]$/, "", addr)
         print addr, port
         exit
-    }' "$MEOW_CONFIG"
+    }' "$CONFIG"
 }
 
 # dns.enable → true/false；没有就什么都不输出（meow 默认不开 DNS）。
@@ -352,7 +390,7 @@ dns_enable() {
         gsub(/"/, "", v)
         print v
         exit
-    }' "$MEOW_CONFIG"
+    }' "$CONFIG"
 }
 
 load_router_params() {
@@ -377,7 +415,7 @@ router_hint() {
 
 validate_router() {
     if ! is_port "${TPROXY_PORT:-}"; then
-        router_hint "meow.yaml 的 listeners: 里没有 type: tproxy 的入口（内置入口时要写 port）"
+        router_hint "config 的 listeners: 里没有 type: tproxy 的入口（内置入口时要写 port）"
         return 1
     fi
     if [ "$TPROXY_FIREWALL" != false ]; then
@@ -414,7 +452,7 @@ validate_router() {
             *[!0-9]*) router_hint "routing-mark 不是数字：'$MARK'"; return 1 ;;
         esac
     fi
-    case "$(sed -n 's/^ipv6:[[:space:]]*\([a-z]*\).*/\1/p' "$MEOW_CONFIG" | head -n 1)" in
+    case "$(sed -n 's/^ipv6:[[:space:]]*\([a-z]*\).*/\1/p' "$CONFIG" | head -n 1)" in
         true) echo "meow: ipv6: true 而规则只做 v4 REDIRECT，LAN 客户端的 AAAA 会绕过代理；网关形态建议 ipv6: false" >&2 ;;
     esac
     [ -e "/sys/class/net/$LAN_IF" ] || { router_hint "LAN 网口 '$LAN_IF' 不存在（改 config 里的 lan-interface）"; return 1; }
@@ -452,10 +490,10 @@ port_listening() {
 
 report_ports() {
     for key in mixed-port port socks-port; do
-        value=$(sed -n "s/^${key}:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$MEOW_CONFIG" | head -n 1)
+        value=$(sed -n "s/^${key}:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$CONFIG" | head -n 1)
         [ -n "$value" ] && printf ',"%s":%s' "$key" "$value"
     done
-    value=$(sed -n 's/^tproxy-port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$MEOW_CONFIG" | head -n 1)
+    value=$(sed -n 's/^tproxy-port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | head -n 1)
     if [ -z "$value" ]; then
         value=$(tproxy_entry | awk '{print $1}')
     fi
@@ -480,9 +518,9 @@ start_child() {
         echo "meow: 缺少规则脚本 $FW" >&2
         return 1
     fi
-    echo "meow starting mode=$_mode (config=$MEOW_CONFIG)" >&2
+    echo "meow starting mode=$_mode (config=$CONFIG)" >&2
     # stdin 接 /dev/null：宿主的通道口只留在看护进程里，meow 不该继承它。
-    "$HERE/meow" -d "$ROOT" -f "$MEOW_CONFIG" --ext-ui "$ROOT/yacd" >&2 < /dev/null &
+    "$HERE/meow" -d "$ROOT" -f "$CONFIG" --ext-ui "$ROOT/yacd" >&2 < /dev/null &
     mon_pid=$!
     echo "$mon_pid" > "$PIDFILE"
     [ "$_mode" = router ] || return 0
@@ -543,7 +581,7 @@ supervise() {
         if [ "$MODE" = router ]; then
             load_router_params
             validate_router || return 1
-        elif ! "$HERE/meow" -d "$ROOT" -f "$MEOW_CONFIG" -t >/dev/null 2>&1 < /dev/null; then
+        elif ! "$HERE/meow" -d "$ROOT" -f "$CONFIG" -t >/dev/null 2>&1 < /dev/null; then
             # pc/off 形态先做一次配置校验，失败就别起一个秒退进程。
             echo 'meow: config validation failed (run meow -t to see details)' >&2
             return 1
@@ -566,20 +604,32 @@ supervise() {
 # 不带参数是读，带 mode 是写。写只改 config 的 proxy-mode 并结束孩子进程，
 # 重启由前台看护循环负责——所以一次调用里不会出现「配置已改、进程还没换」的状态。
 
-# 读：{"mode":"off|tun|tproxy","proxy-mode":"off|pc|router","running":bool,...}
+# meow 的面板密钥（subscription 常常自带一个 secret）。它就是 YACD 要的那串；页面把它
+# 传给 iframe，面板就不用每次手输。列表写法取第一个元素。
+secret_of() {
+    _line=$(sed -n 's/^secret:[[:space:]]*//p' "$CONFIG" 2>/dev/null | head -n 1)
+    printf '%s' "$_line" |
+        sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+            -e 's/^\[//' -e 's/\]$//' -e 's/,.*$//' \
+            -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+# 读：{"mode":"off|tun|tproxy","proxy-mode":"off|pc|router","running":bool,"secret":...}
 report_mode() {
     _mode=$(mode_of 2>/dev/null) || _mode=pc
     _running=false
     running && _running=true
     _ports=''
-    [ -f "$MEOW_CONFIG" ] && _ports=$(report_ports)
+    [ -f "$CONFIG" ] && _ports=$(report_ports)
     if is_linux; then
         _allowed='"off","tun","tproxy"'
     else
         _allowed='"off","tun"'
     fi
-    printf '{"mode":"%s","proxy-mode":"%s","running":%s,"allowed":[%s]%s}\n' \
-        "$(label_of "$_mode")" "$_mode" "$_running" "$_allowed" "$_ports"
+    _secret=''
+    [ -f "$CONFIG" ] && _secret=$(secret_of | svcd_json_escape)
+    printf '{"mode":"%s","proxy-mode":"%s","running":%s,"allowed":[%s],"secret":"%s"%s}\n' \
+        "$(label_of "$_mode")" "$_mode" "$_running" "$_allowed" "$_secret" "$_ports"
 }
 
 # 写：把页面上的 off/tun/tproxy 落成 proxy-mode，持久化在 config 里。
@@ -598,8 +648,8 @@ do_set_mode() {
         report_mode
         return 0
     fi
-    prepare_config || return 1
-    set_key "$CONFIG" proxy-mode "$_target" || return 1
+    # 只写我们自己的缓存；meow 的配置由看护循环按新形态重写受管键。
+    set_mode_cache "$_target" || return 1
     # 孩子活着就叫它退出：前台看护循环醒来会看到新的 proxy-mode，按新形态重启。
     _pid=$(cat "$PIDFILE" 2>/dev/null || true)
     if [ -n "$_pid" ]; then
@@ -706,7 +756,7 @@ do_status() {
         fi
     fi
     ports=''
-    if [ -f "$MEOW_CONFIG" ]; then
+    if [ -f "$CONFIG" ]; then
         ports=$(report_ports)
     fi
     proxy=$(printf ',"proxy":"%s"' "$(label_of "$mode")")
@@ -738,8 +788,8 @@ do_fw() {
 # 会先把受管键写一遍（和 start 一样），所以看到的就是 meow 实际要用的配置。
 do_mode() {
     prepare_config || return 1
-    echo "config: $CONFIG"
-    echo "meow  : $MEOW_CONFIG"
+    echo "meow  : $CONFIG"
+    echo "state : $STATE"
     _mode=$(mode_of) || return 1
     echo "mode  : $_mode"
     apply_settings "$_mode" || return 1

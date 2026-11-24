@@ -9,7 +9,7 @@
     "type": "web",
     "entry": "index.html"
   },
-  "config": "config/config",
+  "config": "payload/config.yaml",
   "capabilities": [
     {
       "name": "mode",

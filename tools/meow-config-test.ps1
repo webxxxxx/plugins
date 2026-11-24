@@ -1,10 +1,12 @@
 <#
-meow 的配置层（Windows 版）：pc 形态自动写 tun + fake-ip + mixed-port。
+meow 的配置层（Windows 版）：
+  <插件目录>\config  meow 自己的配置（订阅/规则/端口），meow 就是用它启动的
+  <插件目录>\state   我们自己的，只缓存代理类型（off / pc / router）
 
-和 tools/meow-config-test.sh 对应，但 meow.ps1 只能在 PowerShell 里跑，所以只取它的
-函数定义（按语法树抽取，不执行脚本最后的 switch），在假布局上调用，再检查 meow.yaml。
+和 tools/meow-config-test.sh 对应：meow.ps1 只能在 PowerShell 里跑，所以只取它的函数定义
+（按语法树抽取，不执行脚本最后的 switch），在假布局上调用，再检查配置与状态。
 
-用法：pwsh tools/meow-config-test.ps1 [-Repo <仓库根>]
+用法：powershell -File tools/meow-config-test.ps1 [-Repo <仓库根>]
 #>
 param([string]$Repo = (Join-Path $PSScriptRoot '..'))
 
@@ -44,16 +46,8 @@ function Get-FunctionBlocks([string]$Path) {
     return $blocks
 }
 
-# 假插件目录，并把脚本里那些路径变量指过去。
-function New-Fixture([string]$Name) {
-    $plugin = Join-Path $Work $Name
-    $payload = Join-Path $plugin '1.2.0/payload'
-    New-Item -ItemType Directory -Force -Path (Join-Path $payload 'bin') | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $payload 'yacd') | Out-Null
-    Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/config.yaml') (Join-Path $payload 'config.yaml')
-    Copy-Item (Join-Path $Repo 'plugins/meow/package/config/config') (Join-Path $plugin 'config')
-
-    $yaml = @(
+function Get-MeowConfig {
+    @(
         '# 订阅配置（示例）'
         'mixed-port: 7891'
         'proxies:'
@@ -64,17 +58,29 @@ function New-Fixture([string]$Name) {
         'dns:'
         '  enable: true'
         '  listen: 127.0.0.1:5353'
+        'secret: p@ss word'
         'rules:'
         '  - MATCH,DIRECT'
     ) -join "`n"
-    Write-Text (Join-Path $plugin 'meow.yaml') $yaml
+}
+
+# 假插件目录，并把脚本里那些路径变量指过去。
+function New-Fixture([string]$Name) {
+    $plugin = Join-Path $Work $Name
+    $payload = Join-Path $plugin '1.3.0/payload'
+    New-Item -ItemType Directory -Force -Path (Join-Path $payload 'bin') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $payload 'yacd') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $payload 'lib') | Out-Null
+    Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/config.yaml') (Join-Path $payload 'config.yaml')
+    Write-Text (Join-Path $plugin 'config') (Get-MeowConfig)
 
     $script:PLUGIN_ROOT = $plugin
     $script:ROOT = $payload
     $script:DATA = Join-Path $plugin '.data/meow'
     $script:PIDFILE = Join-Path $DATA 'meow.pid'
     $script:CONFIG = Join-Path $plugin 'config'
-    $script:MEOW_CONFIG = Join-Path $plugin 'meow.yaml'
+    $script:LEGACY_CONFIG = Join-Path $plugin 'meow.yaml'
+    $script:STATE = Join-Path $plugin 'state'
     $script:TEMPLATE = Join-Path $payload 'config.yaml'
     $script:MEOW = Join-Path $payload 'bin/meow.exe'
     New-Item -ItemType Directory -Force -Path $DATA | Out-Null
@@ -88,40 +94,35 @@ function Expect([string]$Path, [string]$Key, [string]$Value, [string]$Label) {
 
 foreach ($block in (Get-FunctionBlocks $Script)) { . $block }
 
-# ---- pc：tun + fake-ip + mixed-port 自动写进去，tproxy-port 删掉 ----
+# ---- pc：tun + fake-ip，用户写的 mixed-port 不动，代理类型落进 state ----
 $plugin = New-Fixture 'pc'
-$configCopy = Read-Text (Join-Path $plugin 'config')
 Prepare-Config
 Apply-Settings (Get-Mode) | Out-Null
-if ((Get-BlockScalar $MEOW_CONFIG 'tun' 'enable') -ne 'true') { Fail 'pc: tun.enable 没打开' }
-if ((Get-BlockScalar $MEOW_CONFIG 'dns' 'enhanced-mode') -ne 'fake-ip') { Fail 'pc: dns.enhanced-mode 不是 fake-ip' }
-Expect $MEOW_CONFIG 'mixed-port' '7890' 'pc'
-Expect $MEOW_CONFIG 'tproxy-port' '' 'pc'
-if ((Read-Text $MEOW_CONFIG) -notmatch 'node-1') { Fail 'pc: 订阅内容被弄丢了' }
-if ((Read-Text (Join-Path $plugin 'config')) -ne $configCopy) { Fail 'pc: config 被改了' }
+if ((Get-BlockScalar $CONFIG 'tun' 'enable') -ne 'true') { Fail 'pc: tun.enable 没打开' }
+if ((Get-BlockScalar $CONFIG 'dns' 'enhanced-mode') -ne 'fake-ip') { Fail 'pc: dns.enhanced-mode 不是 fake-ip' }
+Expect $CONFIG 'mixed-port' '7891' 'pc'
+Expect $CONFIG 'tproxy-port' '' 'pc'
+if ((Read-Text $CONFIG) -notmatch 'node-1') { Fail 'pc: 订阅内容被弄丢了' }
+if ((Get-Mode) -ne 'pc') { Fail 'pc: state 里没有 proxy-mode' }
+if ((Read-Text $CONFIG) -match 'proxy-mode:') { Fail 'pc: state 的键写进了配置' }
 
 # ---- 用户改 mixed-port，跟着走；重复跑幂等 ----
-Write-Text (Join-Path $plugin 'config') ((Read-Text (Join-Path $plugin 'config')) -replace '(?m)^mixed-port: 7890', 'mixed-port: 1080')
+Write-Text $CONFIG ((Read-Text $CONFIG) -replace '(?m)^mixed-port: 7891', 'mixed-port: 1080')
 Apply-Settings (Get-Mode) | Out-Null
-Expect $MEOW_CONFIG 'mixed-port' '1080' 'pc 改端口'
-$before = Read-Text $MEOW_CONFIG
+Expect $CONFIG 'mixed-port' '1080' 'pc 改端口'
+$before = Read-Text $CONFIG
 Apply-Settings (Get-Mode) | Out-Null
-if ((Read-Text $MEOW_CONFIG) -ne $before) { Fail 'pc: 第二次跑改了文件' }
+if ((Read-Text $CONFIG) -ne $before) { Fail 'pc: 第二次跑改了文件' }
 
-# ---- 旧布局：订阅写在 config 里，第一次启动搬过去 ----
-$plugin = New-Fixture 'migrate'
-Copy-Item (Join-Path $plugin 'meow.yaml') (Join-Path $plugin 'config') -Force
-Remove-Item (Join-Path $plugin 'meow.yaml')
-Prepare-Config
-if (-not (Test-Path (Join-Path $plugin 'meow.yaml'))) { Fail 'migrate: meow.yaml 没生成' }
-if ((Read-Text (Join-Path $plugin 'meow.yaml')) -notmatch 'node-1') { Fail 'migrate: 订阅没迁过去' }
-Expect (Join-Path $plugin 'config') 'proxy-mode' 'pc' 'migrate'
-
-Remove-Item -Recurse -Force $Work
-Write-Output 'meow config layer (windows): ok'
+# ---- off：不启动 tun、也不开 tproxy，只剩 mixed-port ----
+if (-not (Apply-Settings 'off')) { Fail 'off: Apply-Settings 失败' }
+if ((Get-BlockScalar $CONFIG 'tun' 'enable') -ne 'false') { Fail 'off: tun 没关掉' }
+Expect $CONFIG 'mixed-port' '1080' 'off'
+Expect $CONFIG 'tproxy-port' '' 'off'
+if ((Read-Text $CONFIG) -notmatch 'node-1') { Fail 'off: 订阅被弄丢了' }
+if (Apply-Settings 'router') { Fail 'off: Windows 上 router 应该被拒' }
 
 # ---- 页面上的代理类型：off / tun / tproxy ↔ off / pc / router ----
-# 页面只认这三个标签；落盘的永远是 proxy-mode，所以配置永远能被 meow.sh 读。
 $plugin = New-Fixture 'modes'
 if ((Get-ModeFromLabel 'tun') -ne 'pc') { Fail 'modes: tun 没映射成 pc' }
 if ((Get-ModeFromLabel 'tproxy') -ne 'router') { Fail 'modes: tproxy 没映射成 router' }
@@ -129,38 +130,57 @@ if ((Get-ModeFromLabel 'off') -ne 'off') { Fail 'modes: off 没映射成 off' }
 if ((Get-ModeFromLabel 'turbo') -ne '') { Fail 'modes: 非法标签应该返回空' }
 if ((Get-ModeLabel 'pc') -ne 'tun') { Fail 'modes: pc 没映射回 tun' }
 
-$before = Read-Text $CONFIG
-Set-OurValue 'proxy-mode' 'off'
-if ((Get-Mode) -ne 'off') { Fail 'modes: Set-OurValue 没写进 proxy-mode' }
-if ((Read-Text $CONFIG) -notmatch '(?m)^mixed-port: 7890') { Fail 'modes: Set-OurValue 弄丢了别的键' }
-if ((Read-Text $CONFIG) -notmatch '# meow 插件的设置') { Fail 'modes: Set-OurValue 弄丢了注释' }
-$twice = Read-Text $CONFIG
-Set-OurValue 'proxy-mode' 'off'
-if ((Read-Text $CONFIG) -ne $twice) { Fail 'modes: Set-OurValue 不幂等' }
+Set-ModeCache 'off'
+if ((Get-Mode) -ne 'off') { Fail 'modes: Set-ModeCache 没写进 state' }
+$twice = Read-Text $STATE
+Set-ModeCache 'off'
+if ((Read-Text $STATE) -ne $twice) { Fail 'modes: Set-ModeCache 不幂等' }
+if ((Read-Text $STATE) -notmatch '# meow 插件的状态') { Fail 'modes: state 没有说明文字' }
+if ((Read-Text $CONFIG) -match 'proxy-mode:') { Fail 'modes: 代理类型写进了 meow 的配置' }
 
-# off：不启动 tun，也不开 tproxy —— 只剩 mixed-port。
-if (-not (Apply-Settings 'off')) { Fail 'modes: Apply-Settings off 失败' }
-if ((Get-BlockScalar $MEOW_CONFIG 'tun' 'enable') -ne 'false') { Fail 'modes: off 没把 tun 关掉' }
-Expect $MEOW_CONFIG 'mixed-port' '7890' 'modes'
-Expect $MEOW_CONFIG 'tproxy-port' '' 'modes'
-if ((Read-Text $MEOW_CONFIG) -notmatch 'node-1') { Fail 'modes: off 把订阅弄丢了' }
-if (Apply-Settings 'router') { Fail 'modes: Windows 上 router 应该被拒' }
-
+# ---- 能力：读状态（带 secret 给面板用）、拒绝不支持的标签 ----
 $json = Get-ModeJson
-if ($json -notmatch '"mode":"off"') { Fail "modes: Get-ModeJson 没报出代理类型（$json）" }
-if ($json -notmatch '"running":false') { Fail "modes: Get-ModeJson running 不对（$json）" }
-if ($json -notmatch '"allowed":\["off","tun"\]') { Fail "modes: Get-ModeJson allowed 不对（$json）" }
+if ($json -notmatch '"mode":"off"') { Fail "capabilities: Get-ModeJson 没报出代理类型（$json）" }
+if ($json -notmatch '"running":false') { Fail "capabilities: running 不对（$json）" }
+if ($json -notmatch '"allowed":\["off","tun"\]') { Fail "capabilities: allowed 不对（$json）" }
+if ($json -notmatch '"secret":"p@ss word"') { Fail "capabilities: secret 没带给面板（$json）" }
 
-# 页面走的能力入口：不带 mode 是读，带了非法/不支持的标签要报错且不动配置。
 $read = Invoke-Capability 'mode' @{}
-if ($read -notmatch '"mode":"off"') { Fail "modes: mode 能力读状态不对（$read）" }
+if ($read -notmatch '"mode":"off"') { Fail "capabilities: mode 能力读状态不对（$read）" }
 $refused = Invoke-Capability 'mode' @{ mode = 'tproxy' }
-if (-not ($refused -is [hashtable] -and $refused.Error)) { Fail 'modes: Windows 上 tproxy 应该被拒' }
-if ((Get-Mode) -ne 'off') { Fail 'modes: 被拒的 tproxy 改了配置' }
+if (-not ($refused -is [hashtable] -and $refused.Error)) { Fail 'capabilities: Windows 上 tproxy 应该被拒' }
+if ((Get-Mode) -ne 'off') { Fail 'capabilities: 被拒的 tproxy 改了 state' }
 $bad = Invoke-Capability 'mode' @{ mode = 'turbo' }
-if (-not ($bad -is [hashtable] -and $bad.Error)) { Fail 'modes: 非法标签应该被拒' }
+if (-not ($bad -is [hashtable] -and $bad.Error)) { Fail 'capabilities: 非法标签应该被拒' }
 
 Write-Output 'meow proxy mode capability (windows): ok'
+
+# ---- 迁移：1.2/1.3 的 meow.yaml 搬回 config，旧开关搬进 state ----
+$plugin = New-Fixture 'migrate'
+Write-Text (Join-Path $plugin 'meow.yaml') (Get-MeowConfig)
+Write-Text $CONFIG (@(
+    '# meow 插件的设置：meow 不读这个文件，也不会改它。'
+    'proxy-mode: off'
+    'mixed-port: 7890'
+    'tproxy-port: 7893'
+    'routing-mark: 9527'
+    'lan-interface: br-lan'
+    'dns-port: 1053'
+) -join "`n")
+Prepare-Config
+if (Test-Path (Join-Path $plugin 'meow.yaml')) { Fail 'migrate: meow.yaml 没搬走' }
+if ((Read-Text $CONFIG) -notmatch 'node-1') { Fail 'migrate: 订阅没搬进 config' }
+if ((Get-Mode) -ne 'off') { Fail 'migrate: 旧代理类型没搬进 state' }
+if ((Get-ConfigValue $STATE 'lan-interface') -ne 'br-lan') { Fail 'migrate: lan-interface 没搬进 state' }
+if ((Read-Text $CONFIG) -match 'proxy-mode:') { Fail 'migrate: 配置里还留着我们的键' }
+
+# ---- 迁移：更老的布局（开关和订阅写在一起）----
+$plugin = New-Fixture 'migrate-old'
+Write-Text $CONFIG ((Get-MeowConfig) -replace '(?m)^mixed-port: 7891', "mixed-port: 7891`nproxy-mode: off`nlan-interface: br-wan")
+Prepare-Config
+if ((Read-Text $CONFIG) -match 'proxy-mode:') { Fail 'migrate-old: proxy-mode 还留在 config 里' }
+if ((Read-Text $CONFIG) -match 'lan-interface:') { Fail 'migrate-old: lan-interface 还留在 config 里' }
+if ((Get-ConfigValue $STATE 'lan-interface') -ne 'br-wan') { Fail 'migrate-old: lan-interface 没搬进 state' }
 
 # ---- DNS：meow 把网卡 DNS 改成 127.0.0.1，强杀后没人恢复，stop 要自己修 ----
 # 用两个同名函数把 cmdlet 换掉：既能测保存，也能测恢复，而且不碰本机网络。
@@ -203,3 +223,5 @@ if ($calls -notmatch 'reset:eth0') { Fail "dns: 没把 loopback 重置回 DHCP�
 if ($calls -notmatch 'set:eth0=192\.168\.1\.1') { Fail "dns: 没按备份恢复（$calls）" }
 
 Write-Output 'meow dns guard (windows): ok'
+
+Remove-Item -Recurse -Force $Work

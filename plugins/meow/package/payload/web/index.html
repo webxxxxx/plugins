@@ -113,8 +113,12 @@
     function showPanel(up) {
       panel.classList.toggle('down', !up);
       if (!up) return;
-      // 加时间戳强制重载：切形态之后旧面板是断的，同一个 URL 赋值浏览器不一定重新拉。
-      iframe.src = `${PANEL}?t=${Date.now()}`;
+      // secret 跟着 URL 传给 YACD：订阅里带了密钥也不会每次弹登录框。
+      // 时间戳强制重载：切形态之后旧面板是断的，同一个 URL 赋值浏览器不一定重新拉。
+      const query = new URLSearchParams();
+      if (last.secret) query.set('secret', last.secret);
+      query.set('t', String(Date.now()));
+      iframe.src = `${PANEL}?${query}`;
     }
 
     async function read() {

@@ -79,16 +79,16 @@ build.json                              cargo 构建配方
 build.sh                                平台映射与产物复制（内核二进制）
 package/
 ├── manifest.json                       平台无关的清单：身份、元数据、UI、config、能力
-├── config/config                       我们的开关（安装后是 plugins/meow/config）
 └── payload/
-    ├── config.yaml                     meow 配置模板（首次启动生成 plugins/meow/meow.yaml）
+    ├── config.yaml                     meow 的配置模板（安装后就是 <插件目录>/config）
     ├── bin/                            只有内核二进制（构建产物 + 合入的脚本）
     ├── web/index.html                  控制台「打开」入口（跳转到 9090/ui/）
     ├── cn_domains.yaml                 rule-provider
     └── yacd/                           面板静态文件
 ```
 
-装好之后插件目录里是两个文件：`config`（你的开关）和 `meow.yaml`（meow 的订阅与规则）。
+装好之后插件目录里是两个文件：`config`（meow 的订阅与规则，`plugin editconfig meow` 编辑它）
+和 `state`（插件自己的代理类型缓存）。
 
 打包前会清掉别的平台留下的同名产物（`meow` ↔ `meow.exe`），所以每个平台的包
 里只有自己那份内核。
@@ -100,8 +100,8 @@ package/
 - svcd 控制台的「打开」入口是我们自己的页面（`payload/web/index.html`）：顶部是**代理类型**
   （`off` / `tun` / `tproxy`），下面用 iframe 嵌 meow 自带的 YACD；面板地址按当前浏览器访问的
   主机名拼（`http://<当前主机>:9090/ui/`），`127.0.0.1` / `localhost` / 局域网地址都能用。
-- 页面上的选择立刻生效，而且是**持久**的：它写进 `config` 的 `proxy-mode`，插件关掉
-  再开也按它走（不用再手动改文件）。
+- 页面上的选择立刻生效，而且是**持久**的：它写进 `<插件目录>/state` 的 `proxy-mode`，
+  插件关掉再开也按它走。
 - 面板是 meow 自己在 `:9090` 上开的；如果宿主是用 https 打开的，浏览器会拦掉这个
   http iframe（控制台本身走 http 就没这个问题）。
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
@@ -123,20 +123,21 @@ package/
 
 | 文件 | 谁改 | 放什么 |
 | --- | --- | --- |
-| `<插件目录>/config` | 你（`plugin editconfig meow`） | 插件开关：`proxy-mode`、`mixed-port`、`tproxy-port`、`routing-mark`、`lan-interface`、`dns-port` |
-| `<插件目录>/meow.yaml` | meow（订阅刷新、面板保存） | 订阅、代理组、规则、面板设置 |
+| `<插件目录>/config` | 你（`plugin editconfig meow` / 直接编辑） | **meow 自己的配置**：订阅、代理组、规则、面板、端口……meow 就是用这一份启动的（`meow -f <插件目录>/config`） |
+| `<插件目录>/state` | 插件（页面上的代理类型） | 只缓存 `proxy-mode`。是插件的状态，不是给你编辑的配置 |
 
-meow **不读** `config`，所以这里的开关永远不会被它重写掉；反过来，`meow.yaml` 里那几个
-受管键（`mixed-port`、`tun`、`dns`、`tproxy-port`）由插件在每次 `start` 时按形态写好，
-你不需要填，填错了也会被纠正（其它内容原样保留，注释也不动）。
+`config` 里那几个**受管键**（`mixed-port`、`tun`、`dns`、`tproxy-port`、`routing-mark`）由插件
+在每次 `start` 时按形态写好，你不需要填；其余内容（订阅、规则、注释）原样保留。
+`mixed-port` 以你写的为准：插件只在你没写的时候补 `7890`。
 
-- 第一次启动时 `meow.yaml` 从包里的 `payload/config.yaml` 生成（`@DATA@` 渲染成数据目录）；
-- 旧布局（订阅写在 `config` 里）第一次启动会自动迁到 `meow.yaml`，`config` 变回开关文件；
-- 想把 `meow.yaml` 恢复出厂：删掉它再 `plugin restart meow`。
+- 第一次安装时 `config` 从包里的 `payload/config.yaml` 生成（`@DATA@` 渲染成数据目录）；
+- 从 1.2/1.3 升级：旧的 `<插件目录>/meow.yaml` 会被搬回 `config`，旧的 `proxy-mode` 搬进 `state`；
+- 更老的布局（开关和订阅写在一起）也认，插件会把自己的键摘出来放进 `state`；
+- 想把 `config` 恢复出厂：删掉它再 `plugin restart meow`。
 
 ### proxy-mode：填一个键，其余自动
 
-页面上只有三个值：`off` / `tun` / `tproxy`，落盘永远是 `proxy-mode`：
+页面顶上只有三个值：`off` / `tun` / `tproxy`，落盘永远是 `state` 里的 `proxy-mode`：
 
 | 页面上的代理类型 | `proxy-mode` | 含义 |
 | --- | --- | --- |
@@ -144,25 +145,42 @@ meow **不读** `config`，所以这里的开关永远不会被它重写掉；�
 | `tun` | `pc` | 本机透明代理：Windows 走 TUN + fake-ip，Linux/macOS 走 `tproxy-port` |
 | `tproxy` | `router` | 网关：iptables 劫持 LAN，只有 Linux 有（Windows 上页面会把这个选项标成「仅 Linux」） |
 
+`<插件目录>/state` 里只有一行：
+
 ```yaml
 proxy-mode: pc          # off | pc | router（Windows 只认 off / pc）
-mixed-port: 7890        # HTTP + SOCKS 同一个口，off 形态下只有它
-tproxy-port: 7893       # Linux 的 pc / router 用；Windows 走 TUN
-routing-mark: 9527      # Linux pc 的出向 SO_MARK
-lan-interface: br0      # router：被劫持的 LAN 网口
-dns-port: 1053          # router：LAN DNS 劫持的目标端口
 ```
 
-| 形态 | 平台 | 插件自动写进 `meow.yaml` |
+`config` 里跟形态有关的键（默认值，插件按形态写）：
+
+```yaml
+mixed-port: 7890        # HTTP + SOCKS 同一个口，off 形态下只有它
+tproxy-port: 7893       # Linux 的 pc 形态用；Windows 走 TUN
+routing-mark: 9527      # Linux pc 的出向 SO_MARK
+```
+
+网关形态（`router`）还要两个插件自己的参数，默认 `br0` / `1053`，要改就写进 `state`：
+
+```yaml
+lan-interface: br-lan   # 被劫持的 LAN 网口
+dns-port: 1053          # 劫持 LAN DNS 用的端口
+```
+
+| 形态 | 平台 | 插件自动写进 `config` |
 | --- | --- | --- |
 | `off` | 全部 | 关掉 `tun`，删掉 `tproxy-port` / `routing-mark`，只留 `mixed-port` |
 | `pc` | Windows | `tun.enable` / `auto-route` / `dns-hijack: [any:53]` + `dns.enhanced-mode: fake-ip` + `fake-ip-range`（TUN 和 fake-ip 必须成对，缺一个 meow 一条路由都不装） |
 | `pc` | Linux / macOS | `tproxy-port` + `routing-mark`，并关掉 `tun` |
 | `router` | Linux | 关 `tun`，`dns.listen: 0.0.0.0:<dns-port>`，`listeners:` 里没有 tproxy 入口时补一条（`firewall: false`） |
 
-切形态有两条路：页面上选一下（写 `config` → 重启 meow，几秒钟，插件本身不用重启），或者
-自己改 `config` 里的 `proxy-mode` 再 `plugin restart meow`。从 `router` 切回 `pc` 时 `stop`
-会先把残留的 nat 规则撤掉，不会留一个指向死端口的劫持。
+切形态就一条路：页面上选一下（写 `state` → 重启 meow，几秒钟，插件本身不用重启）。
+从 `router` 切回 `pc` 时 `stop` 会先把残留的 nat 规则撤掉，不会留一个指向死端口的劫持。
+
+### 面板不用登录
+
+订阅里常常自带一个 `secret`，YACD 于是每次弹登录框。页面的 `mode` 能力会把这个 `secret`
+读出来，拼进 iframe 的 URL（`…:9090/ui/?secret=…`），所以面板打开就是登录状态。
+想彻底关掉密钥：把 `config` 里的 `secret` 改成 `""` 再重启（控制器只监听 `127.0.0.1`）。
 
 ## 本机透明代理（proxy-mode: pc）
 
@@ -170,7 +188,7 @@ dns-port: 1053          # router：LAN DNS 劫持的目标端口
 
 不需要 `meow-fw.sh`：meow 见到 `tproxy-port` 就自己装 nft `output` 链（macOS 是
 pf），退出时自己拆（RAII，崩溃残留的表下次启动会被清掉）。插件会自动把
-`tproxy-port` / `routing-mark` 写进 `meow.yaml`，要换端口就改 `config`：
+`tproxy-port` / `routing-mark` 写进 `config`，要换端口就改 `config`：
 
 ```yaml
 # <插件目录>/config
@@ -203,10 +221,10 @@ routing-mark: 9527     # meow 自己出向的 SO_MARK，避免被自己的规则
 
 Windows 上没有 nftables/pf，本机透明代理只有 **TUN（Wintun）** 一条路。页面上的
 代理类型选 `tun`（也就是 `proxy-mode: pc`）就够了，插件每次 `start` 都把这几行写进
-`meow.yaml`（不用手填）：
+`config`（不用手填）：
 
 ```yaml
-# <插件目录>/meow.yaml —— 插件自动维护这几行
+# <插件目录>/config —— 插件自动维护这几行
 tun:
   enable: true
   auto-route: true
@@ -220,7 +238,7 @@ dns:
 - 宿主进程要以管理员运行（Wintun 适配器要提权）。没提权时插件会在日志里提示，
   meow 自己也会失败退出。
 - 选 `off` 就把 `tun.enable` 关掉：不建 TUN 适配器、不动路由和 DNS，只有 `mixed-port` 能代理。
-- `mixed-port` 也只写在 `config` 里，插件把它带到 `meow.yaml`。
+- `mixed-port` 以 `config` 里的为准，没写时插件补 `7890`。
 - 订阅里带进来的 `tproxy-port` / `routing-mark` 会被删掉：那是 Linux nftables / pf 的路。
 - `wintun.dll` 不用手动放：meow 会优先找 exe 旁边的，找不到就释放内置的一份。
 - **`stop` / 异常退出后不会把电脑断网**：TUN 适配器是持久的，被强杀的 meow 来不及撤
@@ -248,12 +266,12 @@ routing-mark: 9527
 mixed-port: null             # 网关不需要 LAN 侧 HTTP/SOCKS
 ```
 
-插件会把 `dns.enable` / `dns.listen: 0.0.0.0:<dns-port>`、`tun: false` 写进 `meow.yaml`，
+插件会把 `dns.enable` / `dns.listen: 0.0.0.0:<dns-port>`、`tun: false` 写进 `config`，
 没有 tproxy 入口时还会在 `listeners:` 下面补一条（`listen: 0.0.0.0`、`firewall: false`）。
-剩下这几项留在 `meow.yaml` 里按需写：
+剩下这几项留在 `config` 里按需写：
 
 ```yaml
-# <插件目录>/meow.yaml
+# <插件目录>/config
 ipv6: false                  # 规则只做 v4 REDIRECT；开 v6 会让 AAAA 绕过代理
 mode: rule
 allow-lan: true
@@ -324,6 +342,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <插件目录>\<版本>\payl
 `svc call meow.mode` 拿到的是同一份 JSON。status / mode 里的 `proxy` 字段就是页面上的标签。
 
 ## 构建
+
+### 本机打包（推荐）：docker 交叉编译，只出 windows + linux
+
+宿主机的 rust/cmake/MSVC/libclang 全都不用装，WSL 里 docker 一个就够了：
+
+```sh
+sh tools/pack.sh                                 # windows-msvc + linux-gnu 两个 .spk
+sh tools/pack.sh meow x86_64-unknown-linux-musl  # 想多出 musl / arm 就加参数
+```
+
+`tools/pack.sh` 会检查 docker / plugin-tools / 宿主的 `plugin`，缺 plugin-tools 就在容器里
+现编；然后逐平台 `SVCD_DOCKER=1 plugin-tools build --platform …`（`build.sh` 把编译丢进
+`tools/docker` 的 `rust-cross` 镜像：clang+llvm、nasm、musl-tools、rustup 1.98.1、
+cargo-xwin + 预下载的 MSVC CRT/SDK），最后把 `.spk` 拷到仓库的 `dist/`。
+细节、挂载和国内加速见 `tools/docker/README.md`。
+
+只想编一个二进制：
+
+```sh
+SVCD_DOCKER=1 sh build.sh meow 1.3.0 x86_64-pc-windows-msvc   # → out/meow.exe
+sh tools/docker/run.sh -w plugins/meow -n meow -- cargo build --release --target <triple>
+```
+
+### 手工构建
 
 ```bash
 plugin-tools build --platform x86_64-unknown-linux-gnu
