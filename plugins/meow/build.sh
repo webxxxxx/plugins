@@ -15,6 +15,18 @@ command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:$PATH"   # WSL 的非
 
 die() { echo "meow: $*" >&2; exit 1; }
 
+# ---- 在容器里编：宿主机只要 docker ----
+# SVCD_DOCKER=1 时整段编译丢给 tools/docker 的 rust-cross 镜像（clang、libclang、MSVC SDK、
+# 交叉工具链都在里面），宿主机不装任何东西。容器里带着 SVCD_IN_DOCKER=1，不会再递归。
+if [ "${SVCD_DOCKER:-0}" = 1 ] && [ "${SVCD_IN_DOCKER:-0}" != 1 ]; then
+    REPO=$(CDPATH= cd -- "$HERE/../.." && pwd)
+    [ -f "$REPO/tools/docker/run.sh" ] || die "SVCD_DOCKER=1 但找不到 tools/docker/run.sh"
+    echo "meow: docker 里编 $PLATFORM" >&2
+    # 工作目录留在仓库根，脚本按相对路径找自己（容器里跑的还是这个文件）
+    exec sh "$REPO/tools/docker/run.sh" -w . -n meow -- \
+        sh plugins/meow/build.sh "$NAME" "$VERSION" "$PLATFORM"
+fi
+
 # BoringSSL 会把 google benchmark 一起配进来（BUILD_TESTING 缺省 ON），而 benchmark 的
 # 特性探测在 Windows 上很容易失败："Failed to determine the source files for the regular
 # expression backend"（本机 CMake 4 + 长路径），交叉编译时也会卡在它的 find_package(Threads)。
@@ -91,6 +103,15 @@ case "$PLATFORM" in
     export BINDGEN_EXTRA_CLANG_ARGS="$BINDGEN_ARGS"
     export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="$BINDGEN_ARGS" ;;
   x86_64-unknown-linux-musl)
+    if command -v musl-gcc >/dev/null 2>&1; then
+      # 容器里走这条：musl-tools 给的 musl-gcc，够编 BoringSSL、也能当 Rust 目标的链接器。
+      export CC_x86_64_unknown_linux_musl=musl-gcc
+      export CXX_x86_64_unknown_linux_musl=g++
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+      export BINDGEN_EXTRA_CLANG_ARGS="--target=x86_64-unknown-linux-musl"
+      export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--target=x86_64-unknown-linux-musl"
+      break
+    fi
     X=$(cross_root "${X86_64_MUSL_CROSS:-${CROSS_PREFIX:-}}" x86_64-linux-musl-gcc \
         /usr/soft/x86_64-linux-musl-cross /d/soft/x86_64-linux-musl) ||
       die "找不到 x86_64 musl 交叉工具链：设 X86_64_MUSL_CROSS=<root>（里面有 bin/x86_64-linux-musl-gcc）"
@@ -122,7 +143,33 @@ require_target "$PLATFORM"
 # 不要移动 rust-toolchain.toml：它决定工具链，移走会让构建版本漂移。
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/svcd-meow-target}
 JOBS=${JOBS:-4}
-cargo build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow
+case "$PLATFORM" in
+  x86_64-pc-windows-msvc)
+    if [ "$(uname -s)" != MINGW* ] && [ -z "${MEOW_MSVC_LINKER:-}" ]; then
+      # 非 Windows 宿主：msvc 目标要靠 cargo-xwin。第一次会现装它 + 下 MSVC CRT/SDK
+      # （XWIN_CACHE_DIR 指在 tools/docker/run.sh 的工作目录里，之后复用）。
+      if ! cargo xwin --version >/dev/null 2>&1; then
+        echo "meow: 第一次编 $PLATFORM，先装 cargo-xwin（几分钟）…" >&2
+        cargo install cargo-xwin --locked || die "cargo-xwin 装不上（网络？）"
+      fi
+      # cargo-xwin 自己会给 cmake 传工具链，把上面的 CMAKE_TOOLCHAIN_FILE 顶掉，于是
+      # BUILD_TESTING 又回到 ON、google benchmark 在 configure 阶段就失败（交叉时它探测
+      # 不了平台）。所以这一支直接把开关钉进 BoringSSL 的 CMakeLists（幂等）。
+      _patched=0
+      for _f in "${CARGO_HOME:-$HOME/.cargo}"/registry/src/*/boring-sys-*/deps/boringssl/CMakeLists.txt; do
+        [ -f "$_f" ] || continue
+        grep -q 'meow: BUILD_TESTING OFF' "$_f" && continue
+        sed -i '1i set(BUILD_TESTING OFF CACHE BOOL "meow: BUILD_TESTING OFF" FORCE)' "$_f" &&
+          _patched=1 && echo "meow: 关掉 BoringSSL 的测试/benchmark（$_f）" >&2
+      done
+      # 已经解出来的那份也要重新解，否则补丁到不了 cmake 看到的源码树
+      [ "$_patched" = 1 ] && rm -rf "${CARGO_TARGET_DIR:?}/$PLATFORM/release/build/boring-sys-"*
+      cargo xwin build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow
+    else
+      cargo build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow
+    fi ;;
+  *) cargo build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow ;;
+esac
 case "$PLATFORM" in
   *windows*) cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow.exe" "$HERE/out/$NAME.exe" ;;
   *)         cp "$CARGO_TARGET_DIR/$PLATFORM/release/meow" "$HERE/out/$NAME" ;;
