@@ -14,6 +14,7 @@ mod settings;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -331,7 +332,7 @@ impl PluginStore {
             }
         };
 
-        let id = now_millis();
+        let id = next_job_id();
         let job = Job {
             id,
             name: entry.name.clone(),
@@ -417,7 +418,11 @@ impl PluginStore {
             job.device.as_deref(),
         ));
         remove_download(&package);
-        remove_download(&net::part_path(&package));
+        // The transfer belongs to the download thread, which may still hold the
+        // handle (Windows): best effort here, the thread removes its own file.
+        let transfer = job_transfer_path(&self.download_dir, &job);
+        remove_if_idle(&transfer);
+        remove_if_idle(&net::part_path(&transfer));
         svcd_plugin::emit("plugin-store/install", json!({ "job": null }));
         ToolOutcome::text(json!({ "ok": true }).to_string())
     }
@@ -546,7 +551,11 @@ impl PluginStore {
             job.device.as_deref(),
         ));
         remove_download(&downloaded);
-        remove_download(&net::part_path(&downloaded));
+        // The transfer is named after the job, so a newer download of the same
+        // package keeps its own file.
+        let transfer = job_transfer_path(&self.download_dir, &job);
+        remove_download(&transfer);
+        remove_download(&net::part_path(&transfer));
         ToolOutcome::text(json!({ "job": job_json(&job) }).to_string())
     }
 
@@ -860,6 +869,63 @@ fn remove_download(path: &Path) {
     }
 }
 
+/// The file one job writes into. The package name stays readable, but the job
+/// id makes the path unique, so a job deleted mid-transfer can only ever remove
+/// its own bytes — never the `.part` a newer job is writing (#18).
+fn transfer_path(dir: &Path, file: &str, job_id: u64) -> PathBuf {
+    dir.join(format!("{file}.{job_id}.download"))
+}
+
+fn download_path(dir: &Path, entry: &catalog::Entry, job_id: u64) -> PathBuf {
+    transfer_path(dir, &package_file(entry), job_id)
+}
+
+fn job_transfer_path(dir: &Path, job: &Job) -> PathBuf {
+    transfer_path(
+        dir,
+        &package_file_parts(
+            &job.name,
+            &job.version,
+            &job.platform,
+            job.device.as_deref(),
+        ),
+        job.id,
+    )
+}
+
+/// Remove the transfer a job owns. Never the cache: a newer job may already be
+/// handing that file to the host.
+fn discard_transfer(dir: &Path, entry: &catalog::Entry, job_id: u64) {
+    let transfer = download_path(dir, entry, job_id);
+    remove_download(&transfer);
+    remove_download(&net::part_path(&transfer));
+}
+
+/// Unlink without retrying. A transfer the download thread still holds open
+/// (Windows) is removed by that thread once it notices the delete.
+fn remove_if_idle(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+/// Clear transfers left by a process that died mid-download, and the shared
+/// `.part` files older versions wrote. Only runs while nothing is downloading.
+fn sweep_transfers(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".download") && !name.ends_with(".part") {
+            continue;
+        }
+        let path = entry.path();
+        if let Err(error) = fs::remove_file(&path) {
+            log_warn!("清理残留下载文件 {} 失败: {error}", path.display());
+        }
+    }
+}
+
 fn publish_job(state: &Arc<Mutex<State>>, job: &Job) {
     let mut guard = match state.lock() {
         Ok(guard) => guard,
@@ -902,19 +968,23 @@ fn run_install(
                 publish_job(&state, &job);
             }
         };
+        // #18: the transfer is this job's alone. Deleting the job must not make
+        // the next download fail at 100% because a shared `.part` went away
+        // under it, so the bytes go to `<file>.<id>.download` and only the
+        // finished file takes the shared cache name.
+        let transfer = download_path(&download_dir, &entry, job_id);
         let cancelled = || cancel.is_cancelled() || !job_is_current(&state, job_id);
         if let Err(error) = net::download(
             &entry.url,
-            &package,
+            &transfer,
             entry.size_bytes,
             &mut progress,
             &cancelled,
         ) {
+            discard_transfer(&download_dir, &entry, job_id);
             if !job_is_current(&state, job_id) {
                 // The page deleted this job while the download was running.
-                // Leave the file gone instead of publishing a stale card.
-                remove_download(&package);
-                remove_download(&net::part_path(&package));
+                // Leave no bytes behind instead of publishing a stale card.
                 return;
             }
             job.phase = "error".into();
@@ -923,14 +993,20 @@ fn run_install(
             publish_job(&state, &job);
             return;
         }
+        // A delete that landed just as the last byte arrived must not resurrect
+        // the job with a "ready" card or leave the package behind.
+        if !job_is_current(&state, job_id) {
+            discard_transfer(&download_dir, &entry, job_id);
+            return;
+        }
+        if let Err(error) = fs::rename(&transfer, &package) {
+            job.phase = "error".into();
+            job.message = format!("{}: {error}", package.display());
+            job.done = true;
+            publish_job(&state, &job);
+            return;
+        }
         job.downloaded = job.total.unwrap_or(entry.size_bytes);
-    }
-
-    // A delete that landed just as the last byte arrived must not resurrect
-    // the job with a "ready" card or leave the package behind.
-    if !job_is_current(&state, job_id) {
-        remove_download(&package);
-        return;
     }
 
     job.phase = "ready".into();
@@ -1227,6 +1303,23 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Job ids are wall-clock milliseconds; a second job that starts in the same
+/// millisecond still needs its own id, because the id is what tells a finishing
+/// transfer whether it still owns the job (and names its transfer file).
+fn next_job_id() -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let last = LAST.load(Ordering::Relaxed);
+        let next = now_millis().max(last.saturating_add(1));
+        if LAST
+            .compare_exchange(last, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return next;
+        }
+    }
+}
+
 fn system_secs(time: SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
@@ -1250,6 +1343,9 @@ fn main() -> Exit {
     let data_dir = plugin_data_dir(exe.as_deref(), data_root.as_deref(), OWN_ID);
     // The catalog cache sits at the plugin root; downloads use its temp dir.
     let download_dir = data_dir.join("temp");
+    // Nothing can be downloading at startup, so any transfer still here belongs
+    // to a process that died mid-download (or to a version that shared `.part`).
+    sweep_transfers(&download_dir);
     // Settings first: they decide which cache shape to read and which source
     // the refresher asks.
     let settings = settings::Settings::load(context.config_path(), &data_dir);
@@ -1625,7 +1721,12 @@ mod tests {
         let store = store_with(&dir, job);
         let package = dir.join("hysteria-16.0.0-armv7-unknown-linux-musleabihf.spk");
         fs::write(&package, b"spk").unwrap();
-        fs::write(net::part_path(&package), b"part").unwrap();
+        let transfer = dir.join("hysteria-16.0.0-armv7-unknown-linux-musleabihf.spk.7.download");
+        fs::write(&transfer, b"spk").unwrap();
+        fs::write(net::part_path(&transfer), b"part").unwrap();
+        // A newer job's transfer must survive: cleanup owns one job, not a path.
+        let newer = dir.join("hysteria-16.0.0-armv7-unknown-linux-musleabihf.spk.8.download");
+        fs::write(&newer, b"spk").unwrap();
 
         let outcome = store.install_result(&json!({"ok": false, "message": "安装失败"}));
         assert!(
@@ -1636,11 +1737,169 @@ mod tests {
             !package.exists(),
             "a failed install must not keep the downloaded package"
         );
+        assert!(!transfer.exists(), "its transfer belongs to the same job");
         assert!(
-            !net::part_path(&package).exists(),
+            !net::part_path(&transfer).exists(),
             "its .part belongs to the same transfer"
         );
+        assert!(
+            newer.exists(),
+            "a newer job's transfer is not ours to delete"
+        );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #18: a deleted job must not unlink the bytes of the job after it.
+    ///
+    /// 删除 clears `state.job`, but the download thread only notices at its next
+    /// chunk — seconds later on a stalled link. The next job starts meanwhile,
+    /// and the old thread's path-based cleanup used to unlink the shared
+    /// `<file>.spk.part`: the new download climbed to 100% and then
+    /// `rename(part, dest)` failed with "No such file or directory".
+    #[test]
+    fn a_deleted_download_does_not_break_the_next_one() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::Condvar;
+
+        const CHUNK: usize = 4096;
+        let body: Vec<u8> = (0..CHUNK * 2).map(|index| (index % 251) as u8).collect();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Each connection sends one chunk, then waits for this test to release
+        // it, so the first download can sit in a read while the second starts.
+        let gate = Arc::new((Mutex::new(Vec::<usize>::new()), Condvar::new()));
+        let server_gate = Arc::clone(&gate);
+        let serve_body = body.clone();
+        let server = thread::spawn(move || {
+            let mut index = 0usize;
+            for connection in listener.incoming().take(2) {
+                let Ok(mut stream) = connection else {
+                    return;
+                };
+                index += 1;
+                let gate = Arc::clone(&server_gate);
+                let chunk = serve_body.clone();
+                let position = index - 1;
+                thread::spawn(move || {
+                    let mut request = [0u8; 1024];
+                    let _ = stream.read(&mut request);
+                    let headers = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        chunk.len()
+                    );
+                    if stream.write_all(headers.as_bytes()).is_err()
+                        || stream.write_all(&chunk[..CHUNK]).is_err()
+                    {
+                        return;
+                    }
+                    let _ = stream.flush();
+                    let (lock, ready) = &*gate;
+                    let mut released = lock.lock().unwrap();
+                    while !released.contains(&position) {
+                        released = ready.wait(released).unwrap();
+                    }
+                    drop(released);
+                    let _ = stream.write_all(&chunk[CHUNK..]);
+                    let _ = stream.flush();
+                });
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-race-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let store = store_with(&dir, job("done"));
+        {
+            let mut state = store.state.lock().unwrap();
+            state.job = None;
+            state.entries = vec![catalog::Entry {
+                name: "hysteria".into(),
+                version: "1.0.0".into(),
+                platform: "android-arm64".into(),
+                size: "15.7 MiB".into(),
+                size_bytes: body.len() as u64,
+                url: format!("http://{address}/package.spk"),
+                device: None,
+            }];
+        }
+
+        let first = start(&store);
+        wait_for(&store, first, |job| job.downloaded > 0);
+        // Give the first thread time to park in its read.
+        thread::sleep(Duration::from_millis(100));
+        assert!(matches!(store.cancel_install(), ToolOutcome::Text(_)));
+
+        let second = start(&store);
+        // Progress is published every 250 ms, so wait for the phase and give the
+        // second thread time to create its part and park in its first read.
+        wait_for(&store, second, |job| job.phase == "downloading");
+        thread::sleep(Duration::from_millis(150));
+
+        // The first thread wakes up here and runs its cleanup, then the second
+        // transfer is allowed to finish.
+        release(&gate, 0);
+        thread::sleep(Duration::from_millis(200));
+        release(&gate, 1);
+
+        let finished = wait_for(&store, second, |job| job.done || job.phase == "ready");
+        assert_eq!(
+            finished.phase, "ready",
+            "重新下载必须完成，而不是报 os error 2：{}",
+            finished.message
+        );
+        assert_eq!(
+            fs::read(dir.join("hysteria-1.0.0-android-arm64.spk")).unwrap(),
+            body,
+            "缓存里必须是完整的包"
+        );
+
+        server.join().unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn start(store: &PluginStore) -> u64 {
+        let outcome = store.start_install(&json!({
+            "name": "hysteria",
+            "version": "1.0.0",
+            "platform": "android-arm64"
+        }));
+        assert!(
+            !matches!(outcome, ToolOutcome::Error(_)),
+            "start_install must accept a new job"
+        );
+        store
+            .state
+            .lock()
+            .unwrap()
+            .job
+            .as_ref()
+            .map(|job| job.id)
+            .expect("a job is published before the thread starts")
+    }
+
+    fn wait_for(store: &PluginStore, id: u64, mut check: impl FnMut(&Job) -> bool) -> Job {
+        let mut last = None;
+        for _ in 0..600 {
+            if let Some(job) = store.state.lock().unwrap().job.clone() {
+                if job.id == id && check(&job) {
+                    return job;
+                }
+                last = Some(job_json(&job));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("job {id} never reached the expected state; last seen: {last:?}");
+    }
+
+    fn release(gate: &(Mutex<Vec<usize>>, std::sync::Condvar), index: usize) {
+        let (lock, ready) = gate;
+        lock.lock().unwrap().push(index);
+        ready.notify_all();
     }
 
     fn package_entry(name: &str, version: &str, platform: &str) -> catalog::Entry {
@@ -1781,7 +2040,9 @@ mod tests {
         let store = store_with(&dir, job("downloading"));
         let package = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk");
         fs::write(&package, b"spk").unwrap();
-        fs::write(net::part_path(&package), b"spk").unwrap();
+        let transfer = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk.1.download");
+        fs::write(&transfer, b"spk").unwrap();
+        fs::write(net::part_path(&transfer), b"spk").unwrap();
 
         match store.cancel_install() {
             ToolOutcome::Text(text) => assert!(text.contains("\"ok\":true"), "{text}"),
@@ -1789,7 +2050,8 @@ mod tests {
         }
         assert!(store.state.lock().unwrap().job.is_none());
         assert!(!package.exists());
-        assert!(!net::part_path(&package).exists());
+        assert!(!transfer.exists());
+        assert!(!net::part_path(&transfer).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1834,6 +2096,41 @@ mod tests {
         // Deleting an already-gone file is not an error.
         remove_download(&package);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// #18: transfers left by a process that died mid-download (or the shared
+    /// `.part` older versions wrote) are cleared at startup; the cache is data,
+    /// so it stays.
+    #[test]
+    fn startup_clears_transfers_but_keeps_the_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "plugin-store-sweep-{}-{}",
+            std::process::id(),
+            now_millis()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk");
+        let transfer = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk.7.download");
+        let part = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk.7.download.part");
+        let legacy = dir.join("meow-1.0.1-x86_64-unknown-linux-gnu.spk.part");
+        for path in [&cache, &transfer, &part, &legacy] {
+            fs::write(path, b"spk").unwrap();
+        }
+
+        sweep_transfers(&dir);
+
+        assert!(cache.exists(), "the cache is not a transfer");
+        assert!(!transfer.exists());
+        assert!(!part.exists());
+        assert!(!legacy.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_jobs_never_share_an_id() {
+        let first = next_job_id();
+        let second = next_job_id();
+        assert!(second > first, "{second} must outrank {first}");
     }
 
     #[test]
