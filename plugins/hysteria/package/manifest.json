@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "hysteria",
   "name": "Hysteria2 服务端",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "desc": "Hysteria2 服务端（mini-sb-agent / sing-box 内核）",
   "protocol": 1,
   "interpreter": {
