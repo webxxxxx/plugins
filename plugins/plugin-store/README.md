@@ -65,7 +65,9 @@ raw 排第一：它给的就是分支当前内容，没有配额。2、3 是两�
 
 成功结果写到插件根目录的 <data_dir>/plugins/plugin-store/catalog.md，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。插件根目录从运行中的 payload 路径推出（<data>/plugins/<id>/<version>/payload/bin/<exe> 往上四级）——svcd 不给插件注入 SVCD_DATA_DIR；手动运行二进制时才退回 SVCD_DATA_DIR，再退回系统临时目录。页面顶部的「列表」会显示这条在线结果来自哪个域名。
 
-下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/，传输文件按任务命名（`<包名>.<任务号>.download`），完成后才改名成共享的 `<包名>.spk` 缓存；交给宿主时用 rename 移进 `$SVCD_TEMP_DIR/incoming`（同一文件系统，不再占第二份 15 MiB；跨设备才降级复制，失败会删掉半成品）。安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk 并清空任务状态；已经交给宿主安装（installing）后不能删除。收尾只删自己任务的文件：一个被删掉的任务不会碰到下一次下载的字节（#18——共享的 `.part` 被前一个任务删掉时，新下载会在 100% 报 `...spk: No such file or directory`）。进程启动时清掉残留的 `.download` / `.part`，缓存包保留。下载顺序：
+下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/，传输文件按任务命名（`<包名>.<任务号>.download`），完成后才改名成共享的 `<包名>.spk` 缓存；交给宿主时用 rename 移进 `$SVCD_TEMP_DIR/incoming`（同一文件系统，不再占第二份 15 MiB；跨设备才降级复制，失败会删掉半成品）。安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk 并清空任务状态；已经交给宿主安装（installing）后不能删除。收尾只删自己任务的文件：一个被删掉的任务不会碰到下一次下载的字节（#18——共享的 `.part` 被前一个任务删掉时，新下载会在 100% 报 `...spk: No such file or directory`）。进程启动时清掉残留的 `.download` / `.part`，缓存包保留。
+
+交给宿主的顺序是「先取字节、再放掉宿主那份、然后才判空间」：包从下载目录移进宿主 temp 成为 `sha256:` blob 后，页面先把字节读进浏览器、`DELETE /api/v1/blobs/{id}` 释放宿主那份，再 `GET /api/v1/disk?id=` 判空间，最后把字节 POST 给 `/api/v1/plugins`。顺序不能反：blob 还在时量出来的 `freeBytes` 正好少一个包，够装的升级会被判成装不下；判空间之前失败的路径（拒绝、卸载失败、读 blob 失败）也必须在 `finally` 里释放 blob，否则包在 `<data>/temp/files/` 里挂到 `temp_retention_secs`（默认两小时），页面上点「删除」也清不掉它（#19）。下载**之前**也会先判一次（`entry.size_bytes`），免得一个装不下的包先吃掉一整份空间；升级判空间的两档是「新旧都放得下 → 直接装」和「卸掉旧版就放得下 → 弹框」，只有连卸载之后都不够才直接拒绝。上传的字节由宿主流式解进 staging，压缩包本身不落盘，所以磁盘峰值是一份包，不是两份。下载顺序：
 
 1. 直接下载（自动跟随 GitHub release 的 302）；
 2. 如果 release-assets.githubusercontent.com 被 DNS 污染/无法连接，查询 Cloudflare/Google DNS-over-HTTPS 得到真实地址，用固定 resolver 重试；TLS 仍按原主机名校验；

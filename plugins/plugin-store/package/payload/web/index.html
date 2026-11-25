@@ -576,6 +576,22 @@
     selfConfirm = null;
     clearNotice();
     try {
+      // Downloading a package that cannot be installed costs the volume one
+      // package for nothing, so ask before the download, not after it (#19).
+      const plan = await diskPlan(entry.name, Number(entry.size_bytes || 0));
+      if (plan.cancelled) {
+        showNotice('已取消安装 ' + entry.name, 'warn');
+        return;
+      }
+      if (plan.uninstall) {
+        if (isSelf) throw new Error('空间不够：升级插件商店需要先腾出空间');
+        const removed = await fetch('/api/v1/plugins/' + encodeURIComponent(plan.uninstall), {
+          method: 'DELETE',
+          credentials: 'same-origin',
+          headers: { 'X-Svcd-Csrf': '1' },
+        });
+        if (!removed.ok) throw new Error(await responseError(removed));
+      }
       const result = await call('install', {
         name: entry.name,
         version: entry.version,
@@ -707,18 +723,19 @@
       );
     }
 
-    // An upgrade stays on the root the plugin lives on; the old copy is still
-    // there while the new one is staged, so both have to fit.
+    // An upgrade stays on the root the plugin lives on. The old copy is still
+    // there while the new one is staged, so both have to fit; if they do not,
+    // uninstalling the old copy frees `installed`, and the question becomes
+    // whether the new copy fits after that (#19).
     const free = freeOf(holder);
     if (!free) return { proceed: true };
     const installed = Number(holder.plugin.bytes || 0);
     if (free >= size + installed) return { proceed: true };
-    if (free < size) {
-      throw new Error(
-        '空间不够：安装需要 ' + fmtBytes(size) + '，' + holder.root + ' 只有 ' + fmtBytes(free),
-      );
-    }
-    return askToUninstall(id, size, free);
+    if (free + installed >= size) return askToUninstall(id, size, free);
+    throw new Error(
+      '空间不够：安装需要 ' + fmtBytes(size) + '，卸载旧版也只能空出 ' + fmtBytes(installed) +
+      '，' + holder.root + ' 现在只有 ' + fmtBytes(free),
+    );
   }
 
   // The dialog copy is the operator's: cancel, export a backup, or uninstall
@@ -795,6 +812,9 @@
   async function handoff(job) {
     const isSelf = Boolean(state.selfId) && job.name === state.selfId;
     let posted = false;
+    // Owned until the bytes are in this browser; every failure before the POST
+    // must release it, or the package sits in the host's temp for hours (#19).
+    let blobId = null;
     try {
       updateJob(Object.assign({}, job, {
         phase: 'installing',
@@ -806,23 +826,32 @@
         platform: job.platform,
         device: job.device || '',
       }, { timeoutMs: 60000 });
-      const blobId = prepared.structuredContent && prepared.structuredContent.$blob;
+      blobId = prepared.structuredContent && prepared.structuredContent.$blob;
       if (!blobId) throw new Error('宿主没有返回安装包 blob');
 
-      // Decide before the transfer. An upgrade that cannot fit beside the old
-      // version has to uninstall first; doing it here also frees the space the
-      // upload itself needs.
-      const plan = await diskPlan(job.name, Number(job.total || 0));
+      // Take the bytes first, then drop the host's copy. Memory is the only
+      // place a 15.7 MiB package can sit without costing disk, and the space
+      // check below is only meaningful once that copy is gone: measured while
+      // it still exists, `freeBytes` is short by exactly one package and an
+      // upgrade that fits is refused (#19).
+      const blobResponse = await fetch('/api/v1/blobs/' + blobId, { credentials: 'same-origin' });
+      if (!blobResponse.ok) throw new Error(await responseError(blobResponse));
+      const packageBlob = await blobResponse.blob();
+      await releaseBlob(blobId);
+      blobId = null;
+
+      // Decide now, with the true free space. An upgrade that cannot fit beside
+      // the old version has to uninstall first.
+      const plan = await diskPlan(job.name, Number(job.total || packageBlob.size || 0));
       if (plan.cancelled) {
-        // Nothing will consume this blob now: release the host's copy instead
-        // of leaving it for temp_retention_secs.
-        await releaseBlob(blobId);
         updateJob(Object.assign({}, job, { phase: 'ready', message: '已取消安装' }));
         await call('install_result', { ok: false, message: '已取消安装' });
         showNotice('已取消安装 ' + job.name, 'warn');
         return;
       }
       if (plan.uninstall) {
+        // The page cannot uninstall itself mid-upgrade; ask for room instead.
+        if (isSelf) throw new Error('空间不够：升级插件商店需要先腾出空间');
         // No purge: the config file stays, so the reinstall keeps the operator's
         // settings.
         const removed = await fetch('/api/v1/plugins/' + encodeURIComponent(plan.uninstall), {
@@ -832,13 +861,6 @@
         });
         if (!removed.ok) throw new Error(await responseError(removed));
       }
-
-      const blobResponse = await fetch('/api/v1/blobs/' + blobId, { credentials: 'same-origin' });
-      if (!blobResponse.ok) throw new Error(await responseError(blobResponse));
-      const packageBlob = await blobResponse.blob();
-      // The bytes are in this browser now: release the host's temp copy before
-      // the install stages a second one (peak one package, not two).
-      await releaseBlob(blobId);
 
       const installResponse = await fetch('/api/v1/plugins?strategy=replace', {
         method: 'POST',
@@ -901,6 +923,9 @@
       showNotice('安装失败：' + message, 'bad');
       await load({ quiet: true });
     } finally {
+      // A refused plan, a failed uninstall or an unreadable blob all leave the
+      // bytes with the host until its retention window ends. Release them here.
+      if (blobId) await releaseBlob(blobId);
       state.handoffJob = null;
     }
   }
