@@ -9,11 +9,11 @@
 | 插件 | 版本 | 平台 | 大小 | 下载地址 |
 | --- | --- | --- | ---: | --- |
 | hysteria | 1.0.0 | aarch64-apple-darwin | 15.5 MiB | [hysteria-1.0.0-aarch64-apple-darwin.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.2/hysteria-1.0.0-aarch64-apple-darwin.spk) |
-| hysteria | 1.0.1 | aarch64-unknown-linux-musl | 15.8 MiB | [hysteria-1.0.1-aarch64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.1/hysteria-1.0.1-aarch64-unknown-linux-musl.spk) |
-| hysteria | 1.0.1 | armv7-unknown-linux-musleabihf | 15.7 MiB | [hysteria-1.0.1-armv7-unknown-linux-musleabihf.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.1/hysteria-1.0.1-armv7-unknown-linux-musleabihf.spk) |
+| hysteria | 1.0.2 | aarch64-unknown-linux-musl | 15.8 MiB | [hysteria-1.0.2-aarch64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.2/hysteria-1.0.2-aarch64-unknown-linux-musl.spk) |
+| hysteria | 1.0.2 | armv7-unknown-linux-musleabihf | 15.7 MiB | [hysteria-1.0.2-armv7-unknown-linux-musleabihf.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.2/hysteria-1.0.2-armv7-unknown-linux-musleabihf.spk) |
 | hysteria | 1.0.0 | x86_64-apple-darwin | 16.5 MiB | [hysteria-1.0.0-x86_64-apple-darwin.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.2/hysteria-1.0.0-x86_64-apple-darwin.spk) |
-| hysteria | 1.0.1 | x86_64-unknown-linux-gnu | 16.8 MiB | [hysteria-1.0.1-x86_64-unknown-linux-gnu.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.1/hysteria-1.0.1-x86_64-unknown-linux-gnu.spk) |
-| hysteria | 1.0.1 | x86_64-unknown-linux-musl | 16.8 MiB | [hysteria-1.0.1-x86_64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.1/hysteria-1.0.1-x86_64-unknown-linux-musl.spk) |
+| hysteria | 1.0.2 | x86_64-unknown-linux-gnu | 16.8 MiB | [hysteria-1.0.2-x86_64-unknown-linux-gnu.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.2/hysteria-1.0.2-x86_64-unknown-linux-gnu.spk) |
+| hysteria | 1.0.2 | x86_64-unknown-linux-musl | 16.8 MiB | [hysteria-1.0.2-x86_64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/hysteria-v1.0.2/hysteria-1.0.2-x86_64-unknown-linux-musl.spk) |
 | meow | 1.0.1 | aarch64-apple-darwin | 9.9 MiB | [meow-1.0.1-aarch64-apple-darwin.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.2/meow-1.0.1-aarch64-apple-darwin.spk) |
 | meow | 1.0.1 | aarch64-unknown-linux-musl | 11.7 MiB | [meow-1.0.1-aarch64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.2/meow-1.0.1-aarch64-unknown-linux-musl.spk) |
 | meow | 1.0.1 | armv7-unknown-linux-musleabihf | 11.8 MiB | [meow-1.0.1-armv7-unknown-linux-musleabihf.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.2/meow-1.0.1-armv7-unknown-linux-musleabihf.spk) |
