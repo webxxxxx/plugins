@@ -10,15 +10,12 @@
   },
   "exec": {
     "path": "payload/bin/sshd.sh",
+    "args": [
+      "start"
+    ],
     "ready": "exec"
   },
   "lifecycle": {
-    "start": {
-      "path": "payload/bin/sshd.sh",
-      "args": [
-        "start"
-      ]
-    },
     "stop": {
       "path": "payload/bin/sshd.sh",
       "args": [

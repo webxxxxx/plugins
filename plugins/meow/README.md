@@ -110,12 +110,12 @@ package/
 清单里 `exec.ready` 是 `notify`：宿主先发一条 `svcd.ping`，收到回复才算启动成功，
 之后这条路才是能力通道（`ready: exec` 的 stdout 只进日志，页面调不到任何能力）。
 
-宿主的 `lifecycle.start` 是常驻前台进程，但它现在是**看护进程**：meow 是自己的子进程，
+宿主的 `exec` 就是那个**看护进程**（`exec.args` 是 `start`）：meow 是自己的子进程，
 能力通道跑在后台（页面上的代理类型调的就是它）。`pc` / `off` 形态起进程就返回；`router`
 形态还要等 tproxy 端口监听、挂好 iptables 规则。启动前会跑 `meow -t` 校验配置，失败就返回
 非零而不是秒退。孩子自己退出时看护循环跟着退出（宿主据此重启或报错）；页面切了代理类型
-就让孩子退出，看护循环读到新的 `proxy-mode` 后按新形态重启。`stop` 按 pidfile 结束进程，
-`status` 输出一行 JSON。
+就让孩子退出，看护循环读到新的 `proxy-mode` 后按新形态重启。`stop` 在进程退出之后跑：
+先撤 TProxy 规则，再按 pidfile 清残留——它不负责杀进程；`status` 输出一行 JSON。
 
 ## 配置
 

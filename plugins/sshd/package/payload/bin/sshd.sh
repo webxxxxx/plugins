@@ -1,9 +1,9 @@
 #!/bin/sh
 # sshd：dropbear + sftp-server 的生命周期包装。
 #
-# 宿主把 lifecycle.start 当成常驻前台进程，所以 start 必须 exec 到 dropbear，
+# 宿主监督的就是这个脚本（exec.args = start），所以 start 必须 exec 到 dropbear，
 # 不能像旧版那样 start 完就 exit（那样宿主只看到一个已经退出的进程）。
-# stop / status 由宿主按 manifest.lifecycle 带参数调用，执行完即退出。
+# stop 在进程退出之后跑，只做收尾（清 pidfile、确认端口释放）；status 按需探测。
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

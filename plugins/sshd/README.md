@@ -19,12 +19,15 @@ vendor/                   dropbear / openssh 源码
 
 ## 运行方式
 
-宿主的 `lifecycle.start` 就是被监督的前台进程，所以 `sshd.sh start` 会
-`exec` 到 `dropbear -F`，而不是拉起后台再退出。`stop` 按 pidfile 结束进程，
-`status` 输出一行 JSON 供 `svc status` 的 probe 显示。
+宿主的 `exec` 就是被监督的进程：`exec.args` 是 `start`，所以 `sshd.sh start` 在前台
+准备好运行目录、主机密钥和 SFTP 软链，然后 `exec` 到 `dropbear -F`——宿主看到的始终是
+dropbear 本身（信号与进程组都归它）。
+
+`stop` 是**收尾**：宿主先终止进程（SIGTERM → 窗口 → SIGKILL），`stop` 之后才跑，用
+pidfile 清掉残留并确认端口已经释放；它不负责杀进程。`status` 输出一行 JSON 供
+`svc status` 的 probe 显示。
 
 `exec.ready` 写 `exec`：这个插件没有协议通道，宿主启动后立即视为 ready。
-`exec.path` 仍指向同一个脚本，只是被 `lifecycle.start` 覆盖，不会单独执行。
 
 ## 配置
 

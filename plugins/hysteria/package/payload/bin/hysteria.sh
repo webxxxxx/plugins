@@ -1,8 +1,9 @@
 #!/bin/sh
 # hysteria：用 mini-sb-agent（sing-box 内核）跑一个 Hysteria2 服务端。
 #
-# 宿主把 lifecycle.start 当成常驻前台进程，所以 start 直接 exec 内核；
-# stop/status 执行后退出。TLS 证书和密码在首次启动时生成到数据目录。
+# 宿主监督的就是这个脚本（exec.args = start），所以 start 直接 exec 内核；
+# stop 在进程退出之后跑，只做收尾；status 按需探测。TLS 证书和密码在首次启动时
+# 生成到数据目录。
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

@@ -10,15 +10,12 @@
   },
   "exec": {
     "path": "payload/bin/meow.ps1",
+    "args": [
+      "start"
+    ],
     "ready": "notify"
   },
   "lifecycle": {
-    "start": {
-      "path": "payload/bin/meow.ps1",
-      "args": [
-        "start"
-      ]
-    },
     "stop": {
       "path": "payload/bin/meow.ps1",
       "args": [

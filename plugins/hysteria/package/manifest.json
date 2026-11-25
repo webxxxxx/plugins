@@ -10,15 +10,12 @@
   },
   "exec": {
     "path": "payload/bin/hysteria.sh",
+    "args": [
+      "start"
+    ],
     "ready": "exec"
   },
   "lifecycle": {
-    "start": {
-      "path": "payload/bin/hysteria.sh",
-      "args": [
-        "start"
-      ]
-    },
     "stop": {
       "path": "payload/bin/hysteria.sh",
       "args": [
