@@ -933,6 +933,24 @@
     await handoff(job);
   }
 
+  // Did the install already land? A self-upgrade restarts the plugin right
+  // after the POST, and an attempt that resumes afterwards finds the package
+  // moved out of the download directory while the new version is already
+  // running — the failure we just saw is then about the retry, not about the
+  // install (#21). The host's own service list answers that, so ask it before
+  // reporting a failure.
+  async function alreadyInstalled(job) {
+    try {
+      const response = await fetch('/api/v1/services', { credentials: 'same-origin' });
+      if (!response.ok) return null;
+      const body = await response.json();
+      const service = (body.services || []).find((item) => item && item.id === job.name);
+      return service && service.version === job.version ? service : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   // Use the same install API as the management page: POST the .spk bytes as
   // application/octet-stream. The plugin only prepares the bytes and asks the
   // host to turn the cached file into a blob.
@@ -953,8 +971,14 @@
         platform: job.platform,
         device: job.device || '',
       }, { timeoutMs: 60000 });
+      // A plugin-side failure arrives as `isError`, not as a throw, and its
+      // text is the only thing that says why ("文件还没有下载完成", "目录里找不到
+      // 这个包"). Reporting "宿主没有返回安装包 blob" hid that reason (#21).
+      if (prepared.isError) throw new Error(prepared.text || '插件没有给出安装包');
       blobId = prepared.structuredContent && prepared.structuredContent.$blob;
-      if (!blobId) throw new Error('宿主没有返回安装包 blob');
+      if (!blobId) {
+        throw new Error('宿主没有返回安装包 blob；插件说：' + (prepared.text || '（没有说明）'));
+      }
 
       // Take the bytes first, then drop the host's copy. Memory is the only
       // place a 15.7 MiB package can sit without costing disk, and the space
@@ -1040,6 +1064,27 @@
       await load({ quiet: true });
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
+      const landed = await alreadyInstalled(job);
+      if (landed) {
+        if (isSelf) {
+          // The files are in place and the new process is up; this page only
+          // has to hand over to it.
+          posted = true;
+          await restartSelf(landed);
+          return;
+        }
+        state.installed.set(landed.id, landed.version);
+        state.installed.set(job.name, landed.version);
+        try {
+          await call('install_result', {
+            ok: true,
+            message: '已安装并启动 ' + landed.id + ' ' + landed.version,
+          });
+        } catch (_) {}
+        showNotice('已安装 ' + landed.id + ' ' + landed.version, 'ok');
+        await load({ quiet: true });
+        return;
+      }
       if (isSelf && posted) {
         // The old process is gone, so neither install_result nor load can work;
         // the page itself still carries the reason.

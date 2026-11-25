@@ -212,6 +212,10 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   「放不下 / 没挂上 / 换根要先卸载」三种原因各有断言。注入验证：POST 里去掉 `root`、去掉一次安装结束后的
   记忆清理、忽略开关、把默认根改成「最大空闲」，都能让它变红。页面结构改了标记位置时它会直接报错，
   而不是悄悄什么都没测。
+- 失败提示只报真实原因（#21）：\`package_blob\` 插件侧报错时 \`invokeResult\` 不抛异常，旧代码只看
+  \`structuredContent.\$blob\`，于是任何原因都变成「宿主没有返回安装包 blob」；现在 \`isError\` 直接把插件的话
+  抛出来。报失败前还会问一次宿主（\`GET /api/v1/services\`）：这个插件的版本已经是目标版本就当成功——
+  自升级在 POST 之后就把包搬走了，重试再叫 \`package_blob\` 只会得到「文件还没有下载完成」，那不该被报成失败。
 - 认证与缓存：`an_etag_turns_a_repeated_check_into_a_cached_304`、
   `a_configured_token_is_sent_as_a_bearer_header`、`a_token_file_is_read_trimmed_and_never_beats_the_environment`
   与 `a_rate_limited_answer_points_at_the_token_file` 都用本地 TCP 假服务器覆盖，

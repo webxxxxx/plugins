@@ -383,4 +383,50 @@ if (!/rootChoice\.delete\(job\.name\)/.test(handoff)) {
   console.log('FAIL the picked root must be forgotten when the attempt ends');
 }
 
+// #21: the failure text must be the plugin's own, and a failure the host
+// contradicts is the success it is.
+{
+  const problems = [];
+  if (!/if \(prepared\.isError\) throw new Error\(prepared\.text/.test(handoff)) {
+    problems.push("the plugin's own reason must be thrown, not swallowed by the blob check");
+  }
+  if (!/没有返回安装包 blob；插件说/.test(handoff)) {
+    problems.push('the missing-blob error must carry what the plugin said');
+  }
+  const catchAt = handoff.indexOf("showNotice('安装失败：'");
+  const askAt = handoff.indexOf('await alreadyInstalled(job)');
+  if (catchAt < 0 || askAt < 0 || askAt > catchAt) {
+    problems.push('the host must be asked before a failure is reported');
+  }
+  if (!/if \(isSelf && posted\)/.test(handoff) || !/await restartSelf\(landed\)/.test(handoff)) {
+    problems.push('a self-upgrade that already landed must hand over to the new process');
+  }
+
+  const helper = extract('  async function alreadyInstalled', '  // Use the same install API');
+  const alreadyInstalled = new Function('return ' + helper.replace(/^  /gm, ''))();
+  const answers = [
+    [{ id: 'hysteria', version: '1.1.0', state: 'running' }, '1.1.0', true],
+    [{ id: 'hysteria', version: '1.0.0', state: 'running' }, '1.1.0', false],
+    [{ id: 'meow', version: '1.1.0', state: 'running' }, '1.1.0', false],
+  ];
+  for (const [service, version, want] of answers) {
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ services: [service] }) });
+    const got = await alreadyInstalled({ name: 'hysteria', version });
+    if (Boolean(got) !== want) {
+      problems.push('alreadyInstalled(' + version + ' against ' + service.id + '@' + service.version + ') = ' + JSON.stringify(got));
+    }
+  }
+  globalThis.fetch = async () => ({ ok: false, status: 500 });
+  if ((await alreadyInstalled({ name: 'hysteria', version: '1.1.0' })) !== null) {
+    problems.push('an unusable answer must not be read as installed');
+  }
+
+  if (problems.length === 0) {
+    console.log('ok   a landed install is not reported as a failure');
+  } else {
+    failed += 1;
+    for (const problem of problems) console.log('FAIL blob error: ' + problem);
+  }
+}
+
 process.exit(failed ? 1 : 0);
