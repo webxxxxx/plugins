@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "sshd",
   "name": "SSH 与 SFTP 服务",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "desc": "dropbear + sftp-server：SSH 与 SFTP 服务",
   "protocol": 1,
   "interpreter": {
