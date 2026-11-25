@@ -814,6 +814,9 @@
       // upload itself needs.
       const plan = await diskPlan(job.name, Number(job.total || 0));
       if (plan.cancelled) {
+        // Nothing will consume this blob now: release the host's copy instead
+        // of leaving it for temp_retention_secs.
+        await releaseBlob(blobId);
         updateJob(Object.assign({}, job, { phase: 'ready', message: '已取消安装' }));
         await call('install_result', { ok: false, message: '已取消安装' });
         showNotice('已取消安装 ' + job.name, 'warn');
