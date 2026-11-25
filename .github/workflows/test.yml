@@ -49,6 +49,12 @@ jobs:
         working-directory: samples/hello-rust
         run: cargo test --locked
 
+      # The plugin-store page's space pre-check lives in the page source; this
+      # extracts the real function and runs it with a stubbed host, so the
+      # "can this upgrade fit" decision is covered without a browser.
+      - name: plugin-store page checks
+        run: node plugins/plugin-store/tests/disk-plan.mjs
+
       - name: Build plugin-tools
         run: cargo build --locked --manifest-path tools/cli/Cargo.toml
 

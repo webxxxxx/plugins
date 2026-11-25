@@ -39,12 +39,15 @@ globalThis.fetch = async (url) => ({
   },
 });
 
+// `fmtBytes` is inlined as source, not passed as a value: `diskPlan` calls it
+// directly, and passing the text would make every refusal path throw
+// "fmtBytes is not a function" — which a swallow-all catch used to disguise as
+// "too small".
 const factory = new Function(
-  'fmtBytes',
   'askToUninstall',
-  diskPlanSource + '\nreturn diskPlan;',
+  fmtBytes[0].replace(/^  /gm, '') + '\n' + diskPlanSource + '\nreturn diskPlan;',
 );
-const diskPlan = factory(fmtBytes[0].replace(/^  /gm, ''), async (id, size, free) => {
+const diskPlan = factory(async (id, size, free) => {
   asked.push({ id, size, free });
   return { proceed: true, uninstall: id };
 });
@@ -77,11 +80,31 @@ for (const [name, facts, want] of cases) {
   try {
     const plan = await diskPlan('hysteria', size);
     got = plan.uninstall ? 'ask' : 'proceed';
-  } catch (_) {
+  } catch (error) {
+    // Only the page's own refusal may be swallowed here. Any other throw is a
+    // bug in the page and must fail the run, not masquerade as "too small".
+    if (!String(error && error.message).includes('空间不够')) {
+      throw new Error(name + ': unexpected failure: ' + (error && error.message ? error.message : error));
+    }
     got = 'too-small';
   }
-  const ok = got === want;
-  if (!ok) failed += 1;
-  console.log((ok ? 'ok   ' : 'FAIL ') + name + ': wanted ' + want + ', got ' + got);
+  let ok = got === want;
+  if (!ok) {
+    failed += 1;
+    console.log('FAIL ' + name + ': wanted ' + want + ', got ' + got);
+  }
+  // The dialog is asked for exactly once, and only when the room is short.
+  const askedWant = want === 'ask' ? 1 : 0;
+  if (asked.length !== askedWant) {
+    failed += 1;
+    ok = false;
+    console.log('FAIL ' + name + ': dialog asked ' + asked.length + ' time(s), wanted ' + askedWant);
+  }
+  if (want === 'ask' && (asked[0].id !== 'hysteria' || asked[0].size !== size)) {
+    failed += 1;
+    ok = false;
+    console.log('FAIL ' + name + ': dialog named ' + JSON.stringify(asked[0]));
+  }
+  if (ok) console.log('ok   ' + name + ': ' + want);
 }
 process.exit(failed ? 1 : 0);
