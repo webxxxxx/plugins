@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "plugin-store",
   "name": "插件商店",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "desc": "浏览、搜索并安装插件",
   "protocol": 1,
   "exec": {
