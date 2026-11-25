@@ -39,10 +39,17 @@ port = 2222
 
 ## SFTP
 
-dropbear 的 sftp 子系统路径优先读环境变量 `SVCD_SFTP_SERVER`；
-`sshd.sh start` 把它设成包内的 `payload/bin/sftp-server` 后再 `exec` dropbear。
-这样不写死安装路径、不要求 root 写 `/usr/libexec`，user mode 下也能用 SFTP。
-环境变量缺失时才回退到 dropbear 编译时的默认路径。
+两条路，指向同一个二进制：
+
+- `sshd.sh start` 把 `SVCD_SFTP_SERVER` 设成包内的 `payload/bin/sftp-server`，dropbear
+  优先读这个环境变量；
+- 同时把 `/etc/sshd/sftp-server` 这条软链指过去——它就是 dropbear 编译时的默认路径
+  （`build.sh` 用 dropbear 的 `localoptions.h` 把 `SFTPSERVER_PATH` 钉在这个值上）。
+  选 `/etc` 下是因为有的路由器只有 `/etc` 可写，`/usr/libexec` 根本不存在。
+
+`/etc` 不可写（只读根、非 root 安装）时，建软链只告警、start 不失败，环境变量那条路
+还在。`sftp-server` 是以登录用户身份执行的，所以 `sshd.sh` 顺手把它的权限放开到 0755，
+免得安装包里只剩 root 能读。
 
 ## 构建
 

@@ -16,6 +16,10 @@ DATA="$PLUGIN_ROOT/data"
 
 MULTI="$HERE/sshd"
 SFTP_BIN="$HERE/sftp-server"
+# dropbear 编译时的 sftp 子系统默认路径（build.sh 里的 localoptions.h）就是这条，
+# 启动时把它指到包里真正的 sftp-server。放在 /etc 下是因为有的路由器只有 /etc 可写，
+# /usr/libexec 根本不存在；两端用同一个路径，谁也不会找不到。
+SFTP_LINK=/etc/sshd/sftp-server
 
 PORT=2222
 CONFIG="$PLUGIN_ROOT/config"
@@ -49,6 +53,19 @@ link_applets() {
     ln -sf "$MULTI" "$DATA/dropbearkey" 2>/dev/null || return 1
 }
 
+# sftp 子系统：把编译时那条路径指到包里的 sftp-server。sftp-server 要以登录用户身份
+# 执行，所以顺便把权限放开到 0755（安装包里的可执行位可能只有 root 能读）。
+# /etc 不可写（只读根、非 root）时只告警：下面还会导出 SVCD_SFTP_SERVER，
+# dropbear 优先读它，功能不受影响。
+ensure_sftp_link() {
+    chmod 755 "$SFTP_BIN" 2>/dev/null || true
+    mkdir -p "${SFTP_LINK%/*}" 2>/dev/null || true
+    ln -sf "$SFTP_BIN" "$SFTP_LINK" 2>/dev/null || true
+    [ -x "$SFTP_LINK" ] && return 0
+    echo "sshd: $SFTP_LINK 指不过去（/etc 可写吗？），改用 SVCD_SFTP_SERVER" >&2
+    return 0
+}
+
 running() {
     [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
 }
@@ -57,6 +74,7 @@ do_start() {
     migrate_legacy
     link_applets || fail "不能创建 dropbear/dropbearkey 符号链接"
     [ -x "$SFTP_BIN" ] || fail "缺少 $SFTP_BIN"
+    ensure_sftp_link
     if running; then
         echo "already running (pid $(cat "$PIDFILE"), port $PORT)"
         # lifecycle.start 是宿主管理的前台进程；已经有人占着端口时不要假装成功。
