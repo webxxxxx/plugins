@@ -7,15 +7,29 @@ set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PLUGIN_ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
-BASE=${SVCD_DATA_DIR:-$PLUGIN_ROOT/.data}
-DATA="$BASE/hysteria"
+# 插件的数据只能落在插件目录里：<插件目录>/data。宿主注入的 SVCD_DATA_DIR 是守护
+# 进程的数据根（所有插件共用），证书、私钥、密码放进去就是写到了插件目录外面；
+# 升级时宿主保留 data/，证书和密码不会重生成。
+DATA="$PLUGIN_ROOT/data"
 PIDFILE="$DATA/hysteria.pid"
 CONFIG_DST="$DATA/config.json"
 CERT="$DATA/cert.pem"
 KEY="$DATA/key.pem"
 PASSWORD_FILE="$DATA/password"
 
-mkdir -p "$DATA" 2>/dev/null || true
+# 1.0 把数据放在插件目录之外（$SVCD_DATA_DIR/hysteria，手跑时是 <插件目录>/.data/hysteria）。
+# 第一次 start 搬进来：证书和密码跟着走，客户端不用重新配。
+migrate_legacy() {
+    [ -d "$DATA" ] && return 0
+    for old in "${SVCD_DATA_DIR:+$SVCD_DATA_DIR/hysteria}" "$PLUGIN_ROOT/.data/hysteria"; do
+        [ -n "$old" ] && [ -d "$old" ] || continue
+        if mv "$old" "$DATA" 2>/dev/null; then
+            echo "hysteria: 旧数据 $old 已搬到 $DATA" >&2
+        fi
+        return 0
+    done
+    return 0
+}
 
 find_config() {
     for candidate in "${SVCD_CONFIG:-}" "$PLUGIN_ROOT/config" "$PLUGIN_ROOT/package/config/config"; do
@@ -50,6 +64,7 @@ ensure_cert() {
 }
 
 prepare_config() {
+    mkdir -p "$DATA" 2>/dev/null || { echo "hysteria: 建不了数据目录 $DATA" >&2; return 1; }
     src=$(find_config) || { echo 'hysteria: config.json missing' >&2; return 1; }
     # 只有模板里的占位符才替换；用户自己写死证书路径/密码时原样保留。
     secret=$(password) || return 1
@@ -66,6 +81,7 @@ running() {
 }
 
 do_start() {
+    migrate_legacy
     cfg=$(prepare_config) || return 1
     if running; then
         echo "already running (pid $(cat "$PIDFILE"), port 8443)" >&2

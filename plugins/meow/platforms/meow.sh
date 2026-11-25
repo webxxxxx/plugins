@@ -7,6 +7,8 @@
 #                       （mixed-port / tun / dns / tproxy-port），其余原样保留。
 #                       第一次安装从包里的 payload/config.yaml 生成。
 #   <插件目录>/state    我们自己的：只缓存代理类型（proxy-mode），页面上的选择器写它。
+#   <插件目录>/data     运行数据：meow 的 geo 库、pid、`-d` 指过来的缓存。
+#                       宿主升级时保留它；升级前的老位置在 $SVCD_DATA_DIR/meow，启动时搬进来。
 #
 # 运行形态由 state 里的 proxy-mode 决定（缺省 pc），受管键按形态自动写进 meow 的 config：
 #   off    不接管流量：只开 mixed-port 当普通 HTTP/SOCKS 代理，tproxy / tun 都不开。
@@ -17,7 +19,7 @@
 #          页面上的「tproxy」就是它。
 #
 # 宿主把 lifecycle.start 当成常驻前台进程：start 一直不返回，直到 meow 退出；
-# stop/status 执行后退出。路径全部从脚本位置推导，数据目录用 SVCD_DATA_DIR。
+# stop/status 执行后退出。路径全部从脚本位置推导，数据落在 <插件目录>/data。
 # 清单里 exec.ready 是 notify：宿主先发一条 svcd.ping，收到回复才算启动成功，之后
 # 这条路就是能力通道（ready: exec 的 stdout 只进日志，页面调不到任何能力）。
 #
@@ -29,8 +31,10 @@ set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)          # payload/：yacd、cn_domains 在这一层
 PLUGIN_ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
-BASE=${SVCD_DATA_DIR:-$PLUGIN_ROOT/.data}
-DATA="$BASE/meow"
+# 插件的数据只能落在插件目录里：<插件目录>/data。宿主注入的 SVCD_DATA_DIR 是守护
+# 进程的数据根（所有插件共用），meow 的 geo 库、pid、日志放进去就是写到了插件目录
+# 外面；升级时宿主保留 data/，geo 库和节点选择不会丢。
+DATA="$PLUGIN_ROOT/data"
 PIDFILE="$DATA/meow.pid"
 CONFIG="$PLUGIN_ROOT/config"                     # meow 的配置：meow 就是用它启动的（宿主的 editconfig 改它）
 LEGACY_CONFIG="$PLUGIN_ROOT/meow.yaml"           # 1.2/1.3 的布局：meow 的配置曾放这里
@@ -39,6 +43,21 @@ STATE="$PLUGIN_ROOT/state"                       # 我们自己的：只缓存�
 FW="$HERE/meow-fw.sh"
 SDK="$ROOT/lib/svcd-plugin.sh"                   # 宿主 SDK：通道循环与能力分发
 
+# 1.2/1.3 把数据放在插件目录之外（$SVCD_DATA_DIR/meow，手跑时是 <插件目录>/.data/meow）。
+# 第一次启动搬进来：geo 库跟着走，不用重新下。
+migrate_legacy() {
+    [ -d "$DATA" ] && return 0
+    for old in "${SVCD_DATA_DIR:+$SVCD_DATA_DIR/meow}" "$PLUGIN_ROOT/.data/meow"; do
+        [ -n "$old" ] && [ -d "$old" ] || continue
+        if mv "$old" "$DATA" 2>/dev/null; then
+            echo "meow: 旧数据 $old 已搬到 $DATA" >&2
+        fi
+        return 0
+    done
+    return 0
+}
+
+migrate_legacy
 mkdir -p "$DATA" 2>/dev/null || true
 
 # 能力通道（页面 A 的代理类型选择器）用 SDK；sync 会把 sdk/shell 的副本刷到 payload/lib。
@@ -520,7 +539,9 @@ start_child() {
     fi
     echo "meow starting mode=$_mode (config=$CONFIG)" >&2
     # stdin 接 /dev/null：宿主的通道口只留在看护进程里，meow 不该继承它。
-    "$HERE/meow" -d "$ROOT" -f "$CONFIG" --ext-ui "$ROOT/yacd" >&2 < /dev/null &
+    # -d 是 meow 的家目录：缓存、规则提供者的缓存都落在这里，所以指到插件自己的
+    # data/，不要指 payload（那是版本目录，升级时会被换掉）。
+    "$HERE/meow" -d "$DATA" -f "$CONFIG" --ext-ui "$ROOT/yacd" >&2 < /dev/null &
     mon_pid=$!
     echo "$mon_pid" > "$PIDFILE"
     [ "$_mode" = router ] || return 0
@@ -581,7 +602,7 @@ supervise() {
         if [ "$MODE" = router ]; then
             load_router_params
             validate_router || return 1
-        elif ! "$HERE/meow" -d "$ROOT" -f "$CONFIG" -t >/dev/null 2>&1 < /dev/null; then
+        elif ! "$HERE/meow" -d "$DATA" -f "$CONFIG" -t >/dev/null 2>&1 < /dev/null; then
             # pc/off 形态先做一次配置校验，失败就别起一个秒退进程。
             echo 'meow: config validation failed (run meow -t to see details)' >&2
             return 1

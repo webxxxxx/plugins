@@ -257,6 +257,8 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **stdout 只写协议。** 日志、调试输出、`print` / `console.log` 一律去 stderr——它是宿主的日志通道，会写进 `<logs>/<id>.log` 并轮转。Rust 用 `log_info!`，shell 用 `echo … >&2`。
 
+**数据只写插件目录。** 安装目录是 `<data>/plugins/<id>/`，插件自己的东西一律放它里面的 `data/`：宿主升级、卸载（不带 `--purge`）都保留 `data/` 和 `config`，主机密钥、证书、geo 库因此不会丢。`SVCD_DATA_DIR` 是**守护进程**的数据根——所有插件共用同一份，往里写就是把数据写到了插件目录外面；路径从脚本 / 可执行文件自己的位置推（`$0` 往上三层就是插件目录），别信环境变量。宿主的临时根 `SVCD_TEMP_DIR` 只用来放 blob（`incoming/`），日志交给宿主写。
+
 **UI 放 `package/payload/web/`。** 宿主把整棵树反代到 `/plugin-ui/<id>/`，页面用**相对路径** `fetch('rpc')`；插件进程不自起任何 HTTP 或 WebSocket 服务。
 
 **源码留在 `package/` 外面。** `package/` 是打包根，打包器不过滤任何文件：放进去的 `src/`、`Cargo.toml`、`.gitkeep` 都会进 `.spk`。构建产物由 `build.json` 的 `artifact` 复制进 `payload/bin/`；同一目录里上一个平台留下的同名产物（`demo` ↔ `demo.exe`）会在构建前被清掉，否则两种架构会一起进包。

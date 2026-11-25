@@ -7,6 +7,8 @@ powershell；platforms/unix.json 给 unix 三元组，指向同目录的 meow.sh
 
 两个文件，各管各的：
   $PLUGIN_ROOT\state    我们自己的：只缓存代理类型（页面上的 off / tun / tproxy）。
+  $PLUGIN_ROOT\data     运行数据：meow 的 geo 库、pid、-d 指过来的缓存。宿主升级时保留；
+                        升级前的老位置在 $env:SVCD_DATA_DIR\meow，启动时搬进来。
   $PLUGIN_ROOT\config    meow 自己的配置（订阅、规则、代理组），meow 用它启动。启动时只改受管键
                           （mixed-port / tun / dns），其余原样保留。
 
@@ -36,8 +38,10 @@ $ErrorActionPreference = 'Stop'
 $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path          # payload\bin
 $ROOT = Split-Path -Parent $HERE                                 # payload\
 $PLUGIN_ROOT = Split-Path -Parent (Split-Path -Parent $ROOT)     # <插件目录>\
-if ($env:SVCD_DATA_DIR) { $BASE = $env:SVCD_DATA_DIR } else { $BASE = Join-Path $PLUGIN_ROOT '.data' }
-$DATA = Join-Path $BASE 'meow'
+# 插件的数据只能落在插件目录里：<插件目录>\data。宿主注入的 SVCD_DATA_DIR 是守护进程
+# 的数据根（所有插件共用），meow 的 geo 库、pid、日志放进去就是写到了插件目录外面；
+# 升级时宿主保留 data\，geo 库和节点选择不会丢。
+$DATA = Join-Path $PLUGIN_ROOT 'data'
 $PIDFILE = Join-Path $DATA 'meow.pid'
 $CONFIG = Join-Path $PLUGIN_ROOT 'config'            # meow 的配置：meow 用它启动，宿主的 editconfig 改它
 $LEGACY_CONFIG = Join-Path $PLUGIN_ROOT 'meow.yaml'  # 1.2/1.3 的布局：meow 的配置曾放这里
@@ -47,7 +51,24 @@ $MEOW = Join-Path $HERE 'meow.exe'
 if (-not (Test-Path -LiteralPath $MEOW)) { $MEOW = Join-Path $HERE 'meow' }
 $SDK = Join-Path (Join-Path $ROOT 'lib') 'SvcdPlugin.ps1'
 
-New-Item -ItemType Directory -Force -Path $DATA | Out-Null
+# 1.2/1.3 把数据放在插件目录之外（$SVCD_DATA_DIR\meow，手跑时是 <插件目录>\.data\meow）。
+# 第一次启动搬进来：geo 库跟着走，不用重新下。
+function Move-LegacyData {
+    if (Test-Path -LiteralPath $DATA) { return }
+    $old = @()
+    if ($env:SVCD_DATA_DIR) { $old += (Join-Path $env:SVCD_DATA_DIR 'meow') }
+    $old += (Join-Path $PLUGIN_ROOT '.data\meow')
+    foreach ($path in $old) {
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        try {
+            Move-Item -LiteralPath $path -Destination $DATA
+            Write-Note "旧数据 $path 已搬到 $DATA"
+        } catch {
+            Write-Note "旧数据 $path 搬不动（$($_.Exception.Message)），就地不动"
+        }
+        return
+    }
+}
 
 # 通道能力（页面 A 的代理类型选择器）用 SDK；sync 会把 sdk/powershell 的副本刷到 payload/lib。
 if (Test-Path -LiteralPath $SDK) { . $SDK }
@@ -55,6 +76,10 @@ if (Test-Path -LiteralPath $SDK) { . $SDK }
 function Write-Note([string]$Text) {
     [Console]::Error.WriteLine("meow: $Text")
 }
+
+# 迁移要打日志，所以放在 Write-Note 之后；之后所有路径都指进 <插件目录>\data。
+Move-LegacyData
+New-Item -ItemType Directory -Force -Path $DATA | Out-Null
 
 function Write-Utf8([string]$Path, [string]$Text) {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -427,7 +452,7 @@ function Start-MeowChild {
         Write-Note '需要管理员权限：TUN/Wintun 适配器要提权，否则 meow 会起不来'
     }
 
-    $validate = & $MEOW -d $ROOT -f $CONFIG -t 2>&1
+    $validate = & $MEOW -d $DATA -f $CONFIG -t 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Note '配置校验失败（meow -t）：'
         foreach ($line in $validate) { [Console]::Error.WriteLine("  $line") }
@@ -435,9 +460,10 @@ function Start-MeowChild {
     }
 
     $mode = Get-Mode
-    $meowArgs = @('-d', $ROOT, '-f', $CONFIG, '--ext-ui', (Join-Path $ROOT 'yacd'))
+    # -d 是 meow 的家目录：缓存落在这里，指到插件自己的 data\，不要指 payload（版本目录）。
+    $meowArgs = @('-d', $DATA, '-f', $CONFIG, '--ext-ui', (Join-Path $ROOT 'yacd'))
     $quoted = ($meowArgs | ForEach-Object { Quote-Arg $_ }) -join ' '
-    Write-Note "meow starting mode=$mode (data=$ROOT, config=$CONFIG)"
+    Write-Note "meow starting mode=$mode (data=$DATA, config=$CONFIG)"
     # meow 的日志默认走 stdout，而 stdout 是我们的协议口：不能让它混进去，
     # 也不能让它继承通道的 stdin（那会跟宿主抢帧）。日志落到数据目录里的一份文件。
     $meowLog = Join-Path $DATA 'meow.out.log'
@@ -445,7 +471,7 @@ function Start-MeowChild {
     $psi.FileName = $MEOW
     $psi.Arguments = $quoted
     $psi.UseShellExecute = $false
-    $psi.WorkingDirectory = $ROOT
+    $psi.WorkingDirectory = $DATA
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardInput = $true
     $proc = [System.Diagnostics.Process]::Start($psi)

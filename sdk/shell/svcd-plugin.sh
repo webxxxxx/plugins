@@ -158,7 +158,11 @@ svcd_plugin_serve() {
             SVCD_BLOB_PATH=""
             SVCD_BLOB_NAME=""
             SVCD_BLOB_MIME=""
-            _svcd_out_file="${TMPDIR:-/tmp}/svcd-reply.$$"
+            # The host's transient root when there is one: a bare /tmp would be a
+            # file outside both the plugin directory and the host's own temp
+            # tree, and a shared /tmp with a predictable name is somebody else's
+            # symlink to play with.
+            _svcd_out_file="${SVCD_TEMP_DIR:-${TMPDIR:-/tmp}}/svcd-reply.$$"
             "$_svcd_handler" "$_svcd_name" "$_svcd_args" > "$_svcd_out_file" 2>&3
             _svcd_code=$?
             _svcd_out=$(cat "$_svcd_out_file")
