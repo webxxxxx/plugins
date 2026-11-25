@@ -23,9 +23,10 @@ vendor/                   dropbear / openssh 源码
 准备好运行目录、主机密钥和 SFTP 软链，然后 `exec` 到 `dropbear -F`——宿主看到的始终是
 dropbear 本身（信号与进程组都归它）。
 
-`stop` 是**收尾**：宿主先终止进程（SIGTERM → 窗口 → SIGKILL），`stop` 之后才跑，用
-pidfile 清掉残留并确认端口已经释放；它不负责杀进程。`status` 输出一行 JSON 供
-`svc status` 的 probe 显示。
+`stop` 是**收尾**：宿主先终止进程（Unix 进程组 SIGTERM → 10 秒 → SIGKILL），`stop`
+之后才跑，删掉强杀留下的 pidfile；端口还听着只报一声，不发信号——强杀或断电留下的
+pid 可能已经被系统复用给别的进程，`status` 也不会把它当成自己。它不负责杀进程。
+`status` 输出一行 JSON 供 `svc status` 的 probe 显示。
 
 `exec.ready` 写 `exec`：这个插件没有协议通道，宿主启动后立即视为 ready。
 

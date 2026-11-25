@@ -18,8 +18,9 @@
 #          上开 tproxy 入口（需要 root + iptables；没有 nf_tables 的内核也能用）。
 #          页面上的「tproxy」就是它。
 #
-# 宿主把 lifecycle.start 当成常驻前台进程：start 一直不返回，直到 meow 退出；
-# stop/status 执行后退出。路径全部从脚本位置推导，数据落在 <插件目录>/data。
+# 宿主监督的是 exec（exec.args = start）：start 一直不返回，直到看护进程退出；
+# stop 在进程退出之后跑，只做收尾（撤规则、删 pidfile）；status 按需探测。
+# 路径全部从脚本位置推导，数据落在 <插件目录>/data。
 # 清单里 exec.ready 是 notify：宿主先发一条 svcd.ping，收到回复才算启动成功，之后
 # 这条路就是能力通道（ready: exec 的 stdout 只进日志，页面调不到任何能力）。
 #
@@ -522,8 +523,24 @@ fw_clear() {
     return 0
 }
 
+# pidfile 里的 pid 是不是我们的 meow。宿主负责终止：强杀（SIGKILL）或断电之后 pidfile
+# 会留下来，而那个 pid 很可能已经被系统复用给别的进程——只看 kill -0 会把它当成自己
+# （status 谎报 running、切代理类型时还会杀错人）。
 running() {
-    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+    _pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    # 有 /proc 就按命令行认（NUL 分隔，grep -F 直接当字节串搜）。
+    if [ -r "/proc/$_pid/cmdline" ]; then
+        grep -qF -- "$HERE/meow" "/proc/$_pid/cmdline" 2>/dev/null
+        return
+    fi
+    # macOS 没有 /proc：退回 ps。ps 也没有就只能信 kill -0，和以前一样。
+    _argv=$(ps -o args= -p "$_pid" 2>/dev/null) || return 0
+    case "$_argv" in
+    *"$HERE/meow"*) return 0 ;;
+    esac
+    return 1
 }
 
 # /proc/net/tcp 里本地端口是十六进制，状态 0A = LISTEN（busybox 不一定有 netstat）。
@@ -765,8 +782,10 @@ do_start() {
     exit "$rc"
 }
 
+# 宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL；Windows 直接强杀整棵树），stop
+# 跑到这里时看护进程和 meow 都已经不在了：它只收尾，不杀进程。宿主强杀或断电之后
+# pidfile 会留下来，而那个 pid 可能已经被复用给别的进程，所以只删不按它发信号。
 do_stop() {
-    CFG_MODE=$(mode_of 2>/dev/null) || CFG_MODE=pc
     # 先撤规则：撤完 LAN 立刻回到直连，不会打到一个没人监听的端口。
     # 不看 proxy-mode：从 router 切回 pc 之后也要能把旧规则清掉。
     if [ -f "$FW" ] && [ "$(firewall_state 2>/dev/null)" = up ]; then
@@ -774,20 +793,10 @@ do_stop() {
         sh "$FW" down --lan "$LAN_IF" >/dev/null 2>&1
     fi
     if running; then
-        pid=$(cat "$PIDFILE")
-        kill "$pid" 2>/dev/null || true
-        n=0
-        while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 5 ]; do
-            sleep 1
-            n=$((n + 1))
-        done
-        kill -9 "$pid" 2>/dev/null || true
-        rm -f "$PIDFILE"
-        echo "stopped (pid $pid)"
-    else
-        rm -f "$PIDFILE"
-        echo "not running"
+        echo "meow: pid $(cat "$PIDFILE") 还在跑（宿主应该已经结束了它）" >&2
     fi
+    rm -f "$PIDFILE"
+    echo "stopped"
 }
 
 do_status() {

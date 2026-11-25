@@ -277,6 +277,8 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **插件是常驻进程。** 没有 oneshot 语义；要"跑一次"，写成常驻 + 一个触发能力，或用 core 服务。
 
+**生命周期钩子只在需要准备或收尾时用。** 被监督的永远是 `exec`：入口要带参数就写 `exec.args`（比如 `["start"]`），脚本在前台准备好资源后 `exec` 真正的进程。`lifecycle.start` 是**前置准备**，每次 spawn `exec` 之前跑一次、必须退出，非零或超时即本次启动失败；`lifecycle.stop` 在进程消失**之后**跑，只做收尾（撤全局规则、清 pidfile），终止权归宿主（Unix 进程组 SIGTERM → 10 秒 → SIGKILL，Windows 直接强杀）——不要指望在 `stop` 里杀进程或等它退出：强杀、断电留下的 pidfile 里那个 pid 可能已经被系统复用，按它发信号就是误伤。
+
 **依赖保持最小。** Rust 只用 `serde` / `serde_json`；shell 只用 POSIX。SDK 不提供 HTTP 客户端、数据库或调度器——需要就自己加，但先确认体积可接受。
 
 **raw 只在协议 3 里。** `protocol: 1` 的插件没有 `/raw`（宿主回 `raw_unavailable`）；要同时有

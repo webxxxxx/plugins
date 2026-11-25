@@ -115,7 +115,8 @@ package/
 形态还要等 tproxy 端口监听、挂好 iptables 规则。启动前会跑 `meow -t` 校验配置，失败就返回
 非零而不是秒退。孩子自己退出时看护循环跟着退出（宿主据此重启或报错）；页面切了代理类型
 就让孩子退出，看护循环读到新的 `proxy-mode` 后按新形态重启。`stop` 在进程退出之后跑：
-先撤 TProxy 规则，再按 pidfile 清残留——它不负责杀进程；`status` 输出一行 JSON。
+宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL；Windows 直接强杀整棵树），`stop`
+只收尾——先撤 TProxy 规则，再删掉强杀留下的 pidfile，它不杀进程；`status` 输出一行 JSON。
 
 ## 配置
 

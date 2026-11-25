@@ -143,6 +143,13 @@ jobs:
         shell: bash
         run: sh tools/meow-config-test.sh
 
+      # 生命周期脚本的收尾契约（svcd #323）：stop 在进程消失之后才跑，只收尾、不杀进程；
+      # 强杀/断电留下的 pidfile 里那个 pid 可能已经被复用，status 不能把它当成自己。
+      - name: 生命周期脚本（收尾）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sh tools/lifecycle-test.sh
+
       - name: meow 配置层（PowerShell）
         if: runner.os == 'Windows'
         shell: pwsh

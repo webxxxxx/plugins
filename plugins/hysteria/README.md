@@ -22,8 +22,8 @@ package/
 ## 运行方式
 
 宿主监督的是 `exec`（`exec.args` 是 `start`），`hysteria.sh start` 在前台准备好
-配置后直接 `exec mini-sb-agent -config …`；`stop` 在进程退出之后跑，只做收尾。
-启动前会：
+配置后直接 `exec mini-sb-agent -config …`；`stop` 在进程退出之后跑，只做收尾（删掉
+强杀留下的 pidfile，不杀进程；那个 pid 可能已经被复用）。启动前会：
 
 1. 从活动配置（`plugin editconfig hysteria`）或 `package/config/config` 取模板；
 2. 首次启动用包里自带的 `hysteria-certgen` 生成自签 TLS 证书到

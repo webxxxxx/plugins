@@ -108,8 +108,24 @@ prepare_config() {
     printf '%s' "$CONFIG_DST"
 }
 
+# pidfile 里的 pid 是不是我们的内核。宿主负责终止：强杀（SIGKILL）或断电之后 pidfile
+# 会留下来，而那个 pid 很可能已经被系统复用给别的进程——只看 kill -0 会把它当成自己
+# （status 谎报 running、start 说 already running）。
 running() {
-    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+    _pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    # 有 /proc 就按命令行认（NUL 分隔，grep -F 直接当字节串搜）。
+    if [ -r "/proc/$_pid/cmdline" ]; then
+        grep -qF -- "$HERE/mini-sb-agent" "/proc/$_pid/cmdline" 2>/dev/null
+        return
+    fi
+    # macOS 没有 /proc：退回 ps。ps 也没有就只能信 kill -0，和以前一样。
+    _argv=$(ps -o args= -p "$_pid" 2>/dev/null) || return 0
+    case "$_argv" in
+    *"$HERE/mini-sb-agent"*) return 0 ;;
+    esac
+    return 1
 }
 
 do_start() {
@@ -124,22 +140,12 @@ do_start() {
     exec "$HERE/mini-sb-agent" -config "$cfg"
 }
 
+# 宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL），stop 跑到这里时内核已经不
+# 在了：它只收尾，不杀进程。pidfile 可能是强杀留下的，那个 pid 甚至已经被复用给别的
+# 进程，所以只删不按它发信号。
 do_stop() {
-    if running; then
-        pid=$(cat "$PIDFILE")
-        kill "$pid" 2>/dev/null || true
-        n=0
-        while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 5 ]; do
-            n=$((n + 1))
-            sleep 1
-        done
-        kill -9 "$pid" 2>/dev/null || true
-        rm -f "$PIDFILE"
-        echo "stopped (pid $pid)"
-    else
-        rm -f "$PIDFILE"
-        echo "not running"
-    fi
+    rm -f "$PIDFILE"
+    echo "stopped"
 }
 
 do_status() {

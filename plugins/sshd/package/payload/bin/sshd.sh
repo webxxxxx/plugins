@@ -66,8 +66,30 @@ ensure_sftp_link() {
     return 0
 }
 
+# pidfile 里的 pid 是不是我们的 dropbear。宿主负责终止：强杀（SIGKILL）或断电之后
+# pidfile 会留下来，而那个 pid 很可能已经被系统复用给别的进程——只看 kill -0 会把它
+# 当成自己（status 谎报 running、start 说 already running）。
 running() {
-    [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null
+    _pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    # 有 /proc 就按命令行认（NUL 分隔，grep -F 直接当字节串搜）。
+    if [ -r "/proc/$_pid/cmdline" ]; then
+        grep -qF -- "$DATA/dropbear" "/proc/$_pid/cmdline" 2>/dev/null
+        return
+    fi
+    # macOS 没有 /proc：退回 ps。ps 也没有就只能信 kill -0，和以前一样。
+    _argv=$(ps -o args= -p "$_pid" 2>/dev/null) || return 0
+    case "$_argv" in
+    *"$DATA/dropbear"*) return 0 ;;
+    esac
+    return 1
+}
+
+# /proc/net/tcp 里本地端口是十六进制，状态 0A = LISTEN（busybox 不一定有 netstat）。
+port_listening() {
+    _hex=$(printf '%04X' "$1" 2>/dev/null) || return 1
+    grep -qE "^ *[0-9]+: [0-9A-F]+:$_hex [0-9A-F]+:[0-9A-F]+ 0A" /proc/net/tcp 2>/dev/null
 }
 
 do_start() {
@@ -77,7 +99,7 @@ do_start() {
     ensure_sftp_link
     if running; then
         echo "already running (pid $(cat "$PIDFILE"), port $PORT)"
-        # lifecycle.start 是宿主管理的前台进程；已经有人占着端口时不要假装成功。
+        # 宿主监督的就是这个脚本；已经有人占着端口时不要假装成功。
         return 1
     fi
     if [ ! -f "$KEY" ]; then
@@ -92,22 +114,15 @@ do_start() {
     exec "$DATA/dropbear" -F -p "$PORT" -r "$KEY" -P "$PIDFILE"
 }
 
+# 宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL），stop 跑到这里时 dropbear 已经
+# 不在了：它只收尾，不杀进程。pidfile 可能是强杀留下的，那个 pid 甚至已经被复用给别的
+# 进程，所以只删不按它发信号；端口还听着说明不是我们留的进程，报一声。
 do_stop() {
-    if running; then
-        pid=$(cat "$PIDFILE")
-        kill "$pid" 2>/dev/null || true
-        n=0
-        while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 5 ]; do
-            n=$((n + 1))
-            sleep 1
-        done
-        kill -9 "$pid" 2>/dev/null || true
-        rm -f "$PIDFILE"
-        echo "stopped (pid $pid)"
-    else
-        rm -f "$PIDFILE"
-        echo "not running"
+    rm -f "$PIDFILE"
+    if port_listening "$PORT"; then
+        echo "sshd: 端口 $PORT 还在监听，但不是这个插件留下的进程" >&2
     fi
+    echo "stopped (port $PORT)"
 }
 
 do_status() {

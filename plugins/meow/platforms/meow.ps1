@@ -378,8 +378,19 @@ function Get-RunningPid {
     if (-not $raw) { return 0 }
     $parsed = 0
     if (-not [int]::TryParse($raw.Trim(), [ref]$parsed)) { return 0 }
-    if (Get-Process -Id $parsed -ErrorAction SilentlyContinue) { return $parsed }
-    return 0
+    $proc = Get-Process -Id $parsed -ErrorAction SilentlyContinue
+    if (-not $proc) { return 0 }
+    # 宿主负责终止：Windows 直接强杀整棵进程树，pidfile 会留下来，而那个 pid 可能已经
+    # 被复用给别的进程。只看 Get-Process 会把别人的进程当成 meow（status 谎报 running、
+    # 切代理类型时还会杀错人）。自己的子进程一定能读到 Path，读不到就当作不是我们的。
+    $path = ''
+    try { $path = $proc.Path } catch { }
+    if ($path) {
+        if ($path -ne $MEOW) { return 0 }
+    } elseif ($proc.ProcessName -ne [System.IO.Path]::GetFileNameWithoutExtension($MEOW)) {
+        return 0
+    }
+    return $parsed
 }
 
 # 停掉 meow 时它是被强杀的，来不及撤 auto-route 装的路由；TUN 适配器是持久的，
@@ -604,13 +615,23 @@ function Invoke-Capability($Name, $Arguments) {
     return (Get-ModeJson)
 }
 
+# 收尾：进程已经不在时要做的事。强杀和断电都会留下这些东西（pidfile、auto-route 装的
+# 路由、被 meow 改成 loopback 的网卡 DNS），所以 stop 钩子和每次 start 之前都跑一遍。
+# 这里不发任何信号：宿主负责终止，pidfile 里的 pid 可能早就被复用了。
+function Stop-Cleanup {
+    Remove-Item -LiteralPath $PIDFILE -ErrorAction SilentlyContinue
+    # 不留半套路由：宁可直连，也别把整机流量导进死网卡。
+    Clear-TunRoutes
+    # 强杀时 meow 的 DnsGuard 来不及恢复，网卡 DNS 会停在 loopback，整机就没法解析域名了。
+    Restore-DnsState
+}
+
+# 结束孩子进程：只给「我们自己要重启它」的路径用（切代理类型、通道结束）。宿主停止
+# 插件时不走这里——它先杀完整棵树，然后 stop 钩子跑 Stop-Cleanup。
 function Stop-Meow {
     $procId = Get-RunningPid
     if (-not $procId) {
-        Remove-Item -LiteralPath $PIDFILE -ErrorAction SilentlyContinue
-        Clear-TunRoutes
-        # 进程已经没了，但上次强杀留下的 loopback DNS 可能还在：这里的 stop 也是修复入口。
-        Restore-DnsState
+        Stop-Cleanup
         Write-Output 'not running'
         return
     }
@@ -619,11 +640,7 @@ function Stop-Meow {
         if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { break }
         Start-Sleep -Milliseconds 300
     }
-    Remove-Item -LiteralPath $PIDFILE -ErrorAction SilentlyContinue
-    # 不留半套路由：宁可直连，也别把整机流量导进死网卡。
-    Clear-TunRoutes
-    # 强杀时 meow 的 DnsGuard 来不及恢复，网卡 DNS 会停在 loopback，整机就没法解析域名了。
-    Restore-DnsState
+    Stop-Cleanup
     Write-Output "stopped (pid $procId)"
 }
 
@@ -693,7 +710,10 @@ switch ($Action) {
         exit 0
     }
     'stop' {
-        Stop-Meow
+        # 宿主负责终止（Windows 直接强杀整棵树），到这里时看护进程和 meow 都已经不在：
+        # 只收尾，不杀进程。
+        Stop-Cleanup
+        Write-Output 'stopped'
         exit 0
     }
     'status' {

@@ -255,4 +255,21 @@ if ($calls -notmatch 'set:eth0=192\.168\.1\.1') { Fail "dns: 没按备份恢复�
 
 Write-Output 'meow dns guard (windows): ok'
 
+# ---- pidfile：宿主强杀之后 pidfile 会留下，pid 被复用时不能当成 meow；收尾不杀进程 ----
+$plugin = New-Fixture 'pidfile'
+$self = (Get-Process -Id $PID).Path
+$decoy = Start-Process -FilePath $self -ArgumentList '-NoProfile -Command "Start-Sleep -Seconds 60"' -PassThru
+Write-Text $PIDFILE ("{0}`n" -f $decoy.Id)
+$script:MEOW = Join-Path $ROOT 'bin/meow.exe'
+if ((Get-RunningPid) -ne 0) { Fail 'pidfile: 复用 pid 的无关进程被当成 meow 了' }
+$script:MEOW = $self
+if ((Get-RunningPid) -ne $decoy.Id) { Fail 'pidfile: 路径对上的进程反而认不出来' }
+$script:MEOW = Join-Path $ROOT 'bin/meow.exe'
+Stop-Cleanup
+if (Test-Path -LiteralPath $PIDFILE) { Fail 'pidfile: 收尾之后 pidfile 还在' }
+if (-not (Get-Process -Id $decoy.Id -ErrorAction SilentlyContinue)) { Fail 'pidfile: 收尾把无关进程杀了' }
+Stop-Process -Id $decoy.Id -Force -ErrorAction SilentlyContinue
+
+Write-Output 'meow pidfile/stop (windows): ok'
+
 Remove-Item -Recurse -Force $Work
