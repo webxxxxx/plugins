@@ -33,8 +33,10 @@ import os
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -417,6 +419,66 @@ def mime_type(key: str) -> str:
 # --- the transport --------------------------------------------------------
 
 
+# A call that never reached Kodo comes back as status -1 with the exception in
+# `info.error`: the SDK's own retrier gives up after walking its upload
+# endpoints, and the script used to die on the spot. One flaky TCP reset in the
+# middle of fourteen uploads was enough to abort a release after the history
+# moves were already done, leaving the mirror half-written until a human re-ran
+# the job. The failure is the network's, not the release's — retry it here.
+RETRY_ATTEMPTS = 5
+RETRY_DELAY = 2.0
+RETRY_MAX_DELAY = 30.0
+
+# Kodo's error table: these 5xx mean "the request is wrong", not "try again".
+# 612 (no such file) belongs here too — a move whose source is gone is a bad
+# plan, not a flake, and re-running it would hide that.
+NOT_WORTH_RETRYING = frozenset(
+    {501, 509, 573, 579, 608, 612, 614, 616, 618, 630, 631, 632, 640, 701}
+)
+
+
+def worth_retrying(info) -> bool:
+    """Whether a failed call could plausibly succeed if sent again."""
+    if info.ok():
+        return False
+    if info.status_code < 0:  # transport: reset, TLS, timeout, DNS
+        return True
+    if info.status_code == 429:  # rate limited
+        return True
+    return info.status_code >= 500 and info.status_code not in NOT_WORTH_RETRYING
+
+
+def describe(info) -> str:
+    """One line for a failed call. -1 carries the exception, not the body."""
+    detail = getattr(info, "error", None) or getattr(info, "text_body", None) or ""
+    req_id = getattr(info, "req_id", None)
+    line = f"HTTP {info.status_code}"
+    if detail:
+        line += f" {detail}"
+    if req_id:
+        line += f" (req {req_id})"
+    return line
+
+
+def with_retries(label: str, call: Callable[[], tuple]) -> object:
+    """Run `call`, which returns (result, info), retrying the retryable."""
+    delay = RETRY_DELAY
+    for attempt in range(1, RETRY_ATTEMPTS + 1):
+        result, info = call()
+        if info.ok():
+            return result
+        if attempt == RETRY_ATTEMPTS or not worth_retrying(info):
+            raise SystemExit(f"{label} failed: {describe(info)}")
+        print(
+            f"  {label}: {describe(info)}; retrying in {delay:.0f}s "
+            f"(attempt {attempt}/{RETRY_ATTEMPTS})",
+            file=sys.stderr,
+        )
+        time.sleep(delay)
+        delay = min(delay * 2, RETRY_MAX_DELAY)
+    raise AssertionError("unreachable")
+
+
 class Kodo:
     """The three Kodo calls this script needs, behind one lazy import."""
 
@@ -430,22 +492,31 @@ class Kodo:
         self.bucket = bucket
         self.manager = qiniu.BucketManager(self.auth)
 
+    def _page(self, marker: str | None) -> tuple[tuple[dict, bool], object]:
+        """One listing page as ((body, eof), info) — the shape with_retries wants."""
+        ret, eof, info = self.manager.list(
+            self.bucket, prefix="", marker=marker, limit=1000, delimiter="/"
+        )
+        return (ret, eof), info
+
     def list_root(self) -> list[dict]:
         items: list[dict] = []
         marker = None
         while True:
-            ret, eof, info = self.manager.list(self.bucket, prefix="", marker=marker, limit=1000, delimiter="/")
-            if not info.ok():
-                raise SystemExit(f"list failed: HTTP {info.status_code} {ret}")
+            ret, eof = with_retries("list the bucket", lambda marker=marker: self._page(marker))
             items.extend(ret.get("items") or [])
             marker = ret.get("marker")
             if eof or not marker:
                 return items
 
     def move(self, source: str, target: str) -> None:
-        ret, info = self.manager.move(self.bucket, source, self.bucket, target, force="true")
-        if not info.ok():
-            raise SystemExit(f"move {source} -> {target} failed: HTTP {info.status_code} {ret}")
+        # force=true makes a half-finished re-run land on the same key instead of
+        # 614: the history key is per release, so the file it spells is the one
+        # this release already placed there.
+        with_retries(
+            f"move {source} -> {target}",
+            lambda: self.manager.move(self.bucket, source, self.bucket, target, force="true"),
+        )
 
     def upload(self, path: Path, key: str) -> None:
         # `detectMime: -1` is the only value that keeps our Content-Type
@@ -454,9 +525,14 @@ class Kodo:
         # "application/x-tar" — wrong, and a hint to intermediaries that these
         # bytes are an archive to unpack.
         token = self.auth.upload_token(self.bucket, key, 3600, policy={"detectMime": -1})
-        ret, info = self.qiniu.put_file(token, key, str(path), mime_type=mime_type(key))
-        if not info.ok():
-            raise SystemExit(f"upload {key} failed: HTTP {info.status_code} {ret}")
+        # `put_file` is deprecated in 7.18 and warns on every call. v2 is the
+        # same form POST for files under the resumable threshold and the
+        # multipart path above it, so nothing about these small packages changes.
+        send = getattr(self.qiniu, "put_file_v2", self.qiniu.put_file)
+        with_retries(
+            f"upload {key}",
+            lambda: send(token, key, str(path), mime_type=mime_type(key)),
+        )
 
     def refresh(self, urls: list[str]) -> str | None:
         """Drop the CDN's copy of the two short-lived files.
@@ -594,11 +670,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.write(render_index(after, domain, args.repo, digests))
         return 0
 
-    for source, target in moves:
-        kodo.move(source, target)
+    # Uploads first, moves second. A run that dies mid-upload then leaves the
+    # root crowded — old and new versions side by side — with the previous
+    # index.json still describing it, so the mirror keeps working and a re-run
+    # finishes the job. Moving first would evict the version people are still
+    # downloading and only then discover the network is down.
     for upload in uploads:
         kodo.upload(upload["path"], upload["key"])
         print(f"  uploaded {upload['key']}")
+    for source, target in moves:
+        kodo.move(source, target)
 
     with tempfile.TemporaryDirectory(prefix="qiniu-") as scratch:
         staged = Path(scratch)
