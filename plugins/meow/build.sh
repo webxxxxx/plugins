@@ -87,6 +87,12 @@ case "$PLATFORM" in
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)"
       echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)"
     } >> "$TC" ;;
+  x86_64-pc-windows-msvc)
+    # Windows 上要一个自足的 exe：默认是动态 CRT，产物会 import MSVCP140.dll /
+    # VCRUNTIME140.dll，机器上没装 VC++ 运行库就起不来，而装插件不该要求用户先装
+    # 运行库。Rust 侧在下面用 target-feature=+crt-static，BoringSSL 侧在这里改成
+    # /MT；两边混着用会在链接期报 CRT 符号重复。
+    echo 'set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)' >> "$TC" ;;
 esac
 cd "$HERE/vendor/meow-rs"
 
@@ -104,9 +110,21 @@ require_target "$PLATFORM"
 # 不要移动 rust-toolchain.toml：它决定工具链，移走会让构建版本漂移。
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/svcd-meow-target}
 JOBS=${JOBS:-4}
+# 宿主是不是 Windows：plugin-tools 用 `sh` 跑本脚本，Git for Windows 的 sh 报的是
+# MSYS_NT-…（只有 bash 才报 MINGW64_NT-…），所以 *_NT-* 这几种都算。这个判断很重要：
+# Windows 上就该用本机 MSVC 编，一旦误判成"非 Windows"就会去装 cargo-xwin，用
+# clang-cl + CMake/Ninja 交叉编 BoringSSL——CI 上 CMake 读不到 Ninja 版本，整条构建
+# 在 configure 阶段就挂。
+host_is_windows() {
+    case "$(uname -s 2>/dev/null || echo unknown)" in
+        *_NT-*|MINGW*|MSYS*|CYGWIN*|Windows*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 case "$PLATFORM" in
   x86_64-pc-windows-msvc)
-    if [ "$(uname -s)" != MINGW* ] && [ -z "${MEOW_MSVC_LINKER:-}" ]; then
+    if ! host_is_windows && [ -z "${MEOW_MSVC_LINKER:-}" ]; then
       # 非 Windows 宿主：msvc 目标要靠 cargo-xwin。第一次会现装它 + 下 MSVC CRT/SDK
       # （XWIN_CACHE_DIR 指在 tools/docker/run.sh 的工作目录里，之后复用）。
       if ! cargo xwin --version >/dev/null 2>&1; then
@@ -127,6 +145,12 @@ case "$PLATFORM" in
       [ "$_patched" = 1 ] && rm -rf "${CARGO_TARGET_DIR:?}/$PLATFORM/release/build/boring-sys-"*
       cargo xwin build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow
     else
+      # 本机 MSVC。静态 CRT：exe 不依赖 VCRUNTIME140.dll / MSVCP140.dll，
+      # 和上面工具链文件里的 /MT 是一对。
+      case "${RUSTFLAGS:-}" in
+        *+crt-static*) ;;
+        *) export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static" ;;
+      esac
       cargo build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow
     fi ;;
   *) cargo build --release --locked -j "$JOBS" --target "$PLATFORM" --bin meow ;;
