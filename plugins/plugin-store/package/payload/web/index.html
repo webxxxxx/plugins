@@ -122,6 +122,13 @@
   .modal-title { font-weight: 650; font-size: 15px; }
   .modal-text { color: var(--muted); font-size: 13px; line-height: 1.7; margin: 8px 0 0; overflow-wrap: anywhere; }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+  .roots { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .root { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; }
+  .root.chosen { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .root.off { cursor: not-allowed; opacity: .55; }
+  .root input { margin: 3px 0 0; }
+  .root-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; overflow-wrap: anywhere; }
+  .root-meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
   @media (max-width: 600px) {
     main { padding: 20px 12px 36px; }
     h1 { font-size: 21px; }
@@ -200,6 +207,18 @@
     </div>
   </div>
 
+  <div id="rootmodal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="roottitle">
+    <div class="modal-card">
+      <div class="modal-title" id="roottitle">选择安装位置</div>
+      <p class="modal-text">这个包可以装在下面任意一个插件根；宿主默认会选装得下的最小那个，已经装过的插件留在原来的根。</p>
+      <div id="rootlist" class="roots" role="radiogroup" aria-label="插件根"></div>
+      <div class="modal-actions">
+        <button id="rootcancel" class="small">取消</button>
+        <button id="rootconfirm" class="small">安装到选中的根</button>
+      </div>
+    </div>
+  </div>
+
   <footer>
     数据源：<a href="https://github.com/webxxxxx/plugins/blob/main/docs/plugins.md" target="_blank" rel="noreferrer">docs/plugins.md</a>。
   </footer>
@@ -229,6 +248,10 @@
   const modalCancel = $('modalcancel');
   const modalExport = $('modalexport');
   const modalUninstall = $('modaluninstall');
+  const rootModal = $('rootmodal');
+  const rootList = $('rootlist');
+  const rootCancel = $('rootcancel');
+  const rootConfirm = $('rootconfirm');
 
   const SOURCE = { network: '在线', cache: '本地缓存', snapshot: '内置快照' };
   // Filled from GET /api/v1/compat, the same facts the management page and
@@ -248,6 +271,9 @@
   const INSTALLED_TTL_MS = 30000;
   let installedFetchedAt = 0;
   let installedRequest = null;
+  // The root an install run already picked, so the shelf pre-check and the
+  // handoff after the download do not ask the operator twice (#299).
+  const rootChoice = new Map();
   let searchTimer = null;
   let pollTimer = null;
   let hideJobFor = null;
@@ -605,6 +631,7 @@
         showNotice('正在下载插件商店 ' + entry.version + '，完成后会自动重启并刷新页面', 'warn');
       }
     } catch (error) {
+      rootChoice.delete(entry.name);
       showNotice('安装失败：' + (error.message || error), 'bad');
     }
   }
@@ -689,15 +716,20 @@
     return text || ('HTTP ' + response.status);
   }
 
-  // Where a plugin lands is the host's decision: with one root (or just the
-  // default root) there is nothing to choose, and with several roots the host
-  // fills the smallest volume that fits. So this page never asks for a
-  // directory. The one dialog below is about space, not about a path.
-  //
+  // The pre-flight an install runs twice: before the download starts (so a
+  // package that cannot land costs nothing) and again right before the POST
+  // (the only moment the free space is real). Space first, then the place:
+  // `spacePlan` is the room decision, `placePlan` the root decision (#299).
+  async function diskPlan(id, size) {
+    const plan = await spacePlan(id, size);
+    if (!plan.proceed || plan.cancelled || plan.uninstall) return plan;
+    return await placePlan(plan, id, size);
+  }
+
   // An upgrade needs room for the new copy while the old one still exists; if
   // only the new copy fits, the old version has to go first. `plugin.bytes` is
   // what the installed copy occupies, `freeBytes` what the root's volume has.
-  async function diskPlan(id, size) {
+  async function spacePlan(id, size) {
     if (!size) return { proceed: true };
     let facts;
     try {
@@ -712,11 +744,14 @@
     if (roots.length === 0) return { proceed: true };
     const freeOf = (row) => Number((row && row.freeBytes) || 0);
     const holder = roots.find((row) => row.plugin && row.plugin.id === id);
+    // Carried back so the root picker reuses these rows instead of asking the
+    // host a second time.
+    const fit = { proceed: true, disk: facts, roots };
 
     if (!holder) {
       // A fresh install may land on any root: the host fills the smallest one
       // that fits, so one fitting root is enough.
-      if (roots.some((row) => freeOf(row) >= size)) return { proceed: true };
+      if (roots.some((row) => freeOf(row) >= size)) return fit;
       const best = roots.reduce((a, b) => (freeOf(b) > freeOf(a) ? b : a), roots[0]);
       throw new Error(
         '空间不够：安装需要 ' + fmtBytes(size) + '，最大的插件根 ' + best.root + ' 只有 ' + fmtBytes(freeOf(best)),
@@ -728,14 +763,48 @@
     // uninstalling the old copy frees `installed`, and the question becomes
     // whether the new copy fits after that (#19).
     const free = freeOf(holder);
-    if (!free) return { proceed: true };
+    if (!free) return fit;
     const installed = Number(holder.plugin.bytes || 0);
-    if (free >= size + installed) return { proceed: true };
+    if (free >= size + installed) return fit;
     if (free + installed >= size) return askToUninstall(id, size, free);
     throw new Error(
       '空间不够：安装需要 ' + fmtBytes(size) + '，卸载旧版也只能空出 ' + fmtBytes(installed) +
       '，' + holder.root + ' 现在只有 ' + fmtBytes(free),
     );
+  }
+
+  // The root is the operator's when the host says so (#299). Off, a single
+  // root, or an older host without the flag: the host picks, and the request
+  // carries no `root`. An install that first uninstalls the old copy skips the
+  // picker too — the rows below would still show a plugin that is gone.
+  async function placePlan(plan, id, size) {
+    const disk = plan.disk || {};
+    const roots = Array.isArray(plan.roots) ? plan.roots : [];
+    if (!disk.manualInstallRoot || roots.length < 2) return { proceed: true };
+    const remembered = rootChoice.get(id);
+    if (remembered) return { proceed: true, root: remembered };
+    const answer = await askForRoot(id, roots, size);
+    if (answer.cancelled) return { proceed: false, cancelled: true };
+    rootChoice.set(id, answer.root);
+    return { proceed: true, root: answer.root };
+  }
+
+  // One row per root, decided the way the host would: an installed plugin
+  // stays on its recorded root (asking for another one is a conflict, so it is
+  // shown but not offered), a root that cannot hold the package is shown with
+  // the reason, and an unmeasured root is unknown rather than empty.
+  function rootRows(roots, holderId, size) {
+    const holder = roots.find((row) => row.plugin && row.plugin.id === holderId);
+    const rows = roots.map((row) => {
+      let reason = '';
+      if (holder && row.root !== holder.root) reason = '插件已装在 ' + holder.root + '，换根要先卸载';
+      else if (typeof row.freeBytes !== 'number') reason = '卷没挂上，量不到空间';
+      else if (row.freeBytes < size) reason = '放不下这个包';
+      return { root: row.root, row, reason };
+    });
+    const usable = rows.filter((item) => !item.reason)
+      .sort((a, b) => a.row.freeBytes - b.row.freeBytes);
+    return { rows, chosen: usable.length ? usable[0].root : null };
   }
 
   // The dialog copy is the operator's: cancel, export a backup, or uninstall
@@ -762,6 +831,64 @@
           showNotice('导出失败：' + (error && error.message ? error.message : error), 'bad');
         }
       };
+    });
+  }
+
+  function describeRoot(row, reason) {
+    const parts = [typeof row.freeBytes === 'number' ? '空闲 ' + fmtBytes(row.freeBytes) : '空闲未知'];
+    parts.push('已装 ' + Number(row.plugins || 0) + ' 个插件');
+    if (reason) parts.push(reason);
+    return parts.join(' · ');
+  }
+
+  // The picker (#299). The pre-selected row is the one the host would have
+  // taken, so pressing install without choosing keeps the old behaviour.
+  function askForRoot(holderId, roots, size) {
+    const { rows: candidates, chosen } = rootRows(roots, holderId, size);
+    let picked = chosen;
+    rootList.textContent = '';
+    const items = candidates.map((candidate) => {
+      const row = document.createElement('label');
+      row.className = 'root' + (candidate.reason ? ' off' : '');
+      const radio = document.createElement('input');
+      radio.type = 'radio';
+      radio.name = 'installroot';
+      radio.value = candidate.root;
+      radio.disabled = Boolean(candidate.reason);
+      radio.checked = candidate.root === picked;
+      const text = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'root-name';
+      name.textContent = candidate.root + (candidate.row.default ? '（默认）' : '');
+      const meta = document.createElement('div');
+      meta.className = 'root-meta';
+      meta.textContent = describeRoot(candidate.row, candidate.reason);
+      text.append(name, meta);
+      row.append(radio, text);
+      rootList.append(row);
+      return { row, radio };
+    });
+    const paint = () => {
+      for (const item of items) item.row.classList.toggle('chosen', item.radio.value === picked);
+      rootConfirm.disabled = !picked;
+    };
+    for (const item of items) {
+      item.radio.onchange = () => {
+        picked = item.radio.value;
+        paint();
+      };
+    }
+    paint();
+    rootModal.classList.remove('hidden');
+    return new Promise((resolve) => {
+      const close = (answer) => {
+        rootModal.classList.add('hidden');
+        rootCancel.onclick = null;
+        rootConfirm.onclick = null;
+        resolve(answer);
+      };
+      rootCancel.onclick = () => close({ cancelled: true });
+      rootConfirm.onclick = () => close({ root: picked });
     });
   }
 
@@ -862,7 +989,10 @@
         if (!removed.ok) throw new Error(await responseError(removed));
       }
 
-      const installResponse = await fetch('/api/v1/plugins?strategy=replace', {
+      // `root` only when the operator picked one; without it the host chooses.
+      const endpoint = '/api/v1/plugins?strategy=replace' +
+        (plan.root ? '&root=' + encodeURIComponent(plan.root) : '');
+      const installResponse = await fetch(endpoint, {
         method: 'POST',
         credentials: 'same-origin',
         headers: {
@@ -926,6 +1056,7 @@
       // A refused plan, a failed uninstall or an unreadable blob all leave the
       // bytes with the host until its retention window ends. Release them here.
       if (blobId) await releaseBlob(blobId);
+      rootChoice.delete(job.name);
       state.handoffJob = null;
     }
   }
@@ -1020,6 +1151,7 @@
     try {
       await call('install_cancel', {}, 15000);
       stopPolling();
+      if (state.job) rootChoice.delete(state.job.name);
       state.handoffJob = null;
       hideJobFor = null;
       updateJob(null);

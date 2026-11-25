@@ -67,7 +67,9 @@ raw 排第一：它给的就是分支当前内容，没有配额。2、3 是两�
 
 下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/，传输文件按任务命名（`<包名>.<任务号>.download`），完成后才改名成共享的 `<包名>.spk` 缓存；交给宿主时用 rename 移进 `$SVCD_TEMP_DIR/incoming`（同一文件系统，不再占第二份 15 MiB；跨设备才降级复制，失败会删掉半成品）。安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk 并清空任务状态；已经交给宿主安装（installing）后不能删除。收尾只删自己任务的文件：一个被删掉的任务不会碰到下一次下载的字节（#18——共享的 `.part` 被前一个任务删掉时，新下载会在 100% 报 `...spk: No such file or directory`）。进程启动时清掉残留的 `.download` / `.part`，缓存包保留。
 
-交给宿主的顺序是「先取字节、再放掉宿主那份、然后才判空间」：包从下载目录移进宿主 temp 成为 `sha256:` blob 后，页面先把字节读进浏览器、`DELETE /api/v1/blobs/{id}` 释放宿主那份，再 `GET /api/v1/disk?id=` 判空间，最后把字节 POST 给 `/api/v1/plugins`。顺序不能反：blob 还在时量出来的 `freeBytes` 正好少一个包，够装的升级会被判成装不下；判空间之前失败的路径（拒绝、卸载失败、读 blob 失败）也必须在 `finally` 里释放 blob，否则包在 `<data>/temp/files/` 里挂到 `temp_retention_secs`（默认两小时），页面上点「删除」也清不掉它（#19）。下载**之前**也会先判一次（`entry.size_bytes`），免得一个装不下的包先吃掉一整份空间；升级判空间的两档是「新旧都放得下 → 直接装」和「卸掉旧版就放得下 → 弹框」，只有连卸载之后都不够才直接拒绝。上传的字节由宿主流式解进 staging，压缩包本身不落盘，所以磁盘峰值是一份包，不是两份。下载顺序：
+交给宿主的顺序是「先取字节、再放掉宿主那份、然后才判空间」：包从下载目录移进宿主 temp 成为 `sha256:` blob 后，页面先把字节读进浏览器、`DELETE /api/v1/blobs/{id}` 释放宿主那份，再 `GET /api/v1/disk?id=` 判空间，最后把字节 POST 给 `/api/v1/plugins`。顺序不能反：blob 还在时量出来的 `freeBytes` 正好少一个包，够装的升级会被判成装不下；判空间之前失败的路径（拒绝、卸载失败、读 blob 失败）也必须在 `finally` 里释放 blob，否则包在 `<data>/temp/files/` 里挂到 `temp_retention_secs`（默认两小时），页面上点「删除」也清不掉它（#19）。下载**之前**也会先判一次（`entry.size_bytes`），免得一个装不下的包先吃掉一整份空间；升级判空间的两档是「新旧都放得下 → 直接装」和「卸掉旧版就放得下 → 弹框」，只有连卸载之后都不够才直接拒绝。
+
+装到哪个根由宿主说：`GET /api/v1/disk` 的 `manualInstallRoot` 打开且插件根多于一个时，页面在判完空间后弹一次「选择安装位置」。每行是一个根，显示路径、空闲空间、这个根已装几个插件；空闲空间是 `null` 的根（卷没挂上）照样列出来但不能选，装不下的根也不能选，已经装过的插件只有它记录里的那个根能选（换根宿主会 409）。默认选中宿主本来会选的那个：已装插件是记录里的根，新装是装得下的最小空闲根——直接点确认就等于旧行为。确认后 POST 是 `/api/v1/plugins?root=<选中的根>&strategy=replace`。开关关、只有一个根、或者老宿主没有这个字段：不弹框、请求不带 `root`，宿主自己选。一次安装只问一次——下载前的预检和下载后的交接共用同一个选择（`rootChoice`），任务结束、删除或失败时清掉。上传的字节由宿主流式解进 staging，压缩包本身不落盘，所以磁盘峰值是一份包，不是两份。下载顺序：
 
 1. 直接下载（自动跟随 GitHub release 的 302）；
 2. 如果 release-assets.githubusercontent.com 被 DNS 污染/无法连接，查询 Cloudflare/Google DNS-over-HTTPS 得到真实地址，用固定 resolver 重试；TLS 仍按原主机名校验；
@@ -201,11 +203,15 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   验证 `x-ratelimit-*` 头与可读文案。
 - 安装收尾：`a_failed_install_drops_the_downloaded_package` 断言失败报告后 `.spk` 与本任务的 `.download`（含 `.part`） 都不在了，且更新任务的文件原样保留。
 - 删除重下（#18）：`a_deleted_download_does_not_break_the_next_one` 用分块放行的本地服务器复现「下载中删除 → 立刻重下」，断言第二个任务走到 `ready` 而不是 `...spk: No such file or directory (os error 2)`；`startup_clears_transfers_but_keeps_the_cache` 覆盖启动清理。
-- 空间预检的判断（页面里的 `diskPlan`）有一条不依赖浏览器的用例：
+- 空间与选根的判断（页面里的 `diskPlan` → `spacePlan` / `placePlan` / `rootRows`）有一条不依赖浏览器的用例：
   `node plugins/plugin-store/tests/disk-plan.mjs`（`test` 工作流会跑）。它从页面源码里抽出真实函数，用假 `fetch` 跑
-  七种情形：单根/多根/哪都不够、设备上的升级（旧版 15.7 MiB、空闲 17.5 MiB → 弹框）、
-  两份额度都够、连新包都装不下、以及老宿主没有 `/api/v1/disk` 时不拦安装。页面结构改了标记
-  位置时它会直接报错，而不是悄悄什么都没测。
+  十七种情形：单根/多根/哪都不够、设备上的升级（旧版 15.7 MiB、空闲 17.5 MiB → 弹框）、
+  两份额度都够、连新包都装不下、老宿主没有 `/api/v1/disk` 时不拦安装；开关关或只有一个根不弹框；
+  开关开时默认选装得下的最小根、升级留在记录里的根、卷没挂上的根不会被选中、一次安装只问一次、取消即取消。
+  选根弹框本身也对着一个最小假 DOM 跑（行、禁用原因、预选、确认、取消），`rootRows` 的
+  「放不下 / 没挂上 / 换根要先卸载」三种原因各有断言。注入验证：POST 里去掉 `root`、去掉一次安装结束后的
+  记忆清理、忽略开关、把默认根改成「最大空闲」，都能让它变红。页面结构改了标记位置时它会直接报错，
+  而不是悄悄什么都没测。
 - 认证与缓存：`an_etag_turns_a_repeated_check_into_a_cached_304`、
   `a_configured_token_is_sent_as_a_bearer_header`、`a_token_file_is_read_trimmed_and_never_beats_the_environment`
   与 `a_rate_limited_answer_points_at_the_token_file` 都用本地 TCP 假服务器覆盖，
