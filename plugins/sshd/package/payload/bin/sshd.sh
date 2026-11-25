@@ -7,10 +7,11 @@
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PLUGIN_ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
-# 插件的数据只能落在插件目录里：<插件目录>/data。宿主注入的 SVCD_DATA_DIR 是守护
-# 进程的数据根（所有插件共用），把 dropbear 的主机密钥、pid 放进去就等于写到了插件
-# 目录外面，所以这里不再用它；升级时宿主保留 data/，主机密钥不会变。
+# 宿主给插件的三个目录之一是 SVCD_PLUGIN_DIR（安装目录）。手跑时没有它，就按脚本
+# 自己的位置往上三层推：<插件>/<版本>/payload/bin/sshd.sh。
+PLUGIN_ROOT=$(CDPATH= cd -- "${SVCD_PLUGIN_DIR:-$HERE/../../..}" && pwd)
+# 插件的数据只能落在插件目录里：<插件目录>/data。宿主升级、卸载（不带 --purge）都
+# 保留它，dropbear 的主机密钥因此不会变。
 DATA="$PLUGIN_ROOT/data"
 
 MULTI="$HERE/sshd"
@@ -28,12 +29,12 @@ KEY="$DATA/dropbear_host_key"
 
 fail() { echo "sshd: $*" >&2; return 1; }
 
-# 1.0 把数据放在插件目录之外（$SVCD_DATA_DIR/sshd，手跑时是 <插件目录>/.data/sshd）。
-# 第一次 start 搬进来，之后 DATA 一直在插件目录里。
+# 1.0 把数据放在插件目录之外，两种老位置：默认根布局下是 <data>/sshd（也就是插件
+# 目录的上上级同名目录），手跑时是 <插件目录>/.data/sshd。第一次 start 搬进来。
 migrate_legacy() {
     [ -d "$DATA" ] && return 0
-    for old in "${SVCD_DATA_DIR:+$SVCD_DATA_DIR/sshd}" "$PLUGIN_ROOT/.data/sshd"; do
-        [ -n "$old" ] && [ -d "$old" ] || continue
+    for old in "$PLUGIN_ROOT/../../sshd" "$PLUGIN_ROOT/.data/sshd"; do
+        [ -d "$old" ] || continue
         if mv "$old" "$DATA" 2>/dev/null; then
             echo "sshd: 旧数据 $old 已搬到 $DATA" >&2
         fi

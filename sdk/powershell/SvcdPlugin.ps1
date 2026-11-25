@@ -13,13 +13,17 @@
 $ErrorActionPreference = 'Stop'
 
 function Get-SvcdContext {
+    # A plugin child gets three directories: its install directory, the log
+    # directory and the transient root. Its own state goes to <plugin>\data.
+    $pluginDir = $env:SVCD_PLUGIN_DIR
     [pscustomobject]@{
-        Id      = if ($env:SVCD_PLUGIN_ID) { $env:SVCD_PLUGIN_ID } else { 'plugin' }
-        Version = if ($env:SVCD_PLUGIN_VERSION) { $env:SVCD_PLUGIN_VERSION } else { '0.0.0' }
-        Config  = $env:SVCD_CONFIG
-        DataDir = $env:SVCD_DATA_DIR
-        LogDir  = $env:SVCD_LOG_DIR
-        TempDir = $env:SVCD_TEMP_DIR
+        Id        = if ($env:SVCD_PLUGIN_ID) { $env:SVCD_PLUGIN_ID } else { 'plugin' }
+        Version   = if ($env:SVCD_PLUGIN_VERSION) { $env:SVCD_PLUGIN_VERSION } else { '0.0.0' }
+        Config    = $env:SVCD_CONFIG
+        PluginDir = $pluginDir
+        DataDir   = if ($pluginDir) { Join-Path $pluginDir 'data' } else { $null }
+        LogDir    = $env:SVCD_LOG_DIR
+        TempDir   = $env:SVCD_TEMP_DIR
     }
 }
 

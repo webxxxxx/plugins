@@ -6,10 +6,11 @@
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-PLUGIN_ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
-# 插件的数据只能落在插件目录里：<插件目录>/data。宿主注入的 SVCD_DATA_DIR 是守护
-# 进程的数据根（所有插件共用），证书、私钥、密码放进去就是写到了插件目录外面；
-# 升级时宿主保留 data/，证书和密码不会重生成。
+# 宿主给插件的三个目录之一是 SVCD_PLUGIN_DIR（安装目录）。手跑时没有它，就按脚本
+# 自己的位置往上三层推（<插件>/<版本>/payload/bin/hysteria.sh）。
+PLUGIN_ROOT=$(CDPATH= cd -- "${SVCD_PLUGIN_DIR:-$HERE/../../..}" && pwd)
+# 插件的数据只能落在插件目录里：<插件目录>/data。宿主升级、卸载（不带 --purge）都
+# 保留它，证书、私钥、密码不会重生成。
 DATA="$PLUGIN_ROOT/data"
 PIDFILE="$DATA/hysteria.pid"
 CONFIG_DST="$DATA/config.json"
@@ -17,12 +18,13 @@ CERT="$DATA/cert.pem"
 KEY="$DATA/key.pem"
 PASSWORD_FILE="$DATA/password"
 
-# 1.0 把数据放在插件目录之外（$SVCD_DATA_DIR/hysteria，手跑时是 <插件目录>/.data/hysteria）。
-# 第一次 start 搬进来：证书和密码跟着走，客户端不用重新配。
+# 1.0 把数据放在插件目录之外，两种老位置：默认根布局下是 <data>/hysteria（插件目录的
+# 上上级同名目录），手跑时是 <插件目录>/.data/hysteria。第一次 start 搬进来：证书和
+# 密码跟着走，客户端不用重新配。
 migrate_legacy() {
     [ -d "$DATA" ] && return 0
-    for old in "${SVCD_DATA_DIR:+$SVCD_DATA_DIR/hysteria}" "$PLUGIN_ROOT/.data/hysteria"; do
-        [ -n "$old" ] && [ -d "$old" ] || continue
+    for old in "$PLUGIN_ROOT/../../hysteria" "$PLUGIN_ROOT/.data/hysteria"; do
+        [ -d "$old" ] || continue
         if mv "$old" "$DATA" 2>/dev/null; then
             echo "hysteria: 旧数据 $old 已搬到 $DATA" >&2
         fi

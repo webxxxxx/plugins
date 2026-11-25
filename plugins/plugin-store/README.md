@@ -63,9 +63,9 @@ raw 排第一：它给的就是分支当前内容，没有配额。2、3 是两�
 未认证调用还有每小时 60 次的配额，而 `docs/plugins.md` 本来就是从那些 release 生成的，
 走 API 只是把同一份数据重新解析一遍。
 
-成功结果写到插件根目录的 <data_dir>/plugins/plugin-store/catalog.md，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。插件根目录从运行中的 payload 路径推出（<data>/plugins/<id>/<version>/payload/bin/<exe> 往上四级）——svcd 不给插件注入 SVCD_DATA_DIR；手动运行二进制时才退回 SVCD_DATA_DIR，再退回系统临时目录。页面顶部的「列表」会显示这条在线结果来自哪个域名。
+成功结果写到插件自己的数据目录 `$SVCD_PLUGIN_DIR/data/catalog.md`，6 小时后后台再刷新；首次启动/离线时用编译时嵌入的 docs/plugins.md 快照。插件目录优先取宿主导出的 `SVCD_PLUGIN_DIR`，没有就按运行中的 payload 路径往上推（`<插件>/<版本>/payload/bin/<exe>` 往上四级）——插件进程只拿 `SVCD_PLUGIN_DIR` / `SVCD_LOG_DIR` / `SVCD_TEMP_DIR` 三个目录；手动运行二进制时退到系统临时目录。页面顶部的「列表」会显示这条在线结果来自哪个域名。
 
-下载的 .spk 暂存在同一插件根目录的 temp 下：<data_dir>/plugins/plugin-store/temp/，传输文件按任务命名（`<包名>.<任务号>.download`），完成后才改名成共享的 `<包名>.spk` 缓存；交给宿主时用 rename 移进 `$SVCD_TEMP_DIR/incoming`（同一文件系统，不再占第二份 15 MiB；跨设备才降级复制，失败会删掉半成品）。安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk 并清空任务状态；已经交给宿主安装（installing）后不能删除。收尾只删自己任务的文件：一个被删掉的任务不会碰到下一次下载的字节（#18——共享的 `.part` 被前一个任务删掉时，新下载会在 100% 报 `...spk: No such file or directory`）。进程启动时清掉残留的 `.download` / `.part`，缓存包保留。
+下载的 .spk 暂存在插件数据目录的 temp 下：`$SVCD_PLUGIN_DIR/data/temp/`，传输文件按任务命名（`<包名>.<任务号>.download`），完成后才改名成共享的 `<包名>.spk` 缓存；交给宿主时用 rename 移进 `$SVCD_TEMP_DIR/incoming`（同一文件系统，不再占第二份 15 MiB；跨设备才降级复制，失败会删掉半成品）。安装结束（成功或失败）就删除——它是传输暂存而不是仓库，小容量卷上留一份十几 MiB 的失败包会把盘占满，重试时重新下载。下载中或下载完成待安装时，任务卡片上的「删除」会停止下载、删掉对应的 .spk 并清空任务状态；已经交给宿主安装（installing）后不能删除。收尾只删自己任务的文件：一个被删掉的任务不会碰到下一次下载的字节（#18——共享的 `.part` 被前一个任务删掉时，新下载会在 100% 报 `...spk: No such file or directory`）。进程启动时清掉残留的 `.download` / `.part`，缓存包保留。
 
 交给宿主的顺序是「先取字节、再放掉宿主那份、然后才判空间」：包从下载目录移进宿主 temp 成为 `sha256:` blob 后，页面先把字节读进浏览器、`DELETE /api/v1/blobs/{id}` 释放宿主那份，再 `GET /api/v1/disk?id=` 判空间，最后把字节 POST 给 `/api/v1/plugins`。顺序不能反：blob 还在时量出来的 `freeBytes` 正好少一个包，够装的升级会被判成装不下；判空间之前失败的路径（拒绝、卸载失败、读 blob 失败）也必须在 `finally` 里释放 blob，否则包在 `<data>/temp/files/` 里挂到 `temp_retention_secs`（默认两小时），页面上点「删除」也清不掉它（#19）。下载**之前**也会先判一次（`entry.size_bytes`），免得一个装不下的包先吃掉一整份空间；升级判空间的两档是「新旧都放得下 → 直接装」和「卸掉旧版就放得下 → 弹框」，只有连卸载之后都不够才直接拒绝。
 
@@ -121,7 +121,7 @@ plugin editconfig plugin-store --reset           # 回到模板
 - `release_cache_minutes`：`release_asset` 结果的重用窗口，默认 15，上限 1440；
   设 0 表示每次检查都带 `If-None-Match` 校验。
 
-优先级：配置文件 > `GITHUB_TOKEN` > `GH_TOKEN` > `<data_dir>/github-token`。配置文件给服务
+优先级：配置文件 > `GITHUB_TOKEN` > `GH_TOKEN` > `<插件目录>/data/github-token`。配置文件给服务
 安装用，环境变量留给临时调试。配置解析失败只记一条警告，插件仍按默认值继续跑。
 
 两个来源各写各的缓存：`catalog.md` 存 GitHub 那份表，`catalog.json` 存七牛那份索引；启动时优先读
@@ -181,7 +181,7 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   插件数据目录下的 `github-token`（一行文本，建议 0600）。有 token 就带
   `Authorization: Bearer …`，配额从匿名 60 次/小时提到 5000 次/小时；token 只发给
   `api.github.com`，不写日志。401 明确报「token 无效或被吊销」，不会静默退回匿名。
-- 缓存：第一次成功查询把响应体、`ETag` 和写入时间存进 `<data_dir>/release-cache.json`
+- 缓存：第一次成功查询把响应体、`ETag` 和写入时间存进 `<插件目录>/data/release-cache.json`
   （按 URL 区分）。`release_cache_minutes`（默认 15 分钟）内的重复查询**不发请求**，直接从
   磁盘回；超出窗口才带 `If-None-Match`，GitHub 的 304 不计配额。窗口设 0 表示每次都校验。
   `download: true` 不读缓存，永远取最新字节。

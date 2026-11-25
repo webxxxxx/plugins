@@ -737,20 +737,34 @@ fn optional<'a>(arguments: &'a Value, key: &str) -> Result<Option<&'a str>, Stri
     }
 }
 
-/// The host installs a package as <data>/plugins/<id>/<version>/payload/bin/<exe>.
-/// svcd does not export SVCD_DATA_DIR to plugins, so the install path is the
-/// reliable way to find the plugin root; the exported data root is the backup,
-/// and a hand-run binary falls back to the system temp directory.
-fn plugin_data_dir(exe: Option<&Path>, data_root: Option<&Path>, id: &str) -> PathBuf {
+/// Where this plugin may keep its own files: `<plugin dir>/data`.
+///
+/// The host exports `SVCD_PLUGIN_DIR` (`<plugins>/<id>`), and that directory is
+/// what survives an upgrade — the version directories under it are replaced.
+/// A binary started by hand has no such variable, so its own path is the next
+/// best evidence: `<plugin>/<version>/payload/bin/<exe>` walks up to the plugin
+/// directory. Neither applies outside a package (cargo test, a bare `cargo run`),
+/// and then the system temp directory keeps the files out of the source tree.
+fn plugin_data_dir(exe: Option<&Path>, plugin_dir: Option<&Path>, id: &str) -> PathBuf {
+    if let Some(root) = plugin_dir {
+        return root.join("data");
+    }
     if let Some(root) = exe.and_then(installed_plugin_root) {
         if root.file_name().and_then(|name| name.to_str()) == Some(id) {
-            return root;
+            return root.join("data");
         }
     }
-    if let Some(root) = data_root {
-        return root.join("plugins").join(id);
-    }
     std::env::temp_dir().join(id)
+}
+
+/// The plugin directory, when it is known at all — settings live in its
+/// `config`, which the host owns and `editconfig` writes.
+fn plugin_root(exe: Option<&Path>, plugin_dir: Option<&Path>, id: &str) -> Option<PathBuf> {
+    if let Some(root) = plugin_dir {
+        return Some(root.to_path_buf());
+    }
+    exe.and_then(installed_plugin_root)
+        .filter(|root| root.file_name().and_then(|name| name.to_str()) == Some(id))
 }
 
 /// `<data>/plugins/<id>` from the running payload's path.
@@ -1339,16 +1353,22 @@ fn main() -> Exit {
     let context = Context::from_env();
     let own_id = OWN_ID.to_string();
     let exe = std::env::current_exe().ok();
-    let data_root = context.data_dir().map(PathBuf::from);
-    let data_dir = plugin_data_dir(exe.as_deref(), data_root.as_deref(), OWN_ID);
-    // The catalog cache sits at the plugin root; downloads use its temp dir.
+    let plugin_dir = context.plugin_dir().map(PathBuf::from);
+    let data_dir = plugin_data_dir(exe.as_deref(), plugin_dir.as_deref(), OWN_ID);
+    // The catalog cache and the in-flight downloads both live in `data/`, which
+    // the host keeps across upgrades; the version directories do not survive.
     let download_dir = data_dir.join("temp");
     // Nothing can be downloading at startup, so any transfer still here belongs
     // to a process that died mid-download (or to a version that shared `.part`).
     sweep_transfers(&download_dir);
     // Settings first: they decide which cache shape to read and which source
-    // the refresher asks.
-    let settings = settings::Settings::load(context.config_path(), &data_dir);
+    // the refresher asks. The host's `config` sits in the plugin directory, not
+    // in `data/`; `SVCD_CONFIG` is only exported to config-check runs.
+    let config = context
+        .config_path()
+        .map(PathBuf::from)
+        .or_else(|| plugin_root(exe.as_deref(), plugin_dir.as_deref(), OWN_ID).map(|root| root.join("config")));
+    let settings = settings::Settings::load(config.as_deref(), &data_dir);
     let state = Arc::new(Mutex::new(initial_state(&data_dir, &settings)));
     log_info!(
         "plugin-store 启动: target={TARGET}, 内置/缓存 {} 个包, data={}, downloads={}",
@@ -1611,22 +1631,40 @@ mod tests {
 
     #[test]
     fn data_lives_under_the_plugin_root() {
-        // The installed payload path is <data>/plugins/<id>/<version>/payload/bin.
+        // The installed payload path is <plugin>/<version>/payload/bin/<exe>.
         let installed = Path::new("/data/plugins/plugin-store/0.1.8/payload/bin/plugin-store");
         assert_eq!(
             plugin_data_dir(Some(installed), None, "plugin-store"),
-            Path::new("/data/plugins").join("plugin-store")
+            Path::new("/data/plugins/plugin-store/data"),
+            "a payload walks up to its plugin directory"
         );
-        // A binary built by hand is not inside a package; use the exported root.
+        // The host exports the plugin directory; it wins over the payload path.
+        assert_eq!(
+            plugin_data_dir(
+                Some(installed),
+                Some(Path::new("/srv/plugins/plugin-store")),
+                "plugin-store"
+            ),
+            Path::new("/srv/plugins/plugin-store/data"),
+            "SVCD_PLUGIN_DIR is where the host put us"
+        );
+        // A binary built by hand is not inside a package; nothing may land next
+        // to it in the source tree.
         let hand_built = Path::new("/repo/target/release/plugin-store");
         assert_eq!(
-            plugin_data_dir(Some(hand_built), Some(Path::new("/data")), "plugin-store"),
-            Path::new("/data").join("plugins").join("plugin-store")
+            plugin_data_dir(Some(hand_built), None, "plugin-store"),
+            std::env::temp_dir().join("plugin-store")
         );
         assert_eq!(
             plugin_data_dir(None, None, "plugin-store"),
             std::env::temp_dir().join("plugin-store")
         );
+        // Settings live in the plugin directory, not in data/.
+        assert_eq!(
+            plugin_root(Some(installed), None, "plugin-store"),
+            Some(Path::new("/data/plugins/plugin-store").to_path_buf())
+        );
+        assert_eq!(plugin_root(Some(hand_built), None, "plugin-store"), None);
     }
 
     #[test]

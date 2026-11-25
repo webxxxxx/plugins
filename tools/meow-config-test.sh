@@ -55,7 +55,7 @@ fixture() {
 }
 
 run_meow() {
-    SVCD_DATA_DIR="$_plugin/.data" sh "$_plugin/1.3.0/payload/bin/meow.sh" "$@" 2>&1
+    SVCD_PLUGIN_DIR="$_plugin" sh "$_plugin/1.3.0/payload/bin/meow.sh" "$@" 2>&1
 }
 
 state_of() {
@@ -167,8 +167,8 @@ sleep 3
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"svcd.shutdown"}'
 FEED
 MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
-if timeout 25 sh -c 'sh "$1" | SVCD_DATA_DIR="$2" sh "$3" start' sh \
-    "$WORK/feed.sh" "$_plugin/.data" "$MEOW_SH" \
+if timeout 25 sh -c 'sh "$1" | SVCD_PLUGIN_DIR="$2" sh "$3" start' sh \
+    "$WORK/feed.sh" "$_plugin" "$MEOW_SH" \
     > "$WORK/channel.out" 2> "$WORK/channel.err"; then
     :
 else
@@ -190,7 +190,7 @@ channel_has 'mode\":\"tun\"' '读状态没回代理类型'
 channel_has 'changing\":true' '切代理类型没回执'
 [ "$(state_of)" = off ] || fail 'channel: 切完没落到 state'
 grep -q 'proxy-mode pc → off' "$WORK/channel.err" || fail 'channel: 看护循环没按新形态重启'
-[ -f "$_plugin/.data/meow/meow.pid" ] && fail 'channel: 退出后还留着 pidfile'
+[ -f "$_plugin/data/meow.pid" ] && fail 'channel: 退出后还留着 pidfile'
 fi
 
 echo "meow config layer: ok"

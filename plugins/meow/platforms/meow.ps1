@@ -8,7 +8,7 @@ powershell；platforms/unix.json 给 unix 三元组，指向同目录的 meow.sh
 两个文件，各管各的：
   $PLUGIN_ROOT\state    我们自己的：只缓存代理类型（页面上的 off / tun / tproxy）。
   $PLUGIN_ROOT\data     运行数据：meow 的 geo 库、pid、-d 指过来的缓存。宿主升级时保留；
-                        升级前的老位置在 $env:SVCD_DATA_DIR\meow，启动时搬进来。
+                        升级前的老位置在 <data>\meow，启动时搬进来。
   $PLUGIN_ROOT\config    meow 自己的配置（订阅、规则、代理组），meow 用它启动。启动时只改受管键
                           （mixed-port / tun / dns），其余原样保留。
 
@@ -37,10 +37,11 @@ $ErrorActionPreference = 'Stop'
 
 $HERE = Split-Path -Parent $MyInvocation.MyCommand.Path          # payload\bin
 $ROOT = Split-Path -Parent $HERE                                 # payload\
-$PLUGIN_ROOT = Split-Path -Parent (Split-Path -Parent $ROOT)     # <插件目录>\
-# 插件的数据只能落在插件目录里：<插件目录>\data。宿主注入的 SVCD_DATA_DIR 是守护进程
-# 的数据根（所有插件共用），meow 的 geo 库、pid、日志放进去就是写到了插件目录外面；
-# 升级时宿主保留 data\，geo 库和节点选择不会丢。
+# 宿主给插件的三个目录之一是 SVCD_PLUGIN_DIR（安装目录）；手跑时没有它，就按脚本自己
+# 的位置往上三层推（<插件>\<版本>\payload\bin\meow.ps1）。
+$PLUGIN_ROOT = if ($env:SVCD_PLUGIN_DIR) { $env:SVCD_PLUGIN_DIR } else { Split-Path -Parent (Split-Path -Parent $ROOT) }
+# 插件的数据只能落在插件目录里：<插件目录>\data。宿主升级、卸载（不带 --purge）都保留
+# 它，meow 的 geo 库、pid、日志因此不会丢。
 $DATA = Join-Path $PLUGIN_ROOT 'data'
 $PIDFILE = Join-Path $DATA 'meow.pid'
 $CONFIG = Join-Path $PLUGIN_ROOT 'config'            # meow 的配置：meow 用它启动，宿主的 editconfig 改它
@@ -51,12 +52,11 @@ $MEOW = Join-Path $HERE 'meow.exe'
 if (-not (Test-Path -LiteralPath $MEOW)) { $MEOW = Join-Path $HERE 'meow' }
 $SDK = Join-Path (Join-Path $ROOT 'lib') 'SvcdPlugin.ps1'
 
-# 1.2/1.3 把数据放在插件目录之外（$SVCD_DATA_DIR\meow，手跑时是 <插件目录>\.data\meow）。
-# 第一次启动搬进来：geo 库跟着走，不用重新下。
+# 1.2/1.3 把数据放在插件目录之外，两种老位置：默认根布局下是 <data>\meow（插件目录的
+# 上上级同名目录），手跑时是 <插件目录>\.data\meow。第一次启动搬进来：geo 库跟着走。
 function Move-LegacyData {
     if (Test-Path -LiteralPath $DATA) { return }
-    $old = @()
-    if ($env:SVCD_DATA_DIR) { $old += (Join-Path $env:SVCD_DATA_DIR 'meow') }
+    $old = @(Join-Path (Split-Path -Parent (Split-Path -Parent $PLUGIN_ROOT)) 'meow')
     $old += (Join-Path $PLUGIN_ROOT '.data\meow')
     foreach ($path in $old) {
         if (-not (Test-Path -LiteralPath $path)) { continue }

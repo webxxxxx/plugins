@@ -125,7 +125,7 @@ plugin-tools template wireguard --platforms x86_64-unknown-linux-musl,x86_64-pc-
 | 帧上限 | stream 0 / JSON 1 MiB；raw 默认 1 MiB（`ws_raw_max_bytes`）；无握手 |
 | 错误码 | `-32700` 解析、`-32601` 方法不存在、`-32602` 未知能力、`-32603` 过载 |
 | 推送 | `emit(method, params)` → 宿主转成 SSE / WebSocket 给 UI |
-| 宿主注入 | `SVCD_PLUGIN_ID`、`SVCD_PLUGIN_VERSION`、`SVCD_CONFIG`、`SVCD_DATA_DIR`、`SVCD_LOG_DIR`、`SVCD_HTTP_PORT`、`SVCD_TARGET` |
+| 宿主注入 | 三个目录：`SVCD_PLUGIN_DIR`、`SVCD_LOG_DIR`、`SVCD_TEMP_DIR`；hook 另给 `SVCD_PLUGIN_ID`、`SVCD_PLUGIN_VERSION`、`SVCD_ACTION` |
 
 `svcd.ping` / `svcd.shutdown` 由 SDK 自动应答，不要自己实现。
 
@@ -143,7 +143,7 @@ plugin-tools template wireguard --platforms x86_64-unknown-linux-musl,x86_64-pc-
 | `Plugin::call(&mut self, name, args)` | 你的能力实现 |
 | `Plugin::status(&self)` | `svc status` 的一行摘要 |
 | `ToolOutcome::text / error` | 结果；`error` 对应 `isError: true` |
-| `Context::config_path / config_json / data_dir / log_dir / temp_dir / id / version` | 宿主给你的环境 |
+| `Context::config_path / config_json / plugin_dir / data_dir / log_dir / temp_dir / id / version` | 宿主给你的环境（`data_dir` 就是 `<plugin_dir>/data`） |
 | `Context::cancel()` → `Cancel::{is_cancelled, sleep, ticker}` | 后台循环必须观察的取消令牌 |
 | `svcd_plugin::emit(method, params)` | 推送给 UI |
 | `log_info! / log_warn! / log_error!` | 写 stderr（宿主捕获并轮转） |
@@ -257,7 +257,7 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **stdout 只写协议。** 日志、调试输出、`print` / `console.log` 一律去 stderr——它是宿主的日志通道，会写进 `<logs>/<id>.log` 并轮转。Rust 用 `log_info!`，shell 用 `echo … >&2`。
 
-**数据只写插件目录。** 安装目录是 `<data>/plugins/<id>/`，插件自己的东西一律放它里面的 `data/`：宿主升级、卸载（不带 `--purge`）都保留 `data/` 和 `config`，主机密钥、证书、geo 库因此不会丢。`SVCD_DATA_DIR` 是**守护进程**的数据根——所有插件共用同一份，往里写就是把数据写到了插件目录外面；路径从脚本 / 可执行文件自己的位置推（`$0` 往上三层就是插件目录），别信环境变量。宿主的临时根 `SVCD_TEMP_DIR` 只用来放 blob（`incoming/`），日志交给宿主写。
+**数据只写插件目录。** 插件进程只拿到三个目录变量：`SVCD_PLUGIN_DIR`（安装目录）、`SVCD_LOG_DIR`（日志，宿主写）、`SVCD_TEMP_DIR`（临时根，blob 放 `incoming/`）。自己的东西一律写 `$SVCD_PLUGIN_DIR/data/`：宿主升级、卸载（不带 `--purge`）都保留它，主机密钥、证书、geo 库因此不会丢。守护进程自己的数据根不导出给插件，别去猜它、也别读没在环境里的变量；脚本手跑时按自己的位置推插件目录（`$0` 往上三层即可）。
 
 **UI 放 `package/payload/web/`。** 宿主把整棵树反代到 `/plugin-ui/<id>/`，页面用**相对路径** `fetch('rpc')`；插件进程不自起任何 HTTP 或 WebSocket 服务。
 

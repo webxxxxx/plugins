@@ -114,6 +114,7 @@ pub struct Context {
     id: String,
     version: String,
     config: Option<PathBuf>,
+    plugin_dir: Option<PathBuf>,
     data_dir: Option<PathBuf>,
     log_dir: Option<PathBuf>,
     temp_dir: Option<PathBuf>,
@@ -125,15 +126,23 @@ impl Context {
     ///
     /// Never fails: outside the host (a frame-level test, or running the binary
     /// by hand) the identity falls back and the paths stay absent.
+    ///
+    /// A plugin child gets three directories and nothing else — the plugin
+    /// directory, the log directory and the transient root. The daemon's own
+    /// data and config roots are not exported: a plugin writes its state under
+    /// `<plugin>/data` and never has to know where the daemon keeps anything.
     pub fn from_env() -> Self {
         let env = |key: &str| std::env::var(key).ok().filter(|value| !value.is_empty());
+        let plugin_dir = env("SVCD_PLUGIN_DIR").map(PathBuf::from);
+        let data_dir = plugin_dir.as_ref().map(|dir| dir.join("data"));
         Context {
             id: env("SVCD_PLUGIN_ID")
                 .or_else(|| env("SVCD_SERVICE_ID"))
                 .unwrap_or_else(|| "plugin".to_string()),
             version: env("SVCD_PLUGIN_VERSION").unwrap_or_else(|| "0.0.0".to_string()),
             config: env("SVCD_CONFIG").map(PathBuf::from),
-            data_dir: env("SVCD_DATA_DIR").map(PathBuf::from),
+            plugin_dir,
+            data_dir,
             log_dir: env("SVCD_LOG_DIR").map(PathBuf::from),
             temp_dir: env("SVCD_TEMP_DIR").map(PathBuf::from),
             cancel: Cancel::default(),
@@ -153,7 +162,17 @@ impl Context {
         self.config.as_deref()
     }
 
-    /// A writable directory that survives upgrades. Use it for state, not logs.
+    /// The directory the package was installed into (`SVCD_PLUGIN_DIR`).
+    ///
+    /// Holds the version directories, `config`, and `data/`; the host keeps it
+    /// across upgrades.
+    pub fn plugin_dir(&self) -> Option<&Path> {
+        self.plugin_dir.as_deref()
+    }
+
+    /// `<plugin_dir>/data`, the one place a plugin may write its own files.
+    ///
+    /// Survives upgrades and a plain uninstall; absent outside a host.
     pub fn data_dir(&self) -> Option<&Path> {
         self.data_dir.as_deref()
     }

@@ -8,7 +8,7 @@
 #                       第一次安装从包里的 payload/config.yaml 生成。
 #   <插件目录>/state    我们自己的：只缓存代理类型（proxy-mode），页面上的选择器写它。
 #   <插件目录>/data     运行数据：meow 的 geo 库、pid、`-d` 指过来的缓存。
-#                       宿主升级时保留它；升级前的老位置在 $SVCD_DATA_DIR/meow，启动时搬进来。
+#                       宿主升级时保留它；升级前的老位置在 <data>/meow，启动时搬进来。
 #
 # 运行形态由 state 里的 proxy-mode 决定（缺省 pc），受管键按形态自动写进 meow 的 config：
 #   off    不接管流量：只开 mixed-port 当普通 HTTP/SOCKS 代理，tproxy / tun 都不开。
@@ -30,10 +30,11 @@ set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)          # payload/：yacd、cn_domains 在这一层
-PLUGIN_ROOT=$(CDPATH= cd -- "$HERE/../../.." && pwd)
-# 插件的数据只能落在插件目录里：<插件目录>/data。宿主注入的 SVCD_DATA_DIR 是守护
-# 进程的数据根（所有插件共用），meow 的 geo 库、pid、日志放进去就是写到了插件目录
-# 外面；升级时宿主保留 data/，geo 库和节点选择不会丢。
+# 宿主给插件的三个目录之一是 SVCD_PLUGIN_DIR（安装目录）。手跑时没有它，就按脚本
+# 自己的位置往上三层推（<插件>/<版本>/payload/bin/meow.sh）。
+PLUGIN_ROOT=$(CDPATH= cd -- "${SVCD_PLUGIN_DIR:-$HERE/../../..}" && pwd)
+# 插件的数据只能落在插件目录里：<插件目录>/data。宿主升级、卸载（不带 --purge）都
+# 保留它；meow 的 geo 库、pid、`-d` 指过来的缓存全在这里。
 DATA="$PLUGIN_ROOT/data"
 PIDFILE="$DATA/meow.pid"
 CONFIG="$PLUGIN_ROOT/config"                     # meow 的配置：meow 就是用它启动的（宿主的 editconfig 改它）
@@ -43,12 +44,12 @@ STATE="$PLUGIN_ROOT/state"                       # 我们自己的：只缓存�
 FW="$HERE/meow-fw.sh"
 SDK="$ROOT/lib/svcd-plugin.sh"                   # 宿主 SDK：通道循环与能力分发
 
-# 1.2/1.3 把数据放在插件目录之外（$SVCD_DATA_DIR/meow，手跑时是 <插件目录>/.data/meow）。
-# 第一次启动搬进来：geo 库跟着走，不用重新下。
+# 1.2/1.3 把数据放在插件目录之外，两种老位置：默认根布局下是 <data>/meow（插件目录的
+# 上上级同名目录），手跑时是 <插件目录>/.data/meow。第一次启动搬进来：geo 库跟着走。
 migrate_legacy() {
     [ -d "$DATA" ] && return 0
-    for old in "${SVCD_DATA_DIR:+$SVCD_DATA_DIR/meow}" "$PLUGIN_ROOT/.data/meow"; do
-        [ -n "$old" ] && [ -d "$old" ] || continue
+    for old in "$PLUGIN_ROOT/../../meow" "$PLUGIN_ROOT/.data/meow"; do
+        [ -d "$old" ] || continue
         if mv "$old" "$DATA" 2>/dev/null; then
             echo "meow: 旧数据 $old 已搬到 $DATA" >&2
         fi

@@ -40,6 +40,8 @@ typedef struct {
     char id[64];
     char version[32];
     char config[512];
+    /* The install directory (`SVCD_PLUGIN_DIR`) and `<plugin_dir>/data` under it. */
+    char plugin_dir[512];
     char data_dir[512];
     char log_dir[512];
     char temp_dir[512];
@@ -140,7 +142,17 @@ static void svcd_context_init(svcd_context *context) {
     svcd_copy_env(context->id, sizeof context->id, "SVCD_PLUGIN_ID", "plugin");
     svcd_copy_env(context->version, sizeof context->version, "SVCD_PLUGIN_VERSION", "0.0.0");
     svcd_copy_env(context->config, sizeof context->config, "SVCD_CONFIG", "");
-    svcd_copy_env(context->data_dir, sizeof context->data_dir, "SVCD_DATA_DIR", ".");
+    /* A plugin child gets its install directory, the log directory and the
+     * transient root; state goes to <plugin_dir>/data, never anywhere else. */
+    svcd_copy_env(context->plugin_dir, sizeof context->plugin_dir, "SVCD_PLUGIN_DIR", "");
+    if (context->plugin_dir[0] != '\0') {
+        /* The precision keeps the whole suffix inside the buffer, so this can
+         * never truncate (and gcc's -Wformat-truncation agrees). */
+        snprintf(context->data_dir, sizeof context->data_dir, "%.*s/data",
+                 (int)(sizeof context->data_dir - sizeof "/data"), context->plugin_dir);
+    } else {
+        snprintf(context->data_dir, sizeof context->data_dir, "data");
+    }
     svcd_copy_env(context->log_dir, sizeof context->log_dir, "SVCD_LOG_DIR", "");
     svcd_copy_env(context->temp_dir, sizeof context->temp_dir, "SVCD_TEMP_DIR", "");
 }
