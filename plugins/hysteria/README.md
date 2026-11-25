@@ -8,13 +8,15 @@
 
 ```
 vendor/mini-sb-agent/      Go 源码
+certgen/                   自签证书 / 随机密码生成器（只用标准库）
 build.json                 go build 配方
-build.sh                   平台映射
+build.sh                   平台映射，编内核也编 certgen
 package/
 ├── manifest.json
 ├── config/config          sing-box 配置模板（@CERT@ / @KEY@ / @PASSWORD@ 占位）
 └── payload/bin/hysteria.sh 生命周期包装
-    └── mini-sb-agent       构建产物
+    ├── mini-sb-agent       构建产物
+    └── hysteria-certgen    构建产物
 ```
 
 ## 运行方式
@@ -23,9 +25,14 @@ package/
 `exec mini-sb-agent -config …`。启动前会：
 
 1. 从活动配置（`plugin editconfig hysteria`）或 `package/config/config` 取模板；
-2. 首次启动用 `openssl` 生成自签 TLS 证书到 `<插件目录>/data/`（即 `$SVCD_PLUGIN_DIR/data/`）；
+2. 首次启动用包里自带的 `hysteria-certgen` 生成自签 TLS 证书到
+   `<插件目录>/data/`（即 `$SVCD_PLUGIN_DIR/data/`）；
 3. 首次启动生成 32 位十六进制密码到同目录的 `password`；
 4. 替换 `@CERT@`、`@KEY@`、`@PASSWORD@`，再启动内核。
+
+证书和密码不依赖机器的 `openssl`（很多设备上没有）：`certgen/` 只用 Go
+标准库，交叉编译不需要 cgo，跟着包一起发。直接从源码手跑、包里还没有它时，
+才退回 `openssl`（密码再退回 `od`）。
 
 默认入站 `0.0.0.0:8443/udp`（Hysteria2 基于 QUIC），出站 `direct`。要接
 meow 的本地代理，把配置的 `route.final` 改成 `meow`，并加一个
@@ -62,5 +69,5 @@ plugin-tools build --platform x86_64-unknown-linux-gnu
 plugin-tools check dist/hysteria-1.0.0-x86_64-unknown-linux-gnu.spk
 ```
 
-需要 Go 1.25+（vendor 的 `go.mod`）和网络拉模块依赖。平台声明为 Linux +
-macOS；Windows 不在列表里，因为入口是 POSIX sh 包装。
+需要 Go 1.25+（vendor 的 `go.mod`）和网络拉模块依赖；`certgen/` 只用标准库，
+不需要联网。平台声明为 Linux + macOS；Windows 不在列表里，因为入口是 POSIX sh 包装。

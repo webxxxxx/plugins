@@ -40,29 +40,58 @@ find_config() {
     return 1
 }
 
-password() {
-    if [ -s "$PASSWORD_FILE" ]; then
-        cat "$PASSWORD_FILE"
-    else
-        if command -v openssl >/dev/null 2>&1; then
-            openssl rand -hex 16 > "$PASSWORD_FILE"
-        else
-            od -An -N16 -tx1 /dev/urandom | tr -d ' \n' > "$PASSWORD_FILE"
-        fi
-        cat "$PASSWORD_FILE"
+# 证书和密码：优先用包里自带的 hysteria-certgen（Linux/macOS 都能跑，不依赖
+# openssl）；手跑源码、包里还没编进它时，才退回 openssl（密码再退回 od）。
+CERTGEN="$HERE/hysteria-certgen"
+
+random_password() {
+    if [ -f "$CERTGEN" ] && "$CERTGEN" hex 16 > "$PASSWORD_FILE" 2>/dev/null && [ -s "$PASSWORD_FILE" ]; then
+        return 0
     fi
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 16 > "$PASSWORD_FILE" 2>/dev/null
+        [ -s "$PASSWORD_FILE" ] && return 0
+    fi
+    if command -v od >/dev/null 2>&1; then
+        od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' > "$PASSWORD_FILE"
+        [ -s "$PASSWORD_FILE" ] && return 0
+    fi
+    rm -f "$PASSWORD_FILE"
+    return 1
+}
+
+password() {
+    if [ ! -s "$PASSWORD_FILE" ]; then
+        rm -f "$PASSWORD_FILE"
+        random_password || {
+            echo 'hysteria: 生成密码失败（包里没有 hysteria-certgen，系统也没有 openssl 或 od）' >&2
+            return 1
+        }
+    fi
+    cat "$PASSWORD_FILE"
 }
 
 ensure_cert() {
     [ -s "$CERT" ] && [ -s "$KEY" ] && return 0
-    command -v openssl >/dev/null 2>&1 || {
-        echo 'hysteria: openssl is required to generate a self-signed TLS certificate' >&2
-        return 1
-    }
-    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-        -keyout "$KEY" -out "$CERT" -subj '/CN=svcd-hysteria' >/dev/null 2>&1 || return 1
-    chmod 600 "$KEY" 2>/dev/null || true
-    return 0
+    rm -f "$CERT" "$KEY"
+    if [ -f "$CERTGEN" ]; then
+        "$CERTGEN" cert "$CERT" "$KEY" 2>/dev/null
+        if [ -s "$CERT" ] && [ -s "$KEY" ]; then
+            chmod 600 "$KEY" 2>/dev/null || true
+            return 0
+        fi
+        rm -f "$CERT" "$KEY"
+        echo "hysteria: hysteria-certgen 没生成出证书（$CERTGEN），改用 openssl" >&2
+    fi
+    if command -v openssl >/dev/null 2>&1; then
+        openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+            -keyout "$KEY" -out "$CERT" -subj '/CN=svcd-hysteria' >/dev/null 2>&1 || return 1
+        [ -s "$CERT" ] && [ -s "$KEY" ] || return 1
+        chmod 600 "$KEY" 2>/dev/null || true
+        return 0
+    fi
+    echo 'hysteria: 生成自签证书失败（包里没有 hysteria-certgen，系统也没有 openssl）' >&2
+    return 1
 }
 
 prepare_config() {
