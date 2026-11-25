@@ -17,11 +17,22 @@
 - 安装按钮先由插件下载 .spk 到数据目录，再通过宿主现成的 API 安装并启动：
 
       package_blob  ->  宿主把文件变成 $blob
+      GET  /api/v1/disk?id={id}           装之前问空间（旧版占用 + 新包大小）
       GET  /api/v1/blobs/{id}             取回字节
+      DELETE /api/v1/blobs/{id}           字节到手后立刻释放宿主那份
       POST /api/v1/plugins                与 management 页面相同的安装入口
       POST /api/v1/services/{id}/start    首装不自启，装完启动
 
   插件不调 CLI、不自起 HTTP、不碰宿主 socket；签名和平台校验仍由 svcd 完成。
+- **装到哪个目录不弹框**：只有一份插件根（或就只有默认根）时没有可选项；多根时宿主自己按
+  「装得下且剩余空间最小」挑（svcd 的 `plugins_dir` 列表）。页面从不提示选路径。
+- **唯一会弹的框是空间不够**（升级时旧版还在，新包解到同一卷会满）：文案固定为
+  「空间不够，需要先卸载旧版再安装 / 安装需要 X，现在空闲 Y， 建议先导出备份，如果升级失败，
+  重新上传安装。」三个按钮：取消、导出、卸载并安装。导出走 `GET /api/v1/export/{id}/spk`，
+  由宿主流式生成下载（不占设备磁盘）；卸载并安装先 `DELETE /api/v1/plugins/{id}`（不 purge，
+  配置保留）再走正常安装。`GET /api/v1/disk?id=` 的 `plugin.bytes` 是旧版占用，
+  `freeBytes` 是那一卷的空闲；`freeBytes < 新包 + 旧版` 才弹，`freeBytes < 新包` 则直接报
+  「空间不够」——那种情况卸载也装不下。
 
 ## 数据与下载
 

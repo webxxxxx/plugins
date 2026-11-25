@@ -114,6 +114,14 @@
   .job.failed .bar > i { background: var(--bad); }
   footer { margin-top: 18px; color: var(--muted); font-size: 12px; line-height: 1.7; }
   .hidden { display: none !important; }
+  /* One confirmation dialog exists: the space one. Where a plugin lands is the
+     host's decision (smallest volume that fits), so nothing here asks for a
+     directory. */
+  .modal { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 50; }
+  .modal-card { width: min(460px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; box-shadow: 0 18px 48px rgba(0, 0, 0, .35); }
+  .modal-title { font-weight: 650; font-size: 15px; }
+  .modal-text { color: var(--muted); font-size: 13px; line-height: 1.7; margin: 8px 0 0; overflow-wrap: anywhere; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
   @media (max-width: 600px) {
     main { padding: 20px 12px 36px; }
     h1 { font-size: 21px; }
@@ -180,6 +188,18 @@
     <div class="bar"><i id="jobbar"></i></div>
   </section>
 
+  <div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modaltitle">
+    <div class="modal-card">
+      <div class="modal-title" id="modaltitle">空间不够，需要先卸载旧版再安装</div>
+      <p class="modal-text" id="modaltext"></p>
+      <div class="modal-actions">
+        <button id="modalcancel" class="small">取消</button>
+        <button id="modalexport" class="small">导出</button>
+        <button id="modaluninstall" class="small danger">卸载并安装</button>
+      </div>
+    </div>
+  </div>
+
   <footer>
     数据源：<a href="https://github.com/webxxxxx/plugins/blob/main/docs/plugins.md" target="_blank" rel="noreferrer">docs/plugins.md</a>。
   </footer>
@@ -204,6 +224,11 @@
   const jobMessage = $('jobmsg');
   const jobBar = $('jobbar');
   const jobDelete = $('jobdelete');
+  const modal = $('modal');
+  const modalText = $('modaltext');
+  const modalCancel = $('modalcancel');
+  const modalExport = $('modalexport');
+  const modalUninstall = $('modaluninstall');
 
   const SOURCE = { network: '在线', cache: '本地缓存', snapshot: '内置快照' };
   // Filled from GET /api/v1/compat, the same facts the management page and
@@ -648,6 +673,95 @@
     return text || ('HTTP ' + response.status);
   }
 
+  // Where a plugin lands is the host's decision: with one root (or just the
+  // default root) there is nothing to choose, and with several roots the host
+  // fills the smallest volume that fits. So this page never asks for a
+  // directory. The one dialog below is about space, not about a path.
+  //
+  // An upgrade needs room for the new copy while the old one still exists; if
+  // only the new copy fits, the old version has to go first. `plugin.bytes` is
+  // what the installed copy occupies, `freeBytes` what the root's volume has.
+  async function diskPlan(id, size) {
+    if (!size) return { proceed: true };
+    let facts;
+    try {
+      const response = await fetch('/api/v1/disk?id=' + encodeURIComponent(id), { credentials: 'same-origin' });
+      // An older host has no such route: proceed and let the install answer.
+      if (!response.ok) return { proceed: true };
+      facts = await response.json();
+    } catch (_) {
+      return { proceed: true };
+    }
+    const roots = Array.isArray(facts && facts.roots) ? facts.roots : [];
+    if (roots.length === 0) return { proceed: true };
+    const holder = roots.find((row) => row.plugin && row.plugin.id === id);
+    const target = holder || roots.find((row) => row.default) || roots[0];
+    const free = Number((target && target.freeBytes) || 0);
+    if (!free) return { proceed: true };
+    const installed = holder && holder.plugin ? Number(holder.plugin.bytes || 0) : 0;
+    if (free >= size + installed) return { proceed: true };
+    if (free < size) {
+      throw new Error('空间不够：安装需要 ' + fmtBytes(size) + '，' + target.root + ' 只有 ' + fmtBytes(free));
+    }
+    return askToUninstall(id, size, free);
+  }
+
+  // The dialog copy is the operator's: cancel, export a backup, or uninstall
+  // the old version first. Export streams from the host, so it costs the device
+  // no extra disk; the browser saves it wherever the operator wants.
+  function askToUninstall(id, size, free) {
+    modalText.textContent = '安装需要 ' + fmtBytes(size) + '，现在空闲 ' + fmtBytes(free) + '， 建议先导出备份，如果升级失败，重新上传安装。';
+    modal.classList.remove('hidden');
+    return new Promise((resolve) => {
+      const close = (answer) => {
+        modal.classList.add('hidden');
+        modalCancel.onclick = null;
+        modalExport.onclick = null;
+        modalUninstall.onclick = null;
+        resolve(answer);
+      };
+      modalCancel.onclick = () => close({ proceed: false, cancelled: true });
+      modalUninstall.onclick = () => close({ proceed: true, uninstall: id });
+      modalExport.onclick = async () => {
+        try {
+          await downloadSpk(id);
+          showNotice('已导出 ' + id + '.spk；现在可以点「卸载并安装」', 'ok');
+        } catch (error) {
+          showNotice('导出失败：' + (error && error.message ? error.message : error), 'bad');
+        }
+      };
+    });
+  }
+
+  async function downloadSpk(id) {
+    const response = await fetch('/api/v1/export/' + encodeURIComponent(id) + '/spk', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error(await responseError(response));
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = id + '.spk';
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  // Hand the host's copy of the package back: the bytes are in this browser
+  // already, so the host can drop its temp entry before the install writes
+  // another copy. Best effort — a failed DELETE only means the file waits for
+  // temp_retention_secs.
+  async function releaseBlob(blobId) {
+    if (!blobId) return;
+    try {
+      await fetch('/api/v1/blobs/' + encodeURIComponent(blobId), {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: { 'X-Svcd-Csrf': '1' },
+      });
+    } catch (_) {}
+  }
+
   async function maybeHandoff(job) {
     if (!job || job.done || job.phase !== 'ready') return;
     // A delete may have cleared the job between the event and this call.
@@ -680,9 +794,33 @@
       const blobId = prepared.structuredContent && prepared.structuredContent.$blob;
       if (!blobId) throw new Error('宿主没有返回安装包 blob');
 
+      // Decide before the transfer. An upgrade that cannot fit beside the old
+      // version has to uninstall first; doing it here also frees the space the
+      // upload itself needs.
+      const plan = await diskPlan(job.name, Number(job.total || 0));
+      if (plan.cancelled) {
+        updateJob(Object.assign({}, job, { phase: 'ready', message: '已取消安装' }));
+        await call('install_result', { ok: false, message: '已取消安装' });
+        showNotice('已取消安装 ' + job.name, 'warn');
+        return;
+      }
+      if (plan.uninstall) {
+        // No purge: the config file stays, so the reinstall keeps the operator's
+        // settings.
+        const removed = await fetch('/api/v1/plugins/' + encodeURIComponent(plan.uninstall), {
+          method: 'DELETE',
+          credentials: 'same-origin',
+          headers: { 'X-Svcd-Csrf': '1' },
+        });
+        if (!removed.ok) throw new Error(await responseError(removed));
+      }
+
       const blobResponse = await fetch('/api/v1/blobs/' + blobId, { credentials: 'same-origin' });
       if (!blobResponse.ok) throw new Error(await responseError(blobResponse));
       const packageBlob = await blobResponse.blob();
+      // The bytes are in this browser now: release the host's temp copy before
+      // the install stages a second one (peak one package, not two).
+      await releaseBlob(blobId);
 
       const installResponse = await fetch('/api/v1/plugins?strategy=replace', {
         method: 'POST',
