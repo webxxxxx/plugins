@@ -14,6 +14,12 @@
 //   so `free < new + old` asks the operator. The dialog is worth asking only
 //   while `free + old >= new`; anything below that is a plain refusal.
 //
+//   transfer — the package is downloaded into the store's own root and then
+//   copied into the host's temp volume unless the two are one filesystem, so
+//   the pre-flight also needs `size` free on both (#22). `volume`/`tempVolume`
+//   are the host's ids; an older host without them gets the download check
+//   only.
+//
 //   place (#299) — with `manualInstallRoot` on and more than one root the
 //   operator picks the root, pre-selected with the one the host would have
 //   taken: the recorded root for an installed plugin, else the smallest
@@ -42,12 +48,16 @@ const decisionSource = extract('  async function diskPlan', '  // The dialog cop
 let current = { roots: [] };
 let pageHooks = { uninstall: [], roots: [] };
 const rootChoice = new Map();
+const storeState = { selfId: 'plugin-store' };
+const installedDirs = new Map();
 let rootRows;
 
 const factory = new Function(
   'askToUninstall',
   'askForRoot',
   'rootChoice',
+  'state',
+  'installedDirs',
   fmtBytes[0].replace(/^  /gm, '') + '\n' + decisionSource + '\nreturn { diskPlan, rootRows };',
 );
 const { diskPlan, ...rest } = factory(
@@ -62,6 +72,8 @@ const { diskPlan, ...rest } = factory(
     return chosen ? { root: chosen } : { cancelled: true };
   },
   rootChoice,
+  storeState,
+  installedDirs,
 );
 rootRows = rest.rootRows;
 
@@ -73,7 +85,13 @@ globalThis.fetch = async (url) => {
 };
 
 const root = (path, freeBytes, extra) => Object.assign({ root: path, freeBytes, default: path === '/data', plugins: 0 }, extra || {});
-const holder = (path, freeBytes, bytes) => root(path, freeBytes, { plugins: 1, plugin: { id: 'hysteria', version: '1.0.0', bytes } });
+const holder = (path, freeBytes, bytes, extra) =>
+  root(path, freeBytes, Object.assign({ plugins: 1, plugin: { id: 'hysteria', version: '1.0.0', bytes } }, extra || {}));
+// A row the host measured and named a volume for (#314).
+const volumeRoot = (path, freeBytes, volume) => root(path, freeBytes, { volume });
+const volumeHolder = (path, freeBytes, bytes, volume) => holder(path, freeBytes, bytes, { volume });
+// The store itself lives in a root; `/data` unless a case says otherwise.
+const storeOn = (path) => ({ ownDir: path + '/plugin-store' });
 const on = (roots) => ({ manualInstallRoot: true, roots });
 const off = (roots) => ({ manualInstallRoot: false, roots });
 
@@ -81,31 +99,51 @@ const size = 15_700_000;
 const cases = [
   // --- space only: no switch in the answer, so the host picks the root ---
   ['fresh install, the only root fits', { roots: [root('/data', 20_000_000)] }, 'proceed', null],
-  ['fresh install, one of two roots fits', { roots: [root('/data', 4_000_000), root('/sd', 200_000_000)] }, 'proceed', null],
-  ['fresh install, nowhere fits', { roots: [root('/data', 4_000_000), root('/sd', 8_000_000)] }, 'too-small', null],
+  ['fresh install: the target root fits and so does the download volume',
+    { roots: [root('/data', 4_000_000), root('/sd', 200_000_000)] }, 'proceed', null, storeOn('/sd')],
+  ['fresh install, nowhere fits', { roots: [root('/data', 4_000_000), root('/sd', 8_000_000)] }, 'too-small', null, storeOn('/sd')],
   ['upgrade on the device: old 15.7 MiB, 17.5 MiB free', { roots: [holder('/data', 17_500_000, 15_700_000)] }, 'ask', null],
-  ['upgrade with room for both copies', { roots: [holder('/sd', 40_000_000, 15_700_000)] }, 'proceed', null],
+  ['upgrade with room for both copies', { roots: [holder('/sd', 40_000_000, 15_700_000)] }, 'proceed', null, storeOn('/sd')],
   ['upgrade where only uninstalling makes room', { roots: [holder('/data', 10_000_000, 15_700_000)] }, 'ask', null],
   ['upgrade where even uninstalling does not free enough', { roots: [holder('/data', 1_000_000, 1_000_000)] }, 'too-small', null],
   ['a root the host cannot measure is not a blocker', { roots: [holder('/data', 0, 15_700_000)] }, 'proceed', null],
   ['a host without the route is not a blocker', null, 'proceed', null],
 
+  // --- the two volumes the package passes through (#22) ---
+  ['the download volume needs the package, not just the target root',
+    { roots: [root('/data', 4_000_000), root('/sd', 200_000_000)] }, 'too-small', null],
+  ['a hand-off across volumes needs the temp volume too',
+    { roots: [volumeRoot('/sd', 200_000_000, 'sd'), volumeRoot('/data', 100_000_000, 'data')], tempVolume: 'data', tempFreeBytes: 2_000_000 },
+    'too-small', null, storeOn('/sd')],
+  ['a hand-off across volumes proceeds when temp has the package',
+    { roots: [volumeRoot('/sd', 200_000_000, 'sd'), volumeRoot('/data', 100_000_000, 'data')], tempVolume: 'data', tempFreeBytes: 20_000_000 },
+    'proceed', null, storeOn('/sd')],
+  ['one volume means the hand-off copies nothing',
+    { roots: [volumeRoot('/sd', 200_000_000, 'sd')], tempVolume: 'sd', tempFreeBytes: 1 },
+    'proceed', null, storeOn('/sd')],
+  ['an uninstall frees the temp volume before the copy',
+    { roots: [volumeHolder('/data', 2_000_000, 20_000_000, 'data'), volumeRoot('/sd', 200_000_000, 'sd')], tempVolume: 'data', tempFreeBytes: 2_000_000 },
+    'ask', null, storeOn('/sd')],
+  ["an unknown store root is not guessed at", { roots: [root('/data', 200_000_000)] }, 'proceed', null, storeOn('/nowhere')],
+
   // --- switch on/off (#299) ---
-  ['switch off: two roots and the host picks', off([root('/data', 4_000_000), root('/sd', 200_000_000)]), 'proceed', null],
+  ['switch off: two roots and the host picks', off([root('/data', 4_000_000), root('/sd', 200_000_000)]), 'proceed', null, storeOn('/sd')],
   ['switch on: one root has nothing to choose', on([root('/data', 200_000_000)]), 'proceed', null],
-  ['switch on: the smallest root that fits is pre-selected', on([root('/data', 4_000_000), root('/sd', 200_000_000)]), 'proceed', '/sd'],
+  ['switch on: the smallest root that fits is pre-selected', on([root('/data', 4_000_000), root('/sd', 200_000_000)]), 'proceed', '/sd', storeOn('/sd')],
   ['switch on: the smaller of two fitting roots wins', on([root('/data', 20_000_000), root('/sd', 200_000_000)]), 'proceed', '/data'],
   ['switch on: an upgrade stays on the recorded root', on([holder('/sd', 200_000_000, 15_700_000), root('/data', 200_000_000)]), 'proceed', '/sd'],
   ['switch on: an unmounted root is shown, never chosen', on([root('/sd', null), root('/data', 200_000_000)]), 'proceed', '/data'],
-  ['switch on: nowhere fits is still the space refusal', on([root('/data', 4_000_000), root('/sd', 8_000_000)]), 'too-small', null],
+  ['switch on: nowhere fits is still the space refusal', on([root('/data', 4_000_000), root('/sd', 8_000_000)]), 'too-small', null, storeOn('/sd')],
   ['switch on: an upgrade that must uninstall first asks no root', on([holder('/data', 10_000_000, 15_700_000)]), 'ask', null],
 ];
 
 let failed = 0;
-for (const [name, facts, want, wantRoot] of cases) {
+for (const [name, facts, want, wantRoot, opts] of cases) {
   pageHooks = { uninstall: [], roots: [] };
   rootChoice.clear();
   current = facts;
+  installedDirs.clear();
+  installedDirs.set('plugin-store', (opts && opts.ownDir) || '/data/plugins/plugin-store');
   if (facts === null) {
     globalThis.fetch = async () => ({ ok: false, status: 404 });
   } else {
@@ -181,6 +219,8 @@ for (const [name, facts, want, wantRoot] of cases) {
 {
   pageHooks = { uninstall: [], roots: [] };
   rootChoice.clear();
+  installedDirs.clear();
+  installedDirs.set('plugin-store', '/sd/plugins/plugin-store');
   current = on([root('/data', 4_000_000), root('/sd', 200_000_000)]);
   const first = await diskPlan('hysteria', size);
   const second = await diskPlan('hysteria', size);
@@ -197,13 +237,17 @@ for (const [name, facts, want, wantRoot] of cases) {
 {
   pageHooks = { uninstall: [], roots: [] };
   rootChoice.clear();
+  installedDirs.clear();
+  installedDirs.set('plugin-store', '/sd/plugins/plugin-store');
   current = on([root('/data', 4_000_000), root('/sd', 200_000_000)]);
   const cancelling = new Function(
     'askToUninstall',
     'askForRoot',
     'rootChoice',
+    'state',
+    'installedDirs',
     fmtBytes[0].replace(/^  /gm, '') + '\n' + decisionSource + '\nreturn diskPlan;',
-  )(async () => ({ proceed: true }), async () => ({ cancelled: true }), rootChoice);
+  )(async () => ({ proceed: true }), async () => ({ cancelled: true }), rootChoice, storeState, installedDirs);
   const plan = await cancelling('hysteria', size);
   if (plan.cancelled === true && rootChoice.size === 0) {
     console.log('ok   a cancelled picker cancels the install and is not remembered');

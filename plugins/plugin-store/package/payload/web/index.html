@@ -271,6 +271,10 @@
   const INSTALLED_TTL_MS = 30000;
   let installedFetchedAt = 0;
   let installedRequest = null;
+  // Where each plugin is installed (`installDir` on its service row). The
+  // pre-flight needs this plugin's own directory: that is where the download
+  // lands, so that is the volume the package has to fit on first.
+  let installedDirs = new Map();
   // The root an install run already picked, so the shelf pre-check and the
   // handoff after the download do not ask the operator twice (#299).
   const rootChoice = new Map();
@@ -365,10 +369,13 @@
         if (!response.ok) return null;
         const body = await response.json();
         const installed = new Map();
+        const dirs = new Map();
         for (const service of body.services || []) {
           if (!service || service.kind !== 'plugin' || !service.id) continue;
           installed.set(service.id, service.version || '');
+          if (service.installDir) dirs.set(service.id, service.installDir);
         }
+        installedDirs = dirs;
         installedFetchedAt = Date.now();
         return installed;
       } catch (_) {
@@ -751,7 +758,10 @@
     if (!holder) {
       // A fresh install may land on any root: the host fills the smallest one
       // that fits, so one fitting root is enough.
-      if (roots.some((row) => freeOf(row) >= size)) return fit;
+      if (roots.some((row) => freeOf(row) >= size)) {
+        requireTransferRoom(facts, size, null, false);
+        return fit;
+      }
       const best = roots.reduce((a, b) => (freeOf(b) > freeOf(a) ? b : a), roots[0]);
       throw new Error(
         '空间不够：安装需要 ' + fmtBytes(size) + '，最大的插件根 ' + best.root + ' 只有 ' + fmtBytes(freeOf(best)),
@@ -763,14 +773,87 @@
     // uninstalling the old copy frees `installed`, and the question becomes
     // whether the new copy fits after that (#19).
     const free = freeOf(holder);
-    if (!free) return fit;
+    if (!free) {
+      requireTransferRoom(facts, size, holder, false);
+      return fit;
+    }
     const installed = Number(holder.plugin.bytes || 0);
-    if (free >= size + installed) return fit;
-    if (free + installed >= size) return askToUninstall(id, size, free);
+    if (free >= size + installed) {
+      requireTransferRoom(facts, size, holder, false);
+      return fit;
+    }
+    if (free + installed >= size) {
+      // "Uninstall and install" removes the old copy before the download
+      // (`startInstall`), so the volume its bytes sit on gets them back for the
+      // transfer. The copy into temp still happens before the POST.
+      requireTransferRoom(facts, size, holder, id);
+      return askToUninstall(id, size, free);
+    }
     throw new Error(
       '空间不够：安装需要 ' + fmtBytes(size) + '，卸载旧版也只能空出 ' + fmtBytes(installed) +
       '，' + holder.root + ' 现在只有 ' + fmtBytes(free),
     );
+  }
+
+  // The two volumes the target-root decision above never looks at. The bytes
+  // are downloaded into this plugin's own root and only then handed to the
+  // host, so a pre-flight that watches just the target root says "go" and the
+  // download dies on a full volume; and a hand-off whose two directories sit on
+  // different filesystems copies the whole package a second time (`hand_off` in
+  // main.rs renames only within one volume). Both need one package of room.
+  //
+  // `volume` / `tempVolume` are the host's volume ids (#314); without them only
+  // the download is checked, which is the behaviour before that host change.
+  function requireTransferRoom(facts, size, holder, uninstall) {
+    const roots = Array.isArray(facts && facts.roots) ? facts.roots : [];
+    const ownDir = state.selfId && installedDirs.get(state.selfId);
+    if (!roots.length || !size || !ownDir) return;
+    const own = ownRoot(roots, ownDir);
+    if (!own || !own.freeBytes) return;
+    const held = holder && holder.plugin ? Number(holder.plugin.bytes || 0) : 0;
+    // Bytes an uninstall frees belong to one volume, and only count when the
+    // uninstall runs before the transfer that needs them.
+    const freed = (volume) => {
+      if (!uninstall || !held) return 0;
+      if (own.volume && holder.volume) return holder.volume === volume ? held : 0;
+      // No volume ids (older host): the single-root layout is the only one
+      // where the target and the download share a volume.
+      return holder.root === own.root ? held : 0;
+    };
+    const room = own.freeBytes + freed(own.volume);
+    if (room < size) {
+      throw new Error(
+        '空间不够：安装需要 ' + fmtBytes(size) + '，下载目录所在的 ' + own.root +
+        ' 只有 ' + fmtBytes(room) + '，包要先下载到这里再交给宿主',
+      );
+    }
+    // One volume means the hand-off moves the bytes; another volume means a
+    // second copy, so the temp volume needs the package too.
+    const temp = facts.tempVolume;
+    if (!own.volume || !temp || temp === own.volume) return;
+    const tempFree = Number(facts.tempFreeBytes);
+    if (!Number.isFinite(tempFree)) return;
+    const tempRoom = tempFree + freed(temp);
+    if (tempRoom < size) {
+      throw new Error(
+        '空间不够：安装需要 ' + fmtBytes(size) + '，临时目录所在的卷只有 ' + fmtBytes(tempRoom) +
+        '，包要先复制到那里再交给宿主',
+      );
+    }
+  }
+
+  // The configured root that holds `dir`, most specific first — the same rule
+  // the host uses when it decides where a plugin lives.
+  function ownRoot(roots, dir) {
+    let best = null;
+    for (const row of roots) {
+      const root = String(row.root || '').replace(/[\\/]+$/, '');
+      if (!root) continue;
+      if (dir === root || dir.startsWith(root + '/') || dir.startsWith(root + '\\')) {
+        if (!best || root.length > String(best.root).length) best = row;
+      }
+    }
+    return best;
   }
 
   // The root is the operator's when the host says so (#299). Off, a single
