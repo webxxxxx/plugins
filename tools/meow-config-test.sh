@@ -123,6 +123,27 @@ cp "$_plugin/config" "$WORK/once.yaml"
 run_meow fw status >/dev/null
 cmp -s "$WORK/once.yaml" "$_plugin/config" || fail 'router: 第二次跑改了文件'
 
+# ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
+fixture "$WORK/data-placeholder"
+cat > "$_plugin/config" <<'OLD'
+mixed-port: 7890
+geodata:
+  mmdb-path: '@DATA@/Country.mmdb'
+  geosite-path: '@DATA@/geosite.dat'
+rules:
+  - GEOIP,lan,DIRECT,no-resolve
+OLD
+run_meow mode >/dev/null
+grep -q '@DATA@' "$_plugin/config" && fail '@DATA@: 启动后配置里还剩占位符'
+grep -qx "  mmdb-path: '$_plugin/data/Country.mmdb'" "$_plugin/config" ||
+    fail "@DATA@: mmdb-path 没换成数据目录（$(grep mmdb-path "$_plugin/config")）"
+grep -qx "  geosite-path: '$_plugin/data/geosite.dat'" "$_plugin/config" ||
+    fail '@DATA@: geosite-path 没换成数据目录'
+# 幂等：再跑一次不该再改文件。
+cp "$_plugin/config" "$WORK/data-placeholder.once"
+run_meow mode >/dev/null
+cmp -s "$WORK/data-placeholder.once" "$_plugin/config" || fail '@DATA@: 第二次跑改了文件'
+
 # ---- 迁移：1.2/1.3 的 meow.yaml 搬回 config，旧开关搬进 state ----
 fixture "$WORK/migrate"
 meow_config > "$_plugin/meow.yaml"

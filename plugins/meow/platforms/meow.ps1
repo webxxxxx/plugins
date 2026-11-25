@@ -302,6 +302,13 @@ function Prepare-Config {
         $text = [System.IO.File]::ReadAllText($TEMPLATE)
         Write-Utf8 $CONFIG $text.Replace('@DATA@', (Get-DataPath))
     }
+    # 老版本生成的配置里可能还留着 @DATA@：meow 会按字面路径去开 GeoIP 库，加载失败后
+    # 整份配置都起不来（添加订阅的接口跟着报 400）。每次启动补一遍，幂等。
+    $text = [System.IO.File]::ReadAllText($CONFIG)
+    if ($text.Contains('@DATA@')) {
+        Write-Utf8 $CONFIG $text.Replace('@DATA@', (Get-DataPath))
+        Write-Note "配置里的 @DATA@ 已替换成 $(Get-DataPath)"
+    }
     # 更老的布局把我们的键和订阅写在一起：先搬进 state，再从配置里摘掉。
     Migrate-State $CONFIG
     Remove-OurKeys $CONFIG

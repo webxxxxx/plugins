@@ -131,6 +131,9 @@ package/
 `mixed-port` 以你写的为准：插件只在你没写的时候补 `7890`。
 
 - 第一次安装时 `config` 从包里的 `payload/config.yaml` 生成（`@DATA@` 渲染成数据目录）；
+  老版本生成过的配置里如果还留着字面量 `@DATA@`，每次 `start` 都会就地换成真实数据目录
+  （否则 meow 会拿 `@DATA@/Country.mmdb` 去找 GeoIP 库，加载失败后整份配置都起不来，
+  面板添加订阅的接口会报 HTTP 400）；
 - 从 1.2/1.3 升级：旧的 `<插件目录>/meow.yaml` 会被搬回 `config`，旧的 `proxy-mode` 搬进 `state`；
 - 更老的布局（开关和订阅写在一起）也认，插件会把自己的键摘出来放进 `state`；
 - 想把 `config` 恢复出厂：删掉它再 `plugin restart meow`。

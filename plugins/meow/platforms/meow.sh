@@ -242,6 +242,15 @@ prepare_config() {
         [ -f "$TEMPLATE" ] || { echo 'meow: payload/config.yaml missing' >&2; return 1; }
         sed -e "s#@DATA@#$DATA#g" "$TEMPLATE" > "$CONFIG" || return 1
     fi
+    # 老版本生成的配置里可能还留着字面量的 @DATA@（那时只在首次生成时替换一次）。
+    # 留着它 meow 会拿 "@DATA@/Country.mmdb" 去开 GeoIP 库，加载失败后整份配置都起不
+    # 来，页面上添加订阅的接口跟着报 400。每次启动补一遍，已经是真路径就什么都不做。
+    if grep -q '@DATA@' "$CONFIG" 2>/dev/null; then
+        _tmp="$CONFIG.tmp.$$"
+        sed -e "s#@DATA@#$DATA#g" "$CONFIG" > "$_tmp" 2>/dev/null || { rm -f "$_tmp"; return 1; }
+        mv "$_tmp" "$CONFIG" || { rm -f "$_tmp"; return 1; }
+        echo "meow: 配置里的 @DATA@ 已替换成 $DATA" >&2
+    fi
     # 更老的布局把我们的键和订阅写在一起：先搬进 state，再从配置里摘掉。
     migrate_state "$CONFIG"
     strip_our_keys "$CONFIG"

@@ -155,6 +155,26 @@ if (-not ($bad -is [hashtable] -and $bad.Error)) { Fail 'capabilities: 非法标
 
 Write-Output 'meow proxy mode capability (windows): ok'
 
+# ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
+$plugin = New-Fixture 'data-placeholder'
+Write-Text $CONFIG (@(
+    'mixed-port: 7890'
+    'geodata:'
+    "  mmdb-path: '@DATA@/Country.mmdb'"
+    "  geosite-path: '@DATA@/geosite.dat'"
+    'rules:'
+    '  - GEOIP,lan,DIRECT,no-resolve'
+) -join "`n")
+Prepare-Config
+if ((Read-Text $CONFIG) -match '@DATA@') { Fail '@DATA@: 启动后配置里还剩占位符' }
+$data = (Get-DataPath)
+if ((Read-Text $CONFIG) -notmatch [regex]::Escape("mmdb-path: '${data}/Country.mmdb'")) {
+    Fail "@DATA@: mmdb-path 没换成数据目录（$((Read-Text $CONFIG) -split "`n" | Where-Object { $_ -match 'mmdb-path' })）"
+}
+$once = Read-Text $CONFIG
+Prepare-Config
+if ((Read-Text $CONFIG) -ne $once) { Fail '@DATA@: 第二次跑改了文件' }
+
 # ---- 迁移：1.2/1.3 的 meow.yaml 搬回 config，旧开关搬进 state ----
 $plugin = New-Fixture 'migrate'
 Write-Text (Join-Path $plugin 'meow.yaml') (Get-MeowConfig)
