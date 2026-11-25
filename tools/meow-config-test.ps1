@@ -72,6 +72,7 @@ function New-Fixture([string]$Name) {
     New-Item -ItemType Directory -Force -Path (Join-Path $payload 'yacd') | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $payload 'lib') | Out-Null
     Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/config.yaml') (Join-Path $payload 'config.yaml')
+    Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/Country.mmdb') (Join-Path $payload 'Country.mmdb')
     Write-Text (Join-Path $plugin 'config') (Get-MeowConfig)
 
     $script:PLUGIN_ROOT = $plugin
@@ -154,6 +155,16 @@ $bad = Invoke-Capability 'mode' @{ mode = 'turbo' }
 if (-not ($bad -is [hashtable] -and $bad.Error)) { Fail 'capabilities: 非法标签应该被拒' }
 
 Write-Output 'meow proxy mode capability (windows): ok'
+
+# ---- 包里带的 Country.mmdb：第一次落地到数据目录，之后不覆盖 ----
+$plugin = New-Fixture 'geodata'
+Seed-GeoData
+$target = Join-Path $DATA 'Country.mmdb'
+if (-not (Test-Path -LiteralPath $target)) { Fail 'geodata: 数据目录里没有 Country.mmdb' }
+if ((Get-Item -LiteralPath $target).Length -ne (Get-Item -LiteralPath (Join-Path $ROOT 'Country.mmdb')).Length) { Fail 'geodata: 落下去的不是包里那份' }
+Write-Text $target 'updated-by-meow'
+Seed-GeoData
+if ((Read-Text $target) -ne 'updated-by-meow') { Fail 'geodata: 覆盖了已有的库' }
 
 # ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
 $plugin = New-Fixture 'data-placeholder'

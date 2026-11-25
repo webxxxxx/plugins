@@ -31,7 +31,8 @@ dns:
     - 223.5.5.5
     - 119.29.29.29
 
-# 地理数据库放数据目录，别改安装目录；缺失时 meow 会自行下载。
+# 地理数据库放数据目录，别改安装目录。包里带了一份精简的 Country.mmdb，第一次启动
+# 会放进数据目录，省得设备先去 GitHub 下 7 MB 的库；缺别的库时 meow 会自行下载。
 # 路径用单引号：@DATA@ 在 Windows 上会替换成 C:\ProgramData\...，双引号标量会把
 # \P、\s 当成转义而报 "found unknown escape character"。
 geodata:

@@ -77,9 +77,26 @@ function Write-Note([string]$Text) {
     [Console]::Error.WriteLine("meow: $Text")
 }
 
+# 包里带了一份精简的 Country.mmdb（130 KB）。数据目录里还没有就放进去：很多路由器
+# 直连不通 GitHub，meow 自己下 7 MB 的库会失败，而 GEOIP 规则没有库整份配置都起不来。
+# 已经有了就不动——那可能是 meow 自己更新过的。
+function Seed-GeoData {
+    $source = Join-Path $ROOT 'Country.mmdb'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+    $target = Join-Path $DATA 'Country.mmdb'
+    if (Test-Path -LiteralPath $target -PathType Leaf) { return }
+    try {
+        Copy-Item -LiteralPath $source -Destination $target -Force
+        Write-Note "已把包里的 Country.mmdb 放进 $DATA"
+    } catch {
+        Write-Note "Country.mmdb 放不进 $DATA（$($_.Exception.Message)）"
+    }
+}
+
 # 迁移要打日志，所以放在 Write-Note 之后；之后所有路径都指进 <插件目录>\data。
 Move-LegacyData
 New-Item -ItemType Directory -Force -Path $DATA | Out-Null
+Seed-GeoData
 
 function Write-Utf8([string]$Path, [string]$Text) {
     $utf8 = New-Object System.Text.UTF8Encoding($false)

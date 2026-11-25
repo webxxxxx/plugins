@@ -44,6 +44,21 @@ STATE="$PLUGIN_ROOT/state"                       # 我们自己的：只缓存�
 FW="$HERE/meow-fw.sh"
 SDK="$ROOT/lib/svcd-plugin.sh"                   # 宿主 SDK：通道循环与能力分发
 
+# 包里带了一份精简的 Country.mmdb（130 KB）。数据目录里还没有就放进去：很多路由器
+# 直连不通 GitHub，meow 自己下 7 MB 的库会失败，而 GEOIP 规则没有库整份配置都起不来。
+# 已经有了就不动——那可能是 meow 自己更新过的。
+seed_geodata() {
+    [ -f "$ROOT/Country.mmdb" ] || return 0
+    [ -f "$DATA/Country.mmdb" ] && return 0
+    _seed="$DATA/Country.mmdb.tmp.$$"
+    if cp "$ROOT/Country.mmdb" "$_seed" 2>/dev/null && mv "$_seed" "$DATA/Country.mmdb" 2>/dev/null; then
+        echo "meow: 已把包里的 Country.mmdb 放进 $DATA" >&2
+    else
+        rm -f "$_seed"
+    fi
+    return 0
+}
+
 # 1.2/1.3 把数据放在插件目录之外，两种老位置：默认根布局下是 <data>/meow（插件目录的
 # 上上级同名目录），手跑时是 <插件目录>/.data/meow。第一次启动搬进来：geo 库跟着走。
 migrate_legacy() {
@@ -60,6 +75,7 @@ migrate_legacy() {
 
 migrate_legacy
 mkdir -p "$DATA" 2>/dev/null || true
+seed_geodata
 
 # 能力通道（页面 A 的代理类型选择器）用 SDK；sync 会把 sdk/shell 的副本刷到 payload/lib。
 if [ -f "$SDK" ]; then . "$SDK"; fi

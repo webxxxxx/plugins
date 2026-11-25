@@ -47,6 +47,7 @@ fixture() {
     cp "$REPO/plugins/meow/platforms/meow.sh" "$_bin/meow.sh"
     cp "$REPO/plugins/meow/platforms/lib/svcd-plugin.sh" "$_plugin/1.3.0/payload/lib/svcd-plugin.sh"
     cp "$REPO/plugins/meow/package/payload/config.yaml" "$_plugin/1.3.0/payload/config.yaml"
+    cp "$REPO/plugins/meow/package/payload/Country.mmdb" "$_plugin/1.3.0/payload/Country.mmdb"
     meow_config > "$_plugin/config"
     # 伪 meow：校验（-t）立刻成功，真正启动就赖着不退，好让看护循环有东西可等。
     printf '#!/bin/sh\ncase " $* " in *" -t "*) exit 0 ;; esac\nwhile :; do sleep 1; done\n' > "$_bin/meow"
@@ -122,6 +123,17 @@ grep -qx '  enable: false' "$_plugin/config" || fail 'router: tun 没关掉'
 cp "$_plugin/config" "$WORK/once.yaml"
 run_meow fw status >/dev/null
 cmp -s "$WORK/once.yaml" "$_plugin/config" || fail 'router: 第二次跑改了文件'
+
+# ---- 包里带的 Country.mmdb：第一次落地到数据目录，之后不覆盖 ----
+fixture "$WORK/geodata"
+run_meow mode >/dev/null
+[ -f "$_plugin/data/Country.mmdb" ] || fail 'geodata: 数据目录里没有 Country.mmdb'
+cmp -s "$_plugin/1.3.0/payload/Country.mmdb" "$_plugin/data/Country.mmdb" ||
+    fail 'geodata: 落下去的不是包里那份'
+echo 'updated-by-meow' > "$_plugin/data/Country.mmdb"
+run_meow mode >/dev/null
+grep -qx 'updated-by-meow' "$_plugin/data/Country.mmdb" ||
+    fail 'geodata: 覆盖了数据目录里已有的库'
 
 # ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
 fixture "$WORK/data-placeholder"
