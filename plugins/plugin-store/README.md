@@ -198,6 +198,11 @@ release_asset({ "download": true, "asset": "svcd-0.1.5-x86_64-pc-windows-msvc.zi
   `incoming/` 下；不依赖外网。限流响应另有一条本地假 403 用例，直接驱动 `net::fetch_json`
   验证 `x-ratelimit-*` 头与可读文案。
 - 安装收尾：`a_failed_install_drops_the_downloaded_package` 断言失败报告后 `.spk` 与 `.part` 都不在了。
+- 空间预检的判断（页面里的 `diskPlan`）有一条不依赖浏览器的用例：
+  `node plugins/plugin-store/tests/disk-plan.mjs`。它从页面源码里抽出真实函数，用假 `fetch` 跑
+  七种情形：单根/多根/哪都不够、设备上的升级（旧版 15.7 MiB、空闲 17.5 MiB → 弹框）、
+  两份额度都够、连新包都装不下、以及老宿主没有 `/api/v1/disk` 时不拦安装。页面结构改了标记
+  位置时它会直接报错，而不是悄悄什么都没测。
 - 认证与缓存：`an_etag_turns_a_repeated_check_into_a_cached_304`、
   `a_configured_token_is_sent_as_a_bearer_header`、`a_token_file_is_read_trimmed_and_never_beats_the_environment`
   与 `a_rate_limited_answer_points_at_the_token_file` 都用本地 TCP 假服务器覆盖，

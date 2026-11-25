@@ -694,14 +694,29 @@
     }
     const roots = Array.isArray(facts && facts.roots) ? facts.roots : [];
     if (roots.length === 0) return { proceed: true };
+    const freeOf = (row) => Number((row && row.freeBytes) || 0);
     const holder = roots.find((row) => row.plugin && row.plugin.id === id);
-    const target = holder || roots.find((row) => row.default) || roots[0];
-    const free = Number((target && target.freeBytes) || 0);
+
+    if (!holder) {
+      // A fresh install may land on any root: the host fills the smallest one
+      // that fits, so one fitting root is enough.
+      if (roots.some((row) => freeOf(row) >= size)) return { proceed: true };
+      const best = roots.reduce((a, b) => (freeOf(b) > freeOf(a) ? b : a), roots[0]);
+      throw new Error(
+        '空间不够：安装需要 ' + fmtBytes(size) + '，最大的插件根 ' + best.root + ' 只有 ' + fmtBytes(freeOf(best)),
+      );
+    }
+
+    // An upgrade stays on the root the plugin lives on; the old copy is still
+    // there while the new one is staged, so both have to fit.
+    const free = freeOf(holder);
     if (!free) return { proceed: true };
-    const installed = holder && holder.plugin ? Number(holder.plugin.bytes || 0) : 0;
+    const installed = Number(holder.plugin.bytes || 0);
     if (free >= size + installed) return { proceed: true };
     if (free < size) {
-      throw new Error('空间不够：安装需要 ' + fmtBytes(size) + '，' + target.root + ' 只有 ' + fmtBytes(free));
+      throw new Error(
+        '空间不够：安装需要 ' + fmtBytes(size) + '，' + holder.root + ' 只有 ' + fmtBytes(free),
+      );
     }
     return askToUninstall(id, size, free);
   }
