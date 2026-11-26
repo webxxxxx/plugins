@@ -361,6 +361,36 @@ def check_tag_free(tag: str) -> None:
         raise Fail(f"远端已经有 tag {tag}；换个版本号（已经发过的版本不能再发）")
 
 
+def metadata(crate: Path, locked: bool, offline: bool) -> subprocess.CompletedProcess:
+    command = ["cargo", "metadata", "--format-version", "1"]
+    if locked:
+        command.append("--locked")
+    if offline:
+        command.append("--offline")
+    return subprocess.run(
+        command,
+        cwd=crate,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def cold_cache(stderr: str) -> bool:
+    # 冷缓存：这台机器还没下过这个 crate（换机器、新 clone、刚加过依赖都会这样）。
+    # 那不是锁文件的问题，联网把依赖拉一遍就能继续验；联网还过不去就是真问题。
+    return any(
+        token in stderr
+        for token in (
+            "attempting to make an HTTP request",
+            "failed to download",
+            "no matching package named",
+        )
+    )
+
+
 def verify_crates(crates: list[Path]) -> None:
     # 进版本库的 Cargo.lock 要按 CI 的 `--locked` 验；插件自己的 lock 一般不进库
     # （CI 用 build.sh 构建，不带 --locked），这里只证明依赖能被解析出来。
@@ -368,18 +398,12 @@ def verify_crates(crates: list[Path]) -> None:
         locked = tracked(crate / "Cargo.lock")
         label = "cargo metadata --locked --offline" if locked else "cargo metadata --offline"
         print(f"  {label}：{crate.relative_to(ROOT).as_posix()}")
-        command = ["cargo", "metadata", "--offline", "--format-version", "1"]
-        if locked:
-            command.insert(2, "--locked")
-        proc = subprocess.run(
-            command,
-            cwd=crate,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
+        proc = metadata(crate, locked, offline=True)
+        if proc.returncode != 0 and cold_cache(proc.stderr):
+            # 离线只是图快和图干净；缓存冷的时候别把发布卡住。--locked 跟着一起传，
+            # 联网这一遍也不会顺手改锁文件。
+            print("    本地缓存里没有这些 crate（不是锁文件的问题），联网再验一次")
+            proc = metadata(crate, locked, offline=False)
         if proc.returncode != 0:
             hint = "（CI 会在同一步失败）" if locked else ""
             raise Fail(
