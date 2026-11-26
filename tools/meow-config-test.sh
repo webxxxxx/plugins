@@ -63,9 +63,23 @@ state_of() {
     sed -n 's/^proxy-mode:[[:space:]]*//p' "$_plugin/state" 2>/dev/null | head -n 1
 }
 
-# ---- pc：tproxy 端口和 mark 写进去，tun 关掉，代理类型落进 state ----
+# ---- 缺省 off：刚装好不接管流量，只留 mixed-port（tun/tproxy 都不该出现） ----
+# 默认要是 pc（tun）就会把整机流量导进一个没有可用出口的内核，表现就是断网。
+fixture "$WORK/default"
+cp "$_plugin/config" "$WORK/config.before"
+run_meow mode >/dev/null
+grep -qx 'mixed-port: 7891' "$_plugin/config" || fail 'default: 用户写的 mixed-port 被改掉了'
+grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'default: 缺省不该有 tproxy-port'
+grep -qx 'routing-mark:.*' "$_plugin/config" && fail 'default: 缺省不该有 routing-mark'
+grep -A1 -x 'tun:' "$_plugin/config" | grep -qx '  enable: false' || fail 'default: tun 没关掉'
+grep -q 'node-1' "$_plugin/config" || fail 'default: 订阅内容被弄丢了'
+grep -qx 'proxy-mode: off' "$_plugin/state" || fail 'default: state 缺省不是 off'
+cmp -s "$WORK/config.before" "$_plugin/state" && fail 'default: state 跟配置混在一起了'
+
+# ---- pc（页面上的 tun）：tproxy 端口和 mark 写进去，tun 关掉，代理类型落进 state ----
 fixture "$WORK/pc"
 cp "$_plugin/config" "$WORK/config.before"
+run_meow set-mode tun >/dev/null
 run_meow mode >/dev/null
 grep -qx 'mixed-port: 7891' "$_plugin/config" || fail 'pc: 用户写的 mixed-port 被改掉了'
 grep -qx 'tproxy-port: 7893' "$_plugin/config" || fail 'pc: tproxy-port 没写进去'
@@ -80,8 +94,10 @@ sed -i 's/^mixed-port: 7891/mixed-port: 1080/' "$_plugin/config"
 run_meow mode >/dev/null
 grep -qx 'mixed-port: 1080' "$_plugin/config" || fail 'pc: 改 config 的 mixed-port 没生效'
 
-# ---- off：只留 mixed-port，tproxy/mark/tun 全撤 ----
+# ---- off：从 pc 切回来，只留 mixed-port，tproxy/mark/tun 全撤 ----
 fixture "$WORK/off"
+run_meow set-mode tun >/dev/null
+run_meow mode >/dev/null
 run_meow set-mode off >/dev/null
 grep -qx 'proxy-mode: off' "$_plugin/state" || fail 'off: state 里的代理类型没改成 off'
 run_meow mode >/dev/null
@@ -195,7 +211,7 @@ cat > "$WORK/feed.sh" <<'FEED'
 sleep 1
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mode","arguments":{}}}'
 sleep 1
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mode","arguments":{"mode":"off"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mode","arguments":{"mode":"tun"}}}'
 sleep 3
 printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"svcd.shutdown"}'
 FEED
@@ -218,11 +234,12 @@ channel_has() {
     fail "channel: $2"
 }
 
-# 能力结果是 JSON 里的字符串，引号会被转义：文件里是 \"mode\":\"tun\"。
-channel_has 'mode\":\"tun\"' '读状态没回代理类型'
+# 能力结果是 JSON 里的字符串，引号会被转义：文件里是 \"mode\":\"off\"。
+# 刚装好（还没写过 state）第一次读就该是缺省的 off，切成 tun 之后看护循环按 pc 重启。
+channel_has 'mode\":\"off\"' '读状态没回缺省的 off'
 channel_has 'changing\":true' '切代理类型没回执'
-[ "$(state_of)" = off ] || fail 'channel: 切完没落到 state'
-grep -q 'proxy-mode pc → off' "$WORK/channel.err" || fail 'channel: 看护循环没按新形态重启'
+[ "$(state_of)" = pc ] || fail 'channel: 切完没落到 state'
+grep -q 'proxy-mode off → pc' "$WORK/channel.err" || fail 'channel: 看护循环没按新形态重启'
 [ -f "$_plugin/data/meow.pid" ] && fail 'channel: 退出后还留着 pidfile'
 fi
 

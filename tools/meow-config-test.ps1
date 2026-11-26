@@ -95,9 +95,25 @@ function Expect([string]$Path, [string]$Key, [string]$Value, [string]$Label) {
 
 foreach ($block in (Get-FunctionBlocks $Script)) { . $block }
 
-# ---- pc：tun + fake-ip，用户写的 mixed-port 不动，代理类型落进 state ----
+# ---- 缺省 off：刚装好不接管流量，tun 关掉、tproxy 不开 ----
+# 缺省要是 pc（tun），没有订阅、没有可用出口时整机流量会被导进一个转不出去的内核，
+# 表现就是断网。
+$plugin = New-Fixture 'default'
+Prepare-Config
+Apply-Settings (Get-Mode) | Out-Null
+if ((Get-Mode) -ne 'off') { Fail 'default: state 缺省不是 off' }
+if ((Read-Text $STATE) -notmatch '(?m)^proxy-mode: off') { Fail 'default: state 里没写下 off' }
+if ((Get-BlockScalar $CONFIG 'tun' 'enable') -ne 'false') { Fail 'default: tun 没关掉' }
+if ((Get-BlockScalar $CONFIG 'dns' 'enhanced-mode') -eq 'fake-ip') { Fail 'default: 缺省不该开 fake-ip' }
+Expect $CONFIG 'mixed-port' '7891' 'default'
+Expect $CONFIG 'tproxy-port' '' 'default'
+if ((Read-Text $CONFIG) -notmatch 'node-1') { Fail 'default: 订阅内容被弄丢了' }
+if ((Read-Text $CONFIG) -match 'proxy-mode:') { Fail 'default: state 的键写进了配置' }
+
+# ---- pc（页面上的 tun）：tun + fake-ip，用户写的 mixed-port 不动，代理类型落进 state ----
 $plugin = New-Fixture 'pc'
 Prepare-Config
+Set-ModeCache 'pc'
 Apply-Settings (Get-Mode) | Out-Null
 if ((Get-BlockScalar $CONFIG 'tun' 'enable') -ne 'true') { Fail 'pc: tun.enable 没打开' }
 if ((Get-BlockScalar $CONFIG 'dns' 'enhanced-mode') -ne 'fake-ip') { Fail 'pc: dns.enhanced-mode 不是 fake-ip' }

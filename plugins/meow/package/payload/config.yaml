@@ -8,6 +8,8 @@
 # lan-interface 都在 <插件目录>/config 里，由插件在启动时写进这份配置的受管键
 # （mixed-port、tun、dns、tproxy-port），所以 meow 重写配置也不会把它们弄丢。
 # 页面顶部的代理类型改的就是 proxy-mode，只动那几个受管键；订阅、代理组、规则原样保留。
+# 刚装好时是 off（不接管系统流量）：没有订阅、没有可用出口时，tun / tproxy 会把整机流量
+# 导进一个转不出去的内核，表现就是断网。页面上选了 tun / tproxy 才会接管，选择记在 state。
 
 mixed-port: 7890
 allow-lan: true

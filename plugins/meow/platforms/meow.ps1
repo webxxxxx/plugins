@@ -16,8 +16,10 @@ Windows 上没有 nftables / pf，本机透明代理只有 TUN（Wintun）一条
 tun 和 dns.fake-ip 打开（这两样必须成对，缺一个 meow 就一条路由都不装）。网关形态
 （proxy-mode: router）依赖 iptables，Windows 不支持。
 
-三种形态就是页面 A 顶部的代理类型选择器：
+三种形态就是页面 A 顶部的代理类型选择器（state 里没有 proxy-mode 时缺省 off）：
   off    不启动 tun，也不开 tproxy：meow 只当普通 HTTP/SOCKS 代理（mixed-port）。
+         刚装好的缺省值：既没有订阅也没有可用的出口，这时要是在 tun 形态下起来，
+         整机流量会被导进一个转不出去的内核，表现就是断网。
   tun    就是 proxy-mode: pc —— tun + fake-ip。
   tproxy 就是 proxy-mode: router —— 只有 Linux 有，Windows 明确拒绝。
 
@@ -124,11 +126,13 @@ function Get-ConfigValue([string]$Path, [string]$Key) {
 }
 
 function Get-Mode {
+    # 缺省 off：刚装好不接管流量。不能缺省 pc（tun）：没有订阅、没有可用出口时
+    # TUN + fake-ip 会把整机流量导进一个转不出去的内核，表现就是断网。
     $mode = Get-ConfigValue $STATE 'proxy-mode'
-    if (-not $mode) { return 'pc' }
+    if (-not $mode) { return 'off' }
     if ($mode -notin @('off', 'pc', 'router')) {
-        Write-Note "缓存里 proxy-mode 只能是 off、pc 或 router（现在是 '$mode'）"
-        return 'pc'
+        Write-Note "缓存里 proxy-mode 只能是 off、pc 或 router（现在是 '$mode'），按 off 处理"
+        return 'off'
     }
     return $mode
 }
@@ -495,6 +499,9 @@ function Start-MeowChild {
     }
 
     $mode = Get-Mode
+    if ($mode -eq 'off') {
+        Write-Note '代理类型是 off —— 只开 mixed-port，不接管系统流量（页面上选 tun 才接管）'
+    }
     # -d 是 meow 的家目录：缓存落在这里，指到插件自己的 data\，不要指 payload（版本目录）。
     $meowArgs = @('-d', $DATA, '-f', $CONFIG, '--ext-ui', (Join-Path $ROOT 'yacd'))
     $quoted = ($meowArgs | ForEach-Object { Quote-Arg $_ }) -join ' '
@@ -645,7 +652,7 @@ function Stop-Meow {
 }
 
 function Show-Status {
-    $mode = 'pc'
+    $mode = 'off'
     if (Test-Path -LiteralPath $STATE -PathType Leaf) { $mode = Get-Mode }
 
     $tun = $false

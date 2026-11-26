@@ -10,7 +10,11 @@
 #   <插件目录>/data     运行数据：meow 的 geo 库、pid、`-d` 指过来的缓存。
 #                       宿主升级时保留它；升级前的老位置在 <data>/meow，启动时搬进来。
 #
-# 运行形态由 state 里的 proxy-mode 决定（缺省 pc），受管键按形态自动写进 meow 的 config：
+# 运行形态由 state 里的 proxy-mode 决定（缺省 off），受管键按形态自动写进 meow 的 config。
+# 缺省值不能是 pc：刚装好既没有订阅、也没有可用的出口，这时要是在 tun / tproxy 形态下
+# 起来，整机流量就被导进一个转不出去的内核，表现就是断网。页面上选了 tun / tproxy 才
+# 接管流量，选择记在 state 里，升级和重启都还认。
+# 三种形态：
 #   off    不接管流量：只开 mixed-port 当普通 HTTP/SOCKS 代理，tproxy / tun 都不开。
 #   pc     本机透明代理。Linux：tproxy-port + routing-mark（meow 自己装 nft 规则）；
 #          Windows：tun + fake-ip（见 meow.ps1）。页面上的「tun」就是它。
@@ -103,7 +107,7 @@ our_or() {
 mode_of() {
     _mode=$(our proxy-mode)
     case "$_mode" in
-        '') printf 'pc' ;;
+        '') printf 'off' ;;
         off|pc|router) printf '%s' "$_mode" ;;
         *) echo "meow: 缓存里的 proxy-mode 只能是 off、pc 或 router（现在是 '$_mode'）" >&2; return 1 ;;
     esac
@@ -208,7 +212,7 @@ write_state() {
     {
         echo "# meow 插件的状态：只记代理类型，页面上的 off / tun / tproxy 就是它。"
         echo "# meow 的配置在 <插件目录>/config（订阅、代理组、规则、端口都在那里）。"
-        echo "proxy-mode: ${1:-pc}"
+        echo "proxy-mode: ${1:-off}"
     } > "$STATE"
 }
 
@@ -232,7 +236,7 @@ migrate_state() {
                 *) echo "meow: 迁移时忽略未知的 proxy-mode '$_value'" >&2 ;;
             esac
         else
-            if [ ! -f "$STATE" ]; then write_state "$(mode_of 2>/dev/null || printf pc)"; fi
+            if [ ! -f "$STATE" ]; then write_state "$(mode_of 2>/dev/null || printf off)"; fi
             set_key "$STATE" "$_key" "$_value"
         fi
     done
@@ -272,7 +276,7 @@ prepare_config() {
     migrate_state "$CONFIG"
     strip_our_keys "$CONFIG"
     if [ ! -f "$STATE" ]; then
-        write_state "$(mode_of 2>/dev/null || printf pc)"
+        write_state "$(mode_of 2>/dev/null || printf off)"
     fi
     return 0
 }
@@ -580,6 +584,9 @@ start_child() {
         echo "meow: 缺少规则脚本 $FW" >&2
         return 1
     fi
+    if [ "$_mode" = off ]; then
+        echo "meow: 代理类型是 off —— 只开 mixed-port，不接管系统流量（页面上选 tun / tproxy 才接管）" >&2
+    fi
     echo "meow starting mode=$_mode (config=$CONFIG)" >&2
     # stdin 接 /dev/null：宿主的通道口只留在看护进程里，meow 不该继承它。
     # -d 是 meow 的家目录：缓存、规则提供者的缓存都落在这里，所以指到插件自己的
@@ -680,7 +687,7 @@ secret_of() {
 
 # 读：{"mode":"off|tun|tproxy","proxy-mode":"off|pc|router","running":bool,"secret":...}
 report_mode() {
-    _mode=$(mode_of 2>/dev/null) || _mode=pc
+    _mode=$(mode_of 2>/dev/null) || _mode=off
     _running=false
     running && _running=true
     _ports=''
@@ -740,7 +747,7 @@ handle_mode() {
 
 # 宿主 `svc status` 的一行摘要。
 svcd_status() {
-    _mode=$(mode_of 2>/dev/null) || _mode=pc
+    _mode=$(mode_of 2>/dev/null) || _mode=off
     if running; then
         printf '%s (mode=%s)' 'running' "$(label_of "$_mode")"
     else
@@ -800,7 +807,7 @@ do_stop() {
 }
 
 do_status() {
-    mode=$(mode_of 2>/dev/null) || mode=pc
+    mode=$(mode_of 2>/dev/null) || mode=off
     fw=''
     if [ "$mode" = router ]; then
         state=$(firewall_state)

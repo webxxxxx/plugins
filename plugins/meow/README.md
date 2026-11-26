@@ -10,7 +10,7 @@ Windows 用 `meow.ps1`（PowerShell），打包时合并进清单，见下面的
 
 ## 平台与形态
 
-透明代理的形态由配置里的顶层键 `proxy-mode` 选（缺省 `pc`）；页面顶部的代理类型
+透明代理的形态由配置里的顶层键 `proxy-mode` 选（缺省 `off`）；页面顶部的代理类型
 `off` / `tun` / `tproxy` 就是它的三个取值 `off` / `pc` / `router`：
 
 | 平台 | `off`：不接管 | `pc`：本机透明代理 | `router`：网关（LAN） |
@@ -27,6 +27,11 @@ Windows 用 `meow.ps1`（PowerShell），打包时合并进清单，见下面的
 `off` 不启动 tun、也不开 tproxy：需要代理的软件自己指到 `mixed-port` 就行，系统流量
 完全不动。`pc` / `router` 都要求足够的权限：Linux 的 nft/iptables 要 root，Windows 的
 Wintun 要管理员。
+
+**刚装好时就是 `off`**：`state` 里没有 `proxy-mode` 时缺省就是它，`start` 只开
+`mixed-port`，不碰系统路由和 DNS。缺省不能是 `pc`——这时既没有订阅也没有可用的出口，
+TUN / tproxy 一起就把整机流量导进一个转不出去的内核，表现就是断网。需要代理时在页面上
+选一次 `tun` / `tproxy`，选择记进 `state`，升级和重启都还认。
 
 ## 入口：清单只写这个包是什么，入口按平台挑
 
@@ -154,7 +159,7 @@ package/
 `<插件目录>/state` 里只有一行：
 
 ```yaml
-proxy-mode: pc          # off | pc | router（Windows 只认 off / pc）
+proxy-mode: off         # off | pc | router（Windows 只认 off / pc）；刚装好的缺省值
 ```
 
 `config` 里跟形态有关的键（默认值，插件按形态写）：

@@ -64,7 +64,8 @@
 
   <script type="module">
     // 这个页面是壳：顶上是代理类型（off / tun / tproxy），下面 iframe 嵌 meow 自带的 YACD。
-    // 选代理类型 → 调插件能力 mode → 写进 config 的 proxy-mode → 看护进程按新形态重启 meow。
+    // 选代理类型 → 调插件能力 mode → 写进 state 的 proxy-mode → 看护进程按新形态重启 meow。
+    // 刚装好时 state 里没有这个键，插件按 off 走：不接管流量，先选 tun / tproxy 才接管。
     import { pluginUI } from './plugin-ui.mjs';
 
     const ui = pluginUI();
