@@ -157,6 +157,10 @@ package/
   老版本生成过的配置里如果还留着字面量 `@DATA@`，每次 `start` 都会就地换成真实数据目录
   （否则 meow 会拿 `@DATA@/Country.mmdb` 去找 GeoIP 库，加载失败后整份配置都起不来，
   面板添加订阅的接口会报 HTTP 400）；
+- meow 添加订阅时会把整份 `config` 重写一遍，没设过的段写成 `tun: null` 这种空占位；
+  插件启动时会把「顶层键出现两次、其中一份是 `null` / `~` / `{}`」的那种清掉，只留真块
+  （两份都是有内容的块属于没见过的写法，不猜，让 meow 自己报错）。不清的话 YAML 直接
+  `duplicate entry with key "tun"`，meow 一个字符都不认，插件就再也起不来；
 - 包里带了一份精简的 `Country.mmdb`（约 130 KB），第一次启动会放进数据目录；数据目录里
   已有这个文件就不动它（可能是 meow 自己更新过的），别的 geo 库缺失时 meow 会自己下载；
 - 从 1.2/1.3 升级：旧的 `<插件目录>/meow.yaml` 会被搬回 `config`，旧的 `proxy-mode` 搬进 `state`；

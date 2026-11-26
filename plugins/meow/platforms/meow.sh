@@ -177,17 +177,27 @@ del_key() {
 
 # set_block_key <文件> <块> <键> <值>：块里那一行替换，块里没有就补一行；
 # 连块都没有就把整块追加到末尾。
+# 块头只认 "<块>:"、"<块>: null"、"<块>: ~"、"<块>: {}" 这几种：后三种是 meow 对「这个段
+# 没设过」的序列化，先换成真块头再补键。不这么办，键会补到文件末尾，跟原来的空块头凑成
+# 同一个键的第二份，meow 直接报 duplicate entry with key。
 set_block_key() {
     _tmp="$1.tmp.$$"
     awk -v block="$2" -v key="$3" -v val="$4" '
         function flush() {
             if (inblock && !done) { print "  " key ": " val; done = 1 }
         }
+        function unset_header(s) {
+            return s ~ ("^" block ":[ \t]*(null|~|\\{\\})[ \t]*(#.*)?$")
+        }
         BEGIN { inblock = 0; seen = 0; done = 0 }
         /^[^ \t#]/ {
             flush()
-            inblock = ($0 ~ ("^" block ":[ \t]*$"))
-            if (inblock) seen = 1
+            inblock = ($0 ~ ("^" block ":[ \t]*$")) || unset_header($0)
+            if (inblock) {
+                seen = 1
+                print ((unset_header($0)) ? block ":" : $0)
+                next
+            }
             print; next
         }
         {
@@ -243,6 +253,40 @@ migrate_state() {
     return 0
 }
 
+# 顶层键写两遍，YAML 一个字符都不认：meow 报 duplicate entry with key "tun" 就再也起不来。
+# meow 会把没设过的段序列化成 "<键>: null"（添加订阅时它就把 config 重写一遍），老版本又在
+# 末尾补过一份真块，同一个键就出现两次。这里只丢 null / ~ / {} 这种纯占位的那一份，真块（以及
+# 块里的内容）原样留着；两份都是有内容的块属于没见过的写法，不猜，留给 meow 自己报错。
+heal_null_duplicates() {
+    _tmp="$1.tmp.$$"
+    awk '
+        function key_of(s) {
+            if (s ~ /^[^ \t#]/ && s ~ /^[A-Za-z0-9_.-]+:/) {
+                sub(/:.*/, "", s)
+                return s
+            }
+            return ""
+        }
+        NR == FNR {
+            k = key_of($0)
+            if (k != "") count[k]++
+            next
+        }
+        {
+            k = key_of($0)
+            if (k != "" && count[k] > 1 &&
+                $0 ~ /^[A-Za-z0-9_.-]+:[ \t]*(null|~|\{\})[ \t]*(#.*)?$/) next
+            print
+        }
+    ' "$1" "$1" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+    if cmp -s "$1" "$_tmp"; then
+        rm -f "$_tmp"
+        return 0
+    fi
+    mv "$_tmp" "$1" || { rm -f "$_tmp"; return 1; }
+    echo "meow: 配置里重复的 null 占位已清掉，同一个键只留真块" >&2
+}
+
 # meow 不认识我们的键（proxy-mode 现在住在 state，另外两个是 router 的可选项）。
 strip_our_keys() {
     del_key "$1" proxy-mode
@@ -275,6 +319,7 @@ prepare_config() {
     # 更老的布局把我们的键和订阅写在一起：先搬进 state，再从配置里摘掉。
     migrate_state "$CONFIG"
     strip_our_keys "$CONFIG"
+    heal_null_duplicates "$CONFIG"
     if [ ! -f "$STATE" ]; then
         write_state "$(mode_of 2>/dev/null || printf off)"
     fi
@@ -660,7 +705,7 @@ supervise() {
                 case "$_check" in
                     *GLIBC*|*"not found"*|*"No such file"*|*"cannot execute"*)
                         echo "meow: 这个 meow 二进制在这台机器上跑不起来（不是配置问题）：" >&2
-                        echo "meow:   Linux 的 gnu 包要求 glibc 跟构建机一样新（Ubuntu 24.04 是 2.39）；" >&2
+                        echo "meow:   Linux 的 gnu 包要求宿主的 glibc 不比构建机老（本地是 Debian 12 / 2.36，CI 是 Ubuntu 22.04 / 2.35）；" >&2
                         echo "meow:   老一点的发行版（Debian 12 / 很多路由器固件）请用 x86_64-unknown-linux-musl 包。" >&2
                         ;;
                     *)

@@ -230,10 +230,14 @@ function Remove-TopKey([string]$Path, [string]$Key) {
 }
 
 # 块里的键：有就替换，没有就补在块尾；连块都没有就整块追加。
+# 块头只认 "<块>:"、"<块>: null"、"<块>: ~"、"<块>: {}" 这几种：后三种是 meow 对「这个段
+# 没设过」的序列化，先换成真块头再补键。不这么办，键会补到文件末尾，跟原来的空块头凑成
+# 同一个键的第二份，meow 直接报 duplicate entry with key。
 function Set-BlockKey([string]$Path, [string]$Block, [string]$Key, [string]$Value) {
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.AddRange([System.IO.File]::ReadAllLines($Path))
     $blockPattern = '^' + [regex]::Escape($Block) + ':\s*$'
+    $unsetPattern = '^' + [regex]::Escape($Block) + ':\s*(null|~|\{\})\s*(#.*)?$'
     $keyPattern = '^[ \t]+' + [regex]::Escape($Key) + ':\s*'
     $inBlock = $false
     $seen = $false
@@ -246,8 +250,12 @@ function Set-BlockKey([string]$Path, [string]$Block, [string]$Key, [string]$Valu
                 $i++
                 $done = $true
             }
-            $inBlock = ($line -match $blockPattern)
-            if ($inBlock) { $seen = $true }
+            $unset = ($line -match $unsetPattern)
+            $inBlock = ($line -match $blockPattern) -or $unset
+            if ($inBlock) {
+                $seen = $true
+                if ($unset) { $lines[$i] = "${Block}:" }
+            }
             continue
         }
         if ($inBlock -and -not $done -and $line -match $keyPattern) {
@@ -262,6 +270,35 @@ function Set-BlockKey([string]$Path, [string]$Block, [string]$Key, [string]$Valu
         $lines.Add("  ${Key}: $Value")
     }
     Write-Lines $Path $lines
+}
+
+# 顶层键写两遍，YAML 一个字符都不认：meow 报 duplicate entry with key "tun" 就再也起不来。
+# meow 会把没设过的段序列化成 "<键>: null"（添加订阅时它就把 config 重写一遍），老版本又在
+# 末尾补过一份真块，同一个键就出现两次。这里只丢 null / ~ / {} 这种纯占位的那一份，真块（以及
+# 块里的内容）原样留着；两份都是有内容的块属于没见过的写法，不猜，留给 meow 自己报错。
+function Repair-NullDuplicates([string]$Path) {
+    $lines = [System.IO.File]::ReadAllLines($Path)
+    $counts = @{}
+    foreach ($line in $lines) {
+        if ($line -match '^([A-Za-z0-9_.-]+):') {
+            $k = $Matches[1]
+            $counts[$k] = if ($counts.ContainsKey($k)) { $counts[$k] + 1 } else { 1 }
+        }
+    }
+    $out = New-Object System.Collections.Generic.List[string]
+    $changed = $false
+    foreach ($line in $lines) {
+        if ($line -match '^([A-Za-z0-9_.-]+):\s*(null|~|\{\})\s*(#.*)?$' -and
+            $counts[$Matches[1]] -gt 1) {
+            $changed = $true
+            continue
+        }
+        $out.Add($line)
+    }
+    if ($changed) {
+        Write-Lines $Path $out
+        Write-Note '配置里重复的 null 占位已清掉，同一个键只留真块'
+    }
 }
 
 # @DATA@ 是写进 YAML 里的：Windows 路径的反斜杠在双引号标量里会被当成转义
@@ -333,6 +370,7 @@ function Prepare-Config {
     # 更老的布局把我们的键和订阅写在一起：先搬进 state，再从配置里摘掉。
     Migrate-State $CONFIG
     Remove-OurKeys $CONFIG
+    Repair-NullDuplicates $CONFIG
     if (-not (Test-Path -LiteralPath $STATE -PathType Leaf)) { Write-State (Get-Mode) }
 }
 

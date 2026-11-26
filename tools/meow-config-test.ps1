@@ -139,6 +139,48 @@ Expect $CONFIG 'tproxy-port' '' 'off'
 if ((Read-Text $CONFIG) -notmatch 'node-1') { Fail 'off: 订阅被弄丢了' }
 if (Apply-Settings 'router') { Fail 'off: Windows 上 router 应该被拒' }
 
+# ---- meow 序列化出来的 "tun: null" 和我们补的真块：同一个键两份，meow 直接拒 ----
+# 订阅一更新，meow 就把 config 重写一遍，没设过的段写成 "tun: null"；老版本又在末尾补过
+# 一份 "tun:"。两份凑到一起就是 duplicate entry with key "tun"，插件再也起不来。启动时
+# 要丢掉 null 那份、只留真块，而且真块里的内容一个字不能动。
+$plugin = New-Fixture 'duplicate-null'
+Write-Text $CONFIG (@(
+    'mixed-port: 7891'
+    'proxies:'
+    '  - name: node-1'
+    '    type: direct'
+    'tun: null'
+    'rules:'
+    '  - MATCH,DIRECT'
+    ''
+    'tun:'
+    '  enable: false'
+    '  stack: gvisor'
+) -join "`n")
+Prepare-Config
+Apply-Settings 'pc' | Out-Null
+$text = Read-Text $CONFIG
+$tuns = ([regex]::Matches($text, '(?m)^tun:')).Count
+if ($tuns -ne 1) { Fail "duplicate-null: tun 还有 $tuns 份" }
+if ((Get-BlockScalar $CONFIG 'tun' 'enable') -ne 'true') { Fail 'duplicate-null: tun.enable 没打开' }
+if ((Get-BlockScalar $CONFIG 'tun' 'stack') -ne 'gvisor') { Fail 'duplicate-null: 真块里的 stack 被删了' }
+if ($text -notmatch 'node-1') { Fail 'duplicate-null: 订阅内容被弄丢了' }
+if ($text -notmatch 'MATCH,DIRECT') { Fail 'duplicate-null: 规则被弄丢了' }
+$once = Read-Text $CONFIG
+Prepare-Config
+Apply-Settings 'pc' | Out-Null
+if ((Read-Text $CONFIG) -ne $once) { Fail 'duplicate-null: 第二次跑改了文件' }
+
+# ---- 只有 "tun: null"（还没补过块）：换成真块头再写键，不能写成两份 ----
+$plugin = New-Fixture 'null-only'
+Write-Text $CONFIG (@('mixed-port: 7891', 'tun: null') -join "`n")
+Prepare-Config
+Apply-Settings 'off' | Out-Null
+if (([regex]::Matches((Read-Text $CONFIG), '(?m)^tun:')).Count -ne 1) { Fail 'null-only: tun 写成了两份' }
+if ((Get-BlockScalar $CONFIG 'tun' 'enable') -ne 'false') { Fail 'null-only: enable 没写进去' }
+if ((Read-Text $CONFIG) -match 'tun: null') { Fail 'null-only: null 还留着' }
+
+
 # ---- 页面上的代理类型：off / tun / tproxy ↔ off / pc / router ----
 $plugin = New-Fixture 'modes'
 if ((Get-ModeFromLabel 'tun') -ne 'pc') { Fail 'modes: tun 没映射成 pc' }

@@ -49,8 +49,27 @@ fixture() {
     cp "$REPO/plugins/meow/package/payload/config.yaml" "$_plugin/1.3.0/payload/config.yaml"
     cp "$REPO/plugins/meow/package/payload/Country.mmdb" "$_plugin/1.3.0/payload/Country.mmdb"
     meow_config > "$_plugin/config"
-    # 伪 meow：校验（-t）立刻成功，真正启动就赖着不退，好让看护循环有东西可等。
-    printf '#!/bin/sh\ncase " $* " in *" -t "*) exit 0 ;; esac\nwhile :; do sleep 1; done\n' > "$_bin/meow"
+    # 伪 meow：-t 时按真 meow 的脾气来——顶层键写两遍就直接报 duplicate entry with key "x"，
+    # 整份配置一个字符都不认；其余情况（真正启动）赖着不退，好让看护循环有东西可等。
+    cat > "$_bin/meow" <<'FAKE'
+#!/bin/sh
+cfg=''
+check=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -f) cfg=$2; shift 2 ;;
+        -t) check=1; shift ;;
+        *) shift ;;
+    esac
+done
+if [ "$check" = 1 ]; then
+    dup=$(sed -n 's/^\([A-Za-z0-9_.-][A-Za-z0-9_.-]*\):.*/\1/p' "$cfg" 2>/dev/null |
+        sort | uniq -d | head -n 1)
+    [ -z "$dup" ] || { echo "Error: duplicate entry with key \"$dup\""; exit 1; }
+    exit 0
+fi
+while :; do sleep 1; done
+FAKE
     printf '#!/bin/sh\necho "fw-stub: $*"\n' > "$_bin/meow-fw.sh"
     chmod +x "$_bin/meow" "$_bin/meow.sh" "$_bin/meow-fw.sh"
 }
@@ -105,6 +124,60 @@ grep -qx 'mixed-port: 7891' "$_plugin/config" || fail 'off: mixed-port 被动过
 grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'off: 不该有 tproxy-port'
 grep -qx 'routing-mark:.*' "$_plugin/config" && fail 'off: 不该有 routing-mark'
 grep -A1 -x 'tun:' "$_plugin/config" | grep -qx '  enable: false' || fail 'off: tun 没关掉'
+
+# ---- meow 序列化出来的 "tun: null" 和我们补的真块：同一个键两份，meow 直接拒 ----
+# 订阅一更新，meow 就把 config 重写一遍，没设过的段写成 "tun: null"；老版本又在末尾补过
+# 一份 "tun:"。两份凑到一起就是 duplicate entry with key "tun"，插件再也起不来。启动时
+# 要丢掉 null 那份、只留真块，而且真块里的内容一个字不能动。
+fixture "$WORK/duplicate-null"
+cat > "$_plugin/config" <<'DUP'
+mixed-port: 7891
+proxies:
+  - name: node-1
+    type: direct
+tun: null
+rules:
+  - MATCH,DIRECT
+
+tun:
+  enable: false
+  stack: gvisor
+DUP
+run_meow mode >/dev/null
+[ "$(grep -c '^tun:' "$_plugin/config")" = 1 ] ||
+    fail "duplicate-null: tun 还有 $(grep -c '^tun:' "$_plugin/config") 份"
+grep -A2 -x 'tun:' "$_plugin/config" | grep -qx '  enable: false' ||
+    fail 'duplicate-null: tun 没关掉'
+grep -qx '  stack: gvisor' "$_plugin/config" || fail 'duplicate-null: 真块里的 stack 被删了'
+grep -q 'node-1' "$_plugin/config" || fail 'duplicate-null: 订阅内容被弄丢了'
+grep -q 'MATCH,DIRECT' "$_plugin/config" || fail 'duplicate-null: 规则被弄丢了'
+cp "$_plugin/config" "$WORK/duplicate-null.once"
+run_meow mode >/dev/null
+cmp -s "$WORK/duplicate-null.once" "$_plugin/config" || fail 'duplicate-null: 第二次跑改了文件'
+
+# ---- 只有 "tun: null"（还没补过块）：换成真块头再写键，不能写成两份 ----
+fixture "$WORK/null-only"
+cat > "$_plugin/config" <<'NUL'
+mixed-port: 7891
+tun: null
+NUL
+run_meow mode >/dev/null
+[ "$(grep -c '^tun:' "$_plugin/config")" = 1 ] || fail 'null-only: tun 写成了两份'
+grep -A1 -x 'tun:' "$_plugin/config" | grep -qx '  enable: false' || fail 'null-only: enable 没写进去'
+grep -q 'null' "$_plugin/config" && fail 'null-only: null 还留着'
+
+# ---- router 形态碰到 "dns: null"：同样换成真块头，不能补出第二个 dns ----
+fixture "$WORK/dns-null"
+cat > "$_plugin/config" <<'DN'
+mixed-port: 7891
+dns: null
+tun:
+  enable: false
+DN
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+[ "$(grep -c '^dns:' "$_plugin/config")" = 1 ] || fail 'dns-null: dns 写成了两份'
+grep -A1 -x 'dns:' "$_plugin/config" | grep -qx '  enable: true' || fail 'dns-null: dns.enable 没写进去'
 
 # ---- 页面上的三个值 ↔ 形态：tun=pc / tproxy=router / off=off ----
 fixture "$WORK/labels"
