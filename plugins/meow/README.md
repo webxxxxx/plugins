@@ -382,6 +382,17 @@ sh tools/pack.sh                                 # windows-msvc + linux-gnu 两�
 sh tools/pack.sh meow x86_64-unknown-linux-musl  # 想多出 musl / arm 就加参数
 ```
 
+**Linux 发哪个包**：`linux-gnu` 是在 Ubuntu 24.04（glibc 2.39）上链出来的，宿主机 glibc
+比它老就直接跑不起来——`meow -t` 报 `version 'GLIBC_2.38' not found`，插件日志里只看得到
+“配置校验失败”。WSL 里的 Debian 12（glibc 2.36）、多数路由器固件都要发 musl 包：
+
+```sh
+sh tools/pack.sh meow x86_64-unknown-linux-musl
+```
+
+插件启动时会先跑一次 `meow -t` 校验配置；这一步失败时它会把自己（meow）的原话打出来，
+并且区分“配置不对”和“二进制在这台机器上跑不起来”，别一律当成配置问题去改。
+
 `tools/pack.sh` 会检查 docker / plugin-tools / 宿主的 `plugin`，缺 plugin-tools 就在容器里
 现编；然后逐平台 `SVCD_DOCKER=1 plugin-tools build --platform …`（`build.sh` 把编译丢进
 `tools/docker` 的 `rust-cross` 镜像：clang+llvm、nasm、musl-tools、rustup 1.98.1、

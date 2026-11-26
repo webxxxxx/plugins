@@ -493,7 +493,13 @@ function Start-MeowChild {
 
     $validate = & $MEOW -d $DATA -f $CONFIG -t 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Note '配置校验失败（meow -t）：'
+        # 失败不一定是配置问题：exe 根本起不来（缺运行库、架构不对）也走这里。
+        $text = ($validate | Out-String)
+        if ($text -match 'not recognized|无法启动|cannot find|side-by-side|0xc000007b') {
+            Write-Note '这个 meow.exe 在这台机器上跑不起来（不是配置问题）：'
+        } else {
+            Write-Note '配置校验失败（meow -t）：'
+        }
         foreach ($line in $validate) { [Console]::Error.WriteLine("  $line") }
         return 0
     }

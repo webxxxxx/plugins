@@ -652,10 +652,24 @@ supervise() {
         if [ "$MODE" = router ]; then
             load_router_params
             validate_router || return 1
-        elif ! "$HERE/meow" -d "$DATA" -f "$CONFIG" -t >/dev/null 2>&1 < /dev/null; then
-            # pc/off 形态先做一次配置校验，失败就别起一个秒退进程。
-            echo 'meow: config validation failed (run meow -t to see details)' >&2
-            return 1
+        else
+            # pc/off 形态先做一次配置校验，失败就别起一个秒退进程。别把失败一律算成
+            # 配置问题：二进制在宿主机上根本跑不起来（glibc 比构建机老、架构不对）也是
+            # 这里失败，所以把 meow 自己的话带出来，一眼能分清是哪一种。
+            _check=$("$HERE/meow" -d "$DATA" -f "$CONFIG" -t 2>&1 < /dev/null) || {
+                case "$_check" in
+                    *GLIBC*|*"not found"*|*"No such file"*|*"cannot execute"*)
+                        echo "meow: 这个 meow 二进制在这台机器上跑不起来（不是配置问题）：" >&2
+                        echo "meow:   Linux 的 gnu 包要求 glibc 跟构建机一样新（Ubuntu 24.04 是 2.39）；" >&2
+                        echo "meow:   老一点的发行版（Debian 12 / 很多路由器固件）请用 x86_64-unknown-linux-musl 包。" >&2
+                        ;;
+                    *)
+                        echo "meow: 配置校验没通过（meow -t）：" >&2
+                        ;;
+                esac
+                printf '%s\n' "$_check" | head -n 5 >&2
+                return 1
+            }
         fi
         start_child "$MODE" || { cleanup_child; return 1; }
         wait "$mon_pid"
