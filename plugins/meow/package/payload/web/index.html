@@ -16,8 +16,17 @@
   })();
 </script>
 <style>
-  :root { color-scheme: light; }
-  :root[data-theme="dark"] { color-scheme: dark; }
+  :root {
+    color-scheme: light;
+    /* 订阅管理弹层的配色：外壳跟 /ui/sub.html 用同一套颜色，两边一起换。 */
+    --subs-bg: #ffffff; --subs-fg: #1f2328; --subs-line: #dcdfe4;
+    --subs-hover: #eef1f4; --subs-muted: #57606a;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --subs-bg: #1a1a1a; --subs-fg: #eaeaea; --subs-line: #303030;
+    --subs-hover: #2a2a2a; --subs-muted: #9aa0a6;
+  }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; }
@@ -57,31 +66,31 @@
   main.down iframe { visibility: hidden; }
 
   /* 订阅管理：顶部按钮打开弹层，内容是 meow 自己那份 /ui/sub.html。
-     YACD 里不再注入浮动按钮（那套做法已经去掉）。sub.html 自带深色样式，弹层的
-     外壳也跟着深色，两半看起来是一整块。 */
+     YACD 里不再注入浮动按钮（那套做法已经去掉）。外壳和订阅页都跟着主题走：
+     深色、浅色各一套颜色变量，打开时用 ?theme= 把当前主题告诉 iframe。 */
   dialog {
     width: min(560px, calc(100vw - 32px));
     height: min(560px, calc(100vh - 48px));
-    padding: 0; border: 1px solid #303030; border-radius: 10px;
-    background: #1a1a1a; color: #eaeaea; overflow: hidden;
+    padding: 0; border: 1px solid var(--subs-line); border-radius: 10px;
+    background: var(--subs-bg); color: var(--subs-fg); overflow: hidden;
   }
   dialog[open] { display: flex; flex-direction: column; }
   dialog::backdrop { background: rgba(0, 0, 0, .5); }
   .subs-head {
     display: flex; align-items: center; gap: 10px;
-    padding: 10px 14px; border-bottom: 1px solid #303030;
+    padding: 10px 14px; border-bottom: 1px solid var(--subs-line);
   }
   .subs-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
   #subs-close {
     margin-left: auto; border: 0; background: transparent; color: inherit;
     font: inherit; font-size: 20px; line-height: 1; padding: 2px 9px; border-radius: 6px; cursor: pointer;
   }
-  #subs-close:hover { background: #2a2a2a; }
-  .subs-body { position: relative; flex: 1; min-height: 0; background: #1a1a1a; }
-  #subs-frame { background: #1a1a1a; }
+  #subs-close:hover { background: var(--subs-hover); }
+  .subs-body { position: relative; flex: 1; min-height: 0; background: var(--subs-bg); }
+  #subs-frame { background: var(--subs-bg); }
   .subs-empty {
     position: absolute; inset: 0; display: grid; place-items: center;
-    margin: 0; padding: 24px; text-align: center; color: #9aa0a6;
+    margin: 0; padding: 24px; text-align: center; color: var(--subs-muted);
   }
   /* 深色皮肤：跟着 YACD 的主题走（见下面的 theme-bridge），不看系统偏好。 */
   :root[data-theme="dark"] body { background: #0d1117; color: #e6edf3; }
@@ -163,6 +172,10 @@
       } catch {
         // 隐私模式下写不进去，不影响这次切换。
       }
+      // 弹层开着就顺手通知订阅页：它自己没法定主题，只能这边告诉它。
+      if (subsDialog.open && subsFrame.contentWindow) {
+        subsFrame.contentWindow.postMessage({ type: 'meow:theme', theme: value }, '*');
+      }
     }
 
     window.addEventListener('message', (event) => {
@@ -215,6 +228,8 @@
       const query = new URLSearchParams();
       query.set('embed', '1');
       if (last.secret) query.set('secret', last.secret);
+      // 主题用参数给初值：iframe 那边据此先把颜色定下来，不用等消息。
+      query.set('theme', document.documentElement.dataset.theme || 'light');
       query.set('t', String(Date.now()));
       return `${PANEL}sub.html?${query}`;
     }

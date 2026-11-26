@@ -5,21 +5,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>meow-rs 订阅管理</title>
 <style>
-  body { font-family: -apple-system, sans-serif; background: #1a1a1a; color: #eee; padding: 20px; max-width: 600px; margin: 0 auto; }
+  /* 主题跟着嵌它的那一页走：?theme= 给初值，之后变了再用 postMessage 通知；
+     两样都没有就跟系统偏好。颜色全走变量，下面各条只用变量。 */
+  :root {
+    color-scheme: light;
+    --bg: #f6f7f9; --fg: #1f2328;
+    --panel: #ffffff; --line: #c9ced6;
+    --muted: #57606a; --hover: #eef1f4; --status-bg: #eef1f4;
+  }
+  html[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #1a1a1a; --fg: #eeeeee;
+    --panel: #2a2a2a; --line: #444444;
+    --muted: #888888; --hover: #333333; --status-bg: #222222;
+  }
+  body { font-family: -apple-system, sans-serif; background: var(--bg); color: var(--fg); padding: 20px; max-width: 600px; margin: 0 auto; }
   .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
   h2 { margin: 0; }
-  .back { background: #444; color: #eee; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-size: 13px; transition: background .2s; }
-  .back:hover { background: #555; }
-  input, button { width: 100%; padding: 10px; margin: 6px 0; border-radius: 6px; border: 1px solid #444; background: #2a2a2a; color: #eee; box-sizing: border-box; font-size: 14px; }
-  button { background: #e8734a; border: none; font-weight: bold; cursor: pointer; transition: background .2s; }
+  .back { background: var(--panel); color: var(--fg); border: 1px solid var(--line); padding: 6px 14px; border-radius: 6px; text-decoration: none; font-size: 13px; transition: background .2s; }
+  .back:hover { background: var(--hover); }
+  input, button { width: 100%; padding: 10px; margin: 6px 0; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--fg); box-sizing: border-box; font-size: 14px; }
+  button { background: #e8734a; border: none; color: #fff; font-weight: bold; cursor: pointer; transition: background .2s; }
   button:hover:not(:disabled) { background: #d0603a; }
-  button:disabled { background: #555 !important; cursor: not-allowed; opacity: .6; }
-  .sub { background: #2a2a2a; padding: 12px; border-radius: 6px; margin: 8px 0; display: flex; justify-content: space-between; align-items: center; }
+  button:disabled { background: #777 !important; cursor: not-allowed; opacity: .6; }
+  .sub { background: var(--panel); padding: 12px; border-radius: 6px; margin: 8px 0; display: flex; justify-content: space-between; align-items: center; }
   .del { background: #c0392b; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; width: auto; margin: 0; color: #fff; border: none; }
   .del:hover:not(:disabled) { background: #a93226; }
   .refresh { background: #2980b9; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; width: auto; margin: 0 6px 0 0; color: #fff; border: none; }
   .refresh:hover:not(:disabled) { background: #2471a3; }
-  .status { margin-top: 16px; font-size: 13px; color: #888; white-space: pre-wrap; background: #222; padding: 10px; border-radius: 6px; min-height: 20px; }
+  .status { margin-top: 16px; font-size: 13px; color: var(--muted); white-space: pre-wrap; background: var(--status-bg); padding: 10px; border-radius: 6px; min-height: 20px; }
   /* 嵌在插件页面的弹层里（?embed=1）：没有自己的标题栏和「返回」，关闭交给弹层。 */
   body.embed { padding: 12px; }
   body.embed .header { display: none; }
@@ -42,10 +56,21 @@
 
 <script>
 // 插件页面的「订阅管理」按钮把这一页嵌进弹层：?embed=1 去掉自己的标题栏，
-// 关闭交给弹层；?secret= 是面板密钥（第一次打开时 YACD 还没把它写进 localStorage）。
+// 关闭交给弹层；?secret= 是面板密钥（第一次打开时 YACD 还没把它写进 localStorage）；
+// ?theme= 是当前主题，弹层里再切主题会 postMessage 过来。
 const params = new URLSearchParams(location.search);
 const EMBED = params.get('embed') === '1';
 if (EMBED) document.body.classList.add('embed');
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-theme', theme === 'dark' ? 'dark' : 'light');
+}
+applyTheme(params.get('theme') ||
+    (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+window.addEventListener('message', function (event) {
+    const data = event.data;
+    if (data && data.type === 'meow:theme') applyTheme(data.theme);
+});
 
 function normalizeBase(value) {
     if (typeof value !== 'string') return '';

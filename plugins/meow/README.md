@@ -116,11 +116,14 @@ package/
 - 顶部还有一个**订阅管理**按钮：点开是一个弹层（`<dialog>`），里面是 meow 自己那份
   `/ui/sub.html`，添加 / 刷新 / 删除订阅走的还是 `/api/subscriptions`。弹层用右上角的
   `×`、Esc 或点弹层外面都能关。YACD 里那个浮动订阅按钮已经去掉——入口只在页面顶上。
+  弹层外壳和订阅页也跟着主题换：打开时用 `?theme=` 把当前主题带过去，弹层开着时主题
+  变了再用 `postMessage` 同步（订阅页在 iframe 里，自己读不到外层的主题）。
 - 顶部这一栏的深色 / 浅色跟着 **YACD 里切的主题**走，不跟系统偏好：YACD 把主题写在它
   自己的 `<html data-theme="dark|light|auto">` 上，`yacd/theme-bridge.js` 盯着这个属性，
   变了就用 `postMessage` 报到外层页面（两边不同源，读不到彼此的 DOM 和 localStorage），
   `auto` 按系统偏好折算。外层页面把最近一次的主题存在自己的 `localStorage` 里，刷新时
-  先按它上色，等 iframe 报到再对齐。
+  先按它上色，等 iframe 报到再对齐。`/ui/sub.html` 单独打开时也一样认 `?theme=`，
+  没有就跟系统偏好。
 - 面板是 meow 自己在 `:9090` 上开的；如果宿主是用 https 打开的，浏览器会拦掉这个
   http iframe（控制台本身走 http 就没这个问题）。
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
