@@ -49,18 +49,24 @@ STATE="$PLUGIN_ROOT/state"                       # 我们自己的：只缓存�
 FW="$HERE/meow-fw.sh"
 SDK="$ROOT/lib/svcd-plugin.sh"                   # 宿主 SDK：通道循环与能力分发
 
-# 包里带了一份精简的 Country.mmdb（130 KB）。数据目录里还没有就放进去：很多路由器
-# 直连不通 GitHub，meow 自己下 7 MB 的库会失败，而 GEOIP 规则没有库整份配置都起不来。
-# 已经有了就不动——那可能是 meow 自己更新过的。
-seed_geodata() {
-    [ -f "$ROOT/Country.mmdb" ] || return 0
-    [ -f "$DATA/Country.mmdb" ] && return 0
-    _seed="$DATA/Country.mmdb.tmp.$$"
-    if cp "$ROOT/Country.mmdb" "$_seed" 2>/dev/null && mv "$_seed" "$DATA/Country.mmdb" 2>/dev/null; then
-        echo "meow: 已把包里的 Country.mmdb 放进 $DATA" >&2
-    else
-        rm -f "$_seed"
-    fi
+# 包里带的两样东西落进数据目录：
+#   Country.mmdb     精简版（130 KB）：很多路由器直连不通 GitHub，meow 自己下 7 MB 会失败，
+#                    而 GEOIP 规则没有库整份配置都起不来；
+#   cn_domains.yaml  file 型 rule-provider 的表。
+# 数据目录里已经有了就不动——那可能是 meow 自己更新过的。cn_domains.yaml 非放这儿不可：
+# meow 的 file 型 path 相对数据目录解析（resolve_contained），不许指到数据目录外面，留在
+# 安装目录里等于没带，每次启动都报 payload prefetch failed、那条 RULE-SET 一直是空集。
+seed_data_files() {
+    for _name in Country.mmdb cn_domains.yaml; do
+        [ -f "$ROOT/$_name" ] || continue
+        [ -f "$DATA/$_name" ] && continue
+        _seed="$DATA/$_name.tmp.$$"
+        if cp "$ROOT/$_name" "$_seed" 2>/dev/null && mv "$_seed" "$DATA/$_name" 2>/dev/null; then
+            echo "meow: 已把包里的 $_name 放进 $DATA" >&2
+        else
+            rm -f "$_seed"
+        fi
+    done
     return 0
 }
 
@@ -80,7 +86,7 @@ migrate_legacy() {
 
 migrate_legacy
 mkdir -p "$DATA" 2>/dev/null || true
-seed_geodata
+seed_data_files
 
 # 能力通道（页面 A 的代理类型选择器）用 SDK；sync 会把 sdk/shell 的副本刷到 payload/lib。
 if [ -f "$SDK" ]; then . "$SDK"; fi
@@ -373,6 +379,42 @@ tproxy_port() {
     printf '%s' "${_value:-7893}"
 }
 
+# router 形态把入口放在 listeners: 里；切回 pc / off 时那条 tproxy 必须摘掉：顶层
+# tproxy-port 和它抢同一个端口，meow 报 "port 7893 already used by listener 'tproxy'"，
+# 插件直接起不来（页面上选过 tproxy 再选 tun 就撞这个）。只认我们补的那种写法
+# （- name: tproxy 加它下面的缩进项），别人的 listener 一个字不动。
+remove_tproxy_listener() {
+    grep -qE '^listeners:[ \t]*$' "$CONFIG" 2>/dev/null || return 0
+    _tmp="$CONFIG.tmp.$$"
+    awk '
+        BEGIN { inblock = 0; skip = 0 }
+        /^[^ \t#]/ {
+            skip = 0
+            inblock = ($0 ~ /^listeners:[ \t]*$/)
+            print; next
+        }
+        {
+            if (inblock && $0 ~ /^[ \t]*-[ \t]*(name:[ \t]*)?tproxy[ \t]*$/) { skip = 1; next }
+            if (inblock && $0 ~ /^[ \t]*-[ \t]/) skip = 0
+            if (skip) next
+            print
+        }
+    ' "$CONFIG" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+    mv "$_tmp" "$CONFIG"
+    return 0
+}
+
+# router 形态还会把 dns.listen 改成 0.0.0.0:<dns-port>（劫持 LAN 的 DNS）。切回 pc / off 时
+# 还原成模板的 127.0.0.1:5353：本机的解析器不该一直开给整个 LAN。
+clear_router_leftovers() {
+    remove_tproxy_listener
+    _addr=$(dns_listen | awk '{print $1}')
+    case "$_addr" in
+        0.0.0.0|::) set_block_key "$CONFIG" dns listen 127.0.0.1:5353 ;;
+    esac
+    return 0
+}
+
 apply_settings() {
     _mode=$1
     _port=$(yaml_number mixed-port 7890)
@@ -386,12 +428,14 @@ apply_settings() {
     case "$_mode" in
     off)
         # 不接管：只留 mixed-port。tproxy-port 一去掉，meow 就不装 nft 规则。
+        clear_router_leftovers
         del_key "$CONFIG" tproxy-port
         del_key "$CONFIG" routing-mark
         ;;
     pc)
         _tproxy=$(tproxy_port)
         is_port "$_tproxy" || { echo "meow: tproxy-port 不是端口：'$_tproxy'" >&2; return 1; }
+        clear_router_leftovers
         set_key "$CONFIG" tproxy-port "$_tproxy"
         _mark=$(yaml_number routing-mark 9527)
         case "$_mark" in
@@ -688,15 +732,33 @@ cleanup_child() {
     return 0
 }
 
-# 前台看护：孩子退出后，如果 config 里的 proxy-mode 变了就是页面上的主动切换，按新形态
-# 重来一次；没变就是真退出，把 rc 交给宿主（宿主据此重启或报错）。
+# 选中的形态没起来就退回 off：宁可只留一个 mixed-port 的普通代理，也别让插件一直起不来
+# （页面打不开就什么也改不了）。只写 state，config 的受管键由下一轮 apply_settings 按 off
+# 重写；调用方负责 continue。已经是 off 就返回 1，让调用方按原样退出。
+fall_back_to_off() {
+    [ "$1" = off ] && return 1
+    # 只改 proxy-mode 那一行：router 的 lan-interface / dns-port 留着，用户重新选 tproxy
+    # 时不用再填一遍。
+    set_mode_cache off || return 1
+    echo "meow: $1 形态没起来，代理类型已经降成 off（插件照常起；修好之后在页面上重新选 tun / tproxy）" >&2
+    return 0
+}
+
+# 前台看护：孩子退出后，如果 state 里的 proxy-mode 变了就是页面上的主动切换，按新形态
+# 重来一次；没变就是真退出，把 rc 交给宿主（宿主据此重启或报错）。形态起不来时先退回 off。
 supervise() {
     while :; do
         MODE=$(mode_of) || return 1
-        apply_settings "$MODE" || return 1
+        if ! apply_settings "$MODE"; then
+            fall_back_to_off "$MODE" && continue
+            return 1
+        fi
         if [ "$MODE" = router ]; then
             load_router_params
-            validate_router || return 1
+            if ! validate_router; then
+                fall_back_to_off "$MODE" && continue
+                return 1
+            fi
         else
             # pc/off 形态先做一次配置校验，失败就别起一个秒退进程。别把失败一律算成
             # 配置问题：二进制在宿主机上根本跑不起来（glibc 比构建机老、架构不对）也是
@@ -713,10 +775,18 @@ supervise() {
                         ;;
                 esac
                 printf '%s\n' "$_check" | head -n 5 >&2
+                # glibc 老、架构不对这种，降成 off 也一样跑不起来：照样退回去再试，
+                # 让退回来的那一轮把真正的原因留在日志里。
+                fall_back_to_off "$MODE" && continue
                 return 1
             }
         fi
-        start_child "$MODE" || { cleanup_child; return 1; }
+        _started=$(date +%s)
+        if ! start_child "$MODE"; then
+            cleanup_child
+            fall_back_to_off "$MODE" && continue
+            return 1
+        fi
         wait "$mon_pid"
         _rc=$?
         echo "meow exited rc=$_rc (mode=$MODE)" >&2
@@ -725,6 +795,11 @@ supervise() {
         if [ -n "$_next" ] && [ "$_next" != "$MODE" ]; then
             echo "meow: proxy-mode $MODE → $_next，按新形态重启" >&2
             continue
+        fi
+        # 秒退 = 根本没起来（TUN 没权限、端口被占、网卡不存在都在这一刻暴露），退回 off；
+        # 跑了一阵才死的算真退出，按原样把 rc 交给宿主，别把跑过的形态悄悄降级。
+        if [ "$_rc" -ne 0 ] && [ $(($(date +%s) - _started)) -lt 10 ]; then
+            fall_back_to_off "$MODE" && continue
         fi
         return "$_rc"
     done

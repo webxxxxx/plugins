@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "meow",
   "name": "meow 代理",
-  "version": "1.3.4",
+  "version": "1.3.5",
   "desc": "meow 代理：mihomo 兼容内核，本页顶部切代理类型（off / tun / tproxy），下面嵌 YACD 面板",
   "protocol": 1,
   "ui": {

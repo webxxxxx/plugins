@@ -161,8 +161,12 @@ package/
   插件启动时会把「顶层键出现两次、其中一份是 `null` / `~` / `{}`」的那种清掉，只留真块
   （两份都是有内容的块属于没见过的写法，不猜，让 meow 自己报错）。不清的话 YAML 直接
   `duplicate entry with key "tun"`，meow 一个字符都不认，插件就再也起不来；
-- 包里带了一份精简的 `Country.mmdb`（约 130 KB），第一次启动会放进数据目录；数据目录里
-  已有这个文件就不动它（可能是 meow 自己更新过的），别的 geo 库缺失时 meow 会自己下载；
+- 包里带了两份数据文件，第一次启动会放进数据目录，已经有的不动（可能是 meow 自己更新过的）：
+  `Country.mmdb`（约 130 KB 的精简库，别的 geo 库缺失时 meow 会自己下载）和
+  `cn_domains.yaml`（`rule-providers` 里那份域名表）。后者非放数据目录不可：meow 的
+  `file` 型 provider 的 `path` 相对数据目录解析，不许指到数据目录外面，留在安装目录里
+  等于没带，每次启动都会报 `rule-provider 'cn_domains': payload prefetch failed`，
+  那条 `RULE-SET` 也就一直是空集；
 - 从 1.2/1.3 升级：旧的 `<插件目录>/meow.yaml` 会被搬回 `config`，旧的 `proxy-mode` 搬进 `state`；
 - 更老的布局（开关和订阅写在一起）也认，插件会把自己的键摘出来放进 `state`；
 - 想把 `config` 恢复出厂：删掉它再 `plugin restart meow`。
@@ -206,7 +210,17 @@ dns-port: 1053          # 劫持 LAN DNS 用的端口
 | `router` | Linux | 关 `tun`，`dns.listen: 0.0.0.0:<dns-port>`，`listeners:` 里没有 tproxy 入口时补一条（`firewall: false`） |
 
 切形态就一条路：页面上选一下（写 `state` → 重启 meow，几秒钟，插件本身不用重启）。
-从 `router` 切回 `pc` 时 `stop` 会先把残留的 nat 规则撤掉，不会留一个指向死端口的劫持。
+从 `router` 切回 `pc` / `off` 时，网关形态留下的东西会一起收掉：`stop` 先撤残留的 nat
+规则（不留指向死端口的劫持），下一轮再摘掉 `listeners:` 里那条 `tproxy` 入口、把
+`dns.listen` 从 `0.0.0.0:<dns-port>` 还原成 `127.0.0.1:5353`——那条入口留着，`pc` 的
+顶层 `tproxy-port` 就和它抢同一个端口，meow 会报 `port 7893 already used by listener`
+直接起不来。
+
+**选中的形态起不来就自动降成 `off`**：TUN 没权限、`listeners` 冲突、端口被占、配置校验
+不过，这些都会让 meow 起不来，宿主重启还是同一堵墙，插件和页面于是永远打不开。这时插件
+把 `state` 里的 `proxy-mode` 改成 `off` 再起一次（只开 `mixed-port` 当普通代理），日志里
+留一行「…形态没起来，代理类型已经降成 off」。原因修好之后在页面上重新选 tun / tproxy 就
+行。已经跑了一阵才退出的按真退出处理（把 rc 交给宿主），不会把跑过的形态悄悄降级。
 
 ### 面板不用登录
 

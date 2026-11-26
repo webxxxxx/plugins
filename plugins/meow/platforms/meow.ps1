@@ -79,26 +79,32 @@ function Write-Note([string]$Text) {
     [Console]::Error.WriteLine("meow: $Text")
 }
 
-# 包里带了一份精简的 Country.mmdb（130 KB）。数据目录里还没有就放进去：很多路由器
-# 直连不通 GitHub，meow 自己下 7 MB 的库会失败，而 GEOIP 规则没有库整份配置都起不来。
-# 已经有了就不动——那可能是 meow 自己更新过的。
-function Seed-GeoData {
-    $source = Join-Path $ROOT 'Country.mmdb'
-    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
-    $target = Join-Path $DATA 'Country.mmdb'
-    if (Test-Path -LiteralPath $target -PathType Leaf) { return }
-    try {
-        Copy-Item -LiteralPath $source -Destination $target -Force
-        Write-Note "已把包里的 Country.mmdb 放进 $DATA"
-    } catch {
-        Write-Note "Country.mmdb 放不进 $DATA（$($_.Exception.Message)）"
+# 包里带的两样东西落进数据目录：
+#   Country.mmdb     精简版（130 KB）：很多设备直连不通 GitHub，meow 自己下 7 MB 会失败，
+#                    而 GEOIP 规则没有库整份配置都起不来；
+#   cn_domains.yaml  file 型 rule-provider 的表。
+# 数据目录里已经有了就不动——那可能是 meow 自己更新过的。cn_domains.yaml 非放这儿不可：
+# meow 的 file 型 path 相对数据目录解析（resolve_contained），不许指到数据目录外面，留在
+# 安装目录里等于没带，每次启动都报 payload prefetch failed、那条 RULE-SET 一直是空集。
+function Seed-DataFiles {
+    foreach ($name in @('Country.mmdb', 'cn_domains.yaml')) {
+        $source = Join-Path $ROOT $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { continue }
+        $target = Join-Path $DATA $name
+        if (Test-Path -LiteralPath $target -PathType Leaf) { continue }
+        try {
+            Copy-Item -LiteralPath $source -Destination $target -Force
+            Write-Note "已把包里的 $name 放进 $DATA"
+        } catch {
+            Write-Note "$name 放不进 $DATA（$($_.Exception.Message)）"
+        }
     }
 }
 
 # 迁移要打日志，所以放在 Write-Note 之后；之后所有路径都指进 <插件目录>\data。
 Move-LegacyData
 New-Item -ItemType Directory -Force -Path $DATA | Out-Null
-Seed-GeoData
+Seed-DataFiles
 
 function Write-Utf8([string]$Path, [string]$Text) {
     $utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -225,6 +231,29 @@ function Remove-TopKey([string]$Path, [string]$Key) {
             continue
         }
         if (-not $skip) { $out.Add($line) }
+    }
+    Write-Lines $Path $out
+}
+
+# listeners: 里我们补的那条 tproxy 入口（- name: tproxy 加它下面的缩进项）。网关形态只在
+# Linux 上有，Windows 这边不会补；但配置可能是从 Linux 同步/拷过来的，留着它既占一个端口，
+# 又可能让 meow 在 Windows 上起不来。别人的 listener 一个字不动。
+function Remove-TproxyListener([string]$Path) {
+    $lines = [System.IO.File]::ReadAllLines($Path)
+    $out = New-Object System.Collections.Generic.List[string]
+    $inBlock = $false
+    $skip = $false
+    foreach ($line in $lines) {
+        if ($line -match '^[^\s#]') {
+            $skip = $false
+            $inBlock = ($line -match '^listeners:\s*$')
+            $out.Add($line)
+            continue
+        }
+        if ($inBlock -and $line -match '^\s*-\s*(name:\s*)?tproxy\s*$') { $skip = $true; continue }
+        if ($inBlock -and $line -match '^\s*-\s') { $skip = $false }
+        if ($skip) { continue }
+        $out.Add($line)
     }
     Write-Lines $Path $out
 }
@@ -389,6 +418,8 @@ function Apply-Settings([string]$Mode) {
     # 订阅里带进来的 tproxy 端口在 Windows 上没有意义。
     Remove-TopKey $CONFIG 'tproxy-port'
     Remove-TopKey $CONFIG 'routing-mark'
+    # listeners: 里那条 tproxy 入口也一样（Linux 的网关形态留下的，或者配置从那边拷过来的）。
+    Remove-TproxyListener $CONFIG
 
     switch ($Mode) {
         'off' {
@@ -566,6 +597,14 @@ function Start-MeowChild {
         return 0
     }
     Write-Utf8 $PIDFILE ("{0}`n" -f $proc.Id)
+    # 起来了不等于起来了：没提权（TUN 要 Wintun）或网卡被占时 meow 会秒退，而秒退之后
+    # 宿主看到的是「插件失败」。先看一眼还活着没有，好让调用方退回 off。
+    Start-Sleep -Milliseconds 1500
+    if (-not (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue)) {
+        Write-Note 'meow 起来就退了（TUN 要管理员权限、网卡被占，或者配置里有它不认的东西）'
+        Stop-Cleanup
+        return 0
+    }
     # 用一个 runspace 把它的 stdout 抄进日志文件：主线程要留在通道读循环里。
     $pump = [PowerShell]::Create()
     $null = $pump.AddScript({
@@ -579,6 +618,19 @@ function Start-MeowChild {
     }).AddArgument($proc.StandardOutput).AddArgument($meowLog)
     $null = $pump.BeginInvoke()
     return $proc.Id
+}
+
+# 选中的形态没起来就退回 off：宁可只留一个 mixed-port 的普通代理，也别让孩子一直起不来
+# （Windows 上 meow 一退，看门狗就结束本进程；宿主按策略重启，撞的还是同一堵墙，插件和
+# 页面于是永远打不开）。返回 $true 表示已经起来了，可能是降级成 off 起来的。
+function Start-WithFallback {
+    $mode = Get-Mode
+    if (Start-MeowChild) { return $true }
+    if ($mode -eq 'off') { return $false }
+    Write-Note "$mode 形态没起来，代理类型已经降成 off（插件照常起；修好之后在页面上重新选 tun）"
+    Set-ModeCache 'off'
+    if (-not (Apply-Settings 'off')) { return $false }
+    return [bool](Start-MeowChild)
 }
 
 # 孩子自己死了（不是我们在切换）就结束本进程：宿主看到 exit，会先跑 stop 收尾、再按策略
@@ -644,7 +696,7 @@ function Switch-Mode([string]$Label) {
         $null = Clear-TunRoutes
         $null = Restore-DnsState
         $null = Save-DnsState
-        return [bool](Start-MeowChild)
+        return [bool](Start-WithFallback)
     } finally {
         Remove-Item -LiteralPath $hold -ErrorAction SilentlyContinue
     }
@@ -750,7 +802,7 @@ switch ($Action) {
         # 记下启动前真实的 DNS，停止（或崩溃）后用它恢复。必须在 meow 改 DNS 之前。
         $null = Save-DnsState
         Remove-Item -LiteralPath (Join-Path $DATA 'switching') -ErrorAction SilentlyContinue
-        if (-not (Start-MeowChild)) { exit 1 }
+        if (-not (Start-WithFallback)) { exit 1 }
         Start-Watchdog
         # 常驻：从 stdin 收帧、往 stdout 回结果，直到宿主 shutdown（或看门狗结束本进程）。
         try {

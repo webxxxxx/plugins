@@ -48,15 +48,18 @@ fixture() {
     cp "$REPO/plugins/meow/platforms/lib/svcd-plugin.sh" "$_plugin/1.3.0/payload/lib/svcd-plugin.sh"
     cp "$REPO/plugins/meow/package/payload/config.yaml" "$_plugin/1.3.0/payload/config.yaml"
     cp "$REPO/plugins/meow/package/payload/Country.mmdb" "$_plugin/1.3.0/payload/Country.mmdb"
+    cp "$REPO/plugins/meow/package/payload/cn_domains.yaml" "$_plugin/1.3.0/payload/cn_domains.yaml"
     meow_config > "$_plugin/config"
     # 伪 meow：-t 时按真 meow 的脾气来——顶层键写两遍就直接报 duplicate entry with key "x"，
     # 整份配置一个字符都不认；其余情况（真正启动）赖着不退，好让看护循环有东西可等。
     cat > "$_bin/meow" <<'FAKE'
 #!/bin/sh
 cfg=''
+dir=''
 check=0
 while [ $# -gt 0 ]; do
     case "$1" in
+        -d) dir=$2; shift 2 ;;
         -f) cfg=$2; shift 2 ;;
         -t) check=1; shift ;;
         *) shift ;;
@@ -66,6 +69,12 @@ if [ "$check" = 1 ]; then
     dup=$(sed -n 's/^\([A-Za-z0-9_.-][A-Za-z0-9_.-]*\):.*/\1/p' "$cfg" 2>/dev/null |
         sort | uniq -d | head -n 1)
     [ -z "$dup" ] || { echo "Error: duplicate entry with key \"$dup\""; exit 1; }
+    # 模拟「这台机器上 pc 形态起不来」（TUN 没权限、nft 不存在之类）：只看受管键在不在，
+    # 降成 off 之后 tproxy-port 会被删掉，校验自然就过了。
+    if [ -f "$dir/fail-pc" ] && grep -q '^tproxy-port:' "$cfg" 2>/dev/null; then
+        echo "Error: tproxy: operation not permitted"
+        exit 1
+    fi
     exit 0
 fi
 while :; do sleep 1; done
@@ -213,16 +222,47 @@ cp "$_plugin/config" "$WORK/once.yaml"
 run_meow fw status >/dev/null
 cmp -s "$WORK/once.yaml" "$_plugin/config" || fail 'router: 第二次跑改了文件'
 
-# ---- 包里带的 Country.mmdb：第一次落地到数据目录，之后不覆盖 ----
+# ---- router 切回 pc / off：listeners 里那条 tproxy 要摘掉，dns.listen 要还原 ----
+# 留着那条 tproxy，pc 形态的顶层 tproxy-port 就和它抢同一个端口：meow 报
+# "port 7893 already used by listener 'tproxy'"，插件直接起不来（页面上先选 tproxy 再选
+# tun 就撞这个）。dns.listen 也一样：0.0.0.0:1053 是给 LAN 用的，切走之后本机的解析器
+# 不该一直开给整个 LAN。
+fixture "$WORK/router-leave"
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+grep -qx '    type: tproxy' "$_plugin/config" || fail 'router-leave: 没补上 tproxy 入口'
+grep -qx '  listen: 0.0.0.0:1053' "$_plugin/config" || fail 'router-leave: dns.listen 没改成 0.0.0.0'
+printf 'proxy-mode: pc\n' > "$_plugin/state"
+run_meow mode >/dev/null
+grep -q 'type: tproxy' "$_plugin/config" && fail 'router-leave: 切回 pc 之后 tproxy 入口还在'
+grep -qx '  listen: 127.0.0.1:5353' "$_plugin/config" || fail 'router-leave: 切回 pc 之后 dns.listen 没还原'
+grep -qx 'tproxy-port: 7893' "$_plugin/config" || fail 'router-leave: pc 的 tproxy-port 没写进去'
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+printf 'proxy-mode: off\n' > "$_plugin/state"
+run_meow mode >/dev/null
+grep -q 'type: tproxy' "$_plugin/config" && fail 'router-leave: 切到 off 之后 tproxy 入口还在'
+grep -qx '  listen: 127.0.0.1:5353' "$_plugin/config" || fail 'router-leave: 切到 off 之后 dns.listen 没还原'
+grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'router-leave: 切到 off 之后 tproxy-port 还在'
+
+# ---- 包里带的数据文件：第一次落地到数据目录，之后不覆盖 ----
+# Country.mmdb 是 GEOIP 规则要用的库；cn_domains.yaml 是 file 型 rule-provider 的表，而
+# file 型的 path 相对数据目录解析——留在安装目录里等于没带，meow 每次启动都报
+# "rule-provider 'cn_domains': payload prefetch failed"，那条 RULE-SET 一直是空集。
 fixture "$WORK/geodata"
 run_meow mode >/dev/null
-[ -f "$_plugin/data/Country.mmdb" ] || fail 'geodata: 数据目录里没有 Country.mmdb'
-cmp -s "$_plugin/1.3.0/payload/Country.mmdb" "$_plugin/data/Country.mmdb" ||
-    fail 'geodata: 落下去的不是包里那份'
+for _f in Country.mmdb cn_domains.yaml; do
+    [ -f "$_plugin/data/$_f" ] || fail "geodata: 数据目录里没有 $_f"
+    cmp -s "$_plugin/1.3.0/payload/$_f" "$_plugin/data/$_f" ||
+        fail "geodata: 落下去的不是包里那份 $_f"
+done
 echo 'updated-by-meow' > "$_plugin/data/Country.mmdb"
+echo 'updated-by-meow' > "$_plugin/data/cn_domains.yaml"
 run_meow mode >/dev/null
 grep -qx 'updated-by-meow' "$_plugin/data/Country.mmdb" ||
     fail 'geodata: 覆盖了数据目录里已有的库'
+grep -qx 'updated-by-meow' "$_plugin/data/cn_domains.yaml" ||
+    fail 'geodata: 覆盖了数据目录里已有的域名表'
 
 # ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
 fixture "$WORK/data-placeholder"
@@ -314,6 +354,30 @@ channel_has 'changing\":true' '切代理类型没回执'
 [ "$(state_of)" = pc ] || fail 'channel: 切完没落到 state'
 grep -q 'proxy-mode off → pc' "$WORK/channel.err" || fail 'channel: 看护循环没按新形态重启'
 [ -f "$_plugin/data/meow.pid" ] && fail 'channel: 退出后还留着 pidfile'
+
+# ---- 选中的形态起不来：自动降成 off，别让插件一直起不来 ----
+# pc 形态（Linux 上是 tproxy-port + nft）在这台机器上起不来时，宿主重启撞的还是同一堵墙：
+# 插件一直起不来，页面也就永远打不开。所以先把代理类型降成 off，起一个普通的 mixed-port，
+# 修好之后在页面上重新选 tun。
+fixture "$WORK/fallback"
+mkdir -p "$_plugin/data"
+: > "$_plugin/data/fail-pc"
+printf 'proxy-mode: pc\n' > "$_plugin/state"
+cat > "$WORK/fallback-feed.sh" <<'FEED'
+sleep 3
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"svcd.shutdown"}'
+FEED
+if timeout 25 sh -c 'sh "$1" | SVCD_PLUGIN_DIR="$2" sh "$3" start' sh \
+    "$WORK/fallback-feed.sh" "$_plugin" "$_plugin/1.3.0/payload/bin/meow.sh" \
+    > "$WORK/fallback.out" 2> "$WORK/fallback.err"; then
+    :
+else
+    fail "fallback: 看护进程没干净退出（$(cat "$WORK/fallback.err")）"
+fi
+grep -q '降成 off' "$WORK/fallback.err" || fail 'fallback: 降级没写进日志'
+[ "$(state_of)" = off ] || fail "fallback: state 没降成 off（$(state_of)）"
+grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'fallback: 降成 off 之后 tproxy-port 还在'
+[ -f "$_plugin/data/meow.pid" ] && fail 'fallback: 退出后还留着 pidfile'
 fi
 
 # ---- 包里的 YACD 外壳：service worker 把它预缓存住了，改了文件就得改 revision ----

@@ -216,12 +216,12 @@ Write-Output 'meow proxy mode capability (windows): ok'
 
 # ---- 包里带的 Country.mmdb：第一次落地到数据目录，之后不覆盖 ----
 $plugin = New-Fixture 'geodata'
-Seed-GeoData
+Seed-DataFiles
 $target = Join-Path $DATA 'Country.mmdb'
 if (-not (Test-Path -LiteralPath $target)) { Fail 'geodata: 数据目录里没有 Country.mmdb' }
 if ((Get-Item -LiteralPath $target).Length -ne (Get-Item -LiteralPath (Join-Path $ROOT 'Country.mmdb')).Length) { Fail 'geodata: 落下去的不是包里那份' }
 Write-Text $target 'updated-by-meow'
-Seed-GeoData
+Seed-DataFiles
 if ((Read-Text $target) -ne 'updated-by-meow') { Fail 'geodata: 覆盖了已有的库' }
 
 # ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
@@ -243,6 +243,29 @@ if ((Read-Text $CONFIG) -notmatch [regex]::Escape("mmdb-path: '${data}/Country.m
 $once = Read-Text $CONFIG
 Prepare-Config
 if ((Read-Text $CONFIG) -ne $once) { Fail '@DATA@: 第二次跑改了文件' }
+
+# ---- listeners 里那条 tproxy：网关形态的入口，Windows 上留着没用还占端口 ----
+$plugin = New-Fixture 'tproxy-listener'
+Write-Text $CONFIG (@(
+    'mixed-port: 7891'
+    'listeners:'
+    '  - name: tproxy'
+    '    type: tproxy'
+    '    port: 7893'
+    '    listen: 0.0.0.0'
+    '    firewall: false'
+    '  - name: hy2'
+    '    type: hysteria2'
+    '    port: 8443'
+    'rules:'
+    '  - MATCH,DIRECT'
+) -join "`n")
+Prepare-Config
+Apply-Settings 'pc' | Out-Null
+$text = Read-Text $CONFIG
+if ($text -match 'type: tproxy') { Fail 'tproxy-listener: 那条 tproxy 没摘掉' }
+if ($text -notmatch 'type: hysteria2') { Fail 'tproxy-listener: 别人的 listener 被删了' }
+if ($text -notmatch '- name: hy2') { Fail 'tproxy-listener: 别人的 listener 名字被动了' }
 
 # ---- 迁移：1.2/1.3 的 meow.yaml 搬回 config，旧开关搬进 state ----
 $plugin = New-Fixture 'migrate'
@@ -329,5 +352,30 @@ if (-not (Get-Process -Id $decoy.Id -ErrorAction SilentlyContinue)) { Fail 'pidf
 Stop-Process -Id $decoy.Id -Force -ErrorAction SilentlyContinue
 
 Write-Output 'meow pidfile/stop (windows): ok'
+
+# ---- 选中的形态起不来：自动降成 off，别让插件一直起不来 ----
+# pc（页面上的 tun）在没提权 / 网卡被占时一起来就退；宿主重启后撞的还是同一堵墙，插件和
+# 页面于是永远打不开。这时先把代理类型降成 off 起一个普通的 mixed-port，修好再重选。
+$plugin = New-Fixture 'fallback'
+Prepare-Config
+Set-ModeCache 'pc'
+$null = Apply-Settings 'pc'
+# 只让 off 起得来：pc 形态一律按「起不来」处理（函数重定义会顶掉前面点源进来的那份）。
+function Start-MeowChild {
+    if ((Get-Mode) -eq 'pc') { return 0 }
+    return 4242
+}
+if (-not (Start-WithFallback)) { Fail 'fallback: 降成 off 之后应该能起来' }
+if ((Get-Mode) -ne 'off') { Fail 'fallback: 没把代理类型降成 off' }
+if ((Get-BlockScalar $CONFIG 'tun' 'enable') -ne 'false') { Fail 'fallback: 降成 off 之后 tun 没关掉' }
+
+# 起来了就别动用户选的形态。
+$plugin = New-Fixture 'fallback-ok'
+Prepare-Config
+Set-ModeCache 'pc'
+$null = Apply-Settings 'pc'
+function Start-MeowChild { return 4242 }
+if (-not (Start-WithFallback)) { Fail 'fallback-ok: 起来时不该报失败' }
+if ((Get-Mode) -ne 'pc') { Fail 'fallback-ok: 起来了还把代理类型降级了' }
 
 Remove-Item -Recurse -Force $Work
