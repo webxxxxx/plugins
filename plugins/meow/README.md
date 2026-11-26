@@ -87,7 +87,7 @@ package/
 └── payload/
     ├── config.yaml                     meow 的配置模板（安装后就是 <插件目录>/config）
     ├── bin/                            只有内核二进制（构建产物 + 合入的脚本）
-    ├── web/index.html                  控制台「打开」入口（跳转到 9090/ui/）
+    ├── web/index.html                  控制台「打开」入口：顶部代理类型 + 订阅管理，下面 iframe 嵌 9090/ui/
     ├── cn_domains.yaml                 rule-provider
     └── yacd/                           面板静态文件
 ```
@@ -97,6 +97,11 @@ package/
 
 打包前会清掉别的平台留下的同名产物（`meow` ↔ `meow.exe`），所以每个平台的包
 里只有自己那份内核。
+
+`payload/yacd/` 是 YACD 的静态文件，其中 `sw.js` 会用 navigate 回退把 `/ui/` 的导航交给
+预缓存的那份 `yacd/index.html`。改了外壳（比如主题同步用的 `theme-bridge.js`）就必须把
+`sw.js` 里 `index.html` 的 `revision` 换成新文件的 md5，否则装到设备上、用户浏览器里
+还是旧外壳，看着就像“没生效”。`tools/meow-config-test.sh` 有一步守着这条。
 
 ## 运行方式
 

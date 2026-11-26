@@ -243,4 +243,19 @@ grep -q 'proxy-mode off → pc' "$WORK/channel.err" || fail 'channel: 看护循�
 [ -f "$_plugin/data/meow.pid" ] && fail 'channel: 退出后还留着 pidfile'
 fi
 
+# ---- 包里的 YACD 外壳：service worker 把它预缓存住了，改了文件就得改 revision ----
+# sw.js 用 navigate 回退把 /ui/ 的导航交给预缓存的 index.html；revision 不变，老用户
+# 浏览器里永远是旧外壳——比如那份没有 theme-bridge.js，顶部栏就不会跟着面板主题变。
+yacd="$REPO/plugins/meow/package/payload/yacd"
+revision=$(grep -o '"revision":"[0-9a-f]*","url":"index.html"' "$yacd/sw.js" | head -n 1 |
+    sed -e 's/.*"revision":"\([0-9a-f]*\)".*/\1/')
+[ -n "$revision" ] || fail 'yacd: sw.js 里找不到预缓存的 index.html'
+if command -v md5sum >/dev/null 2>&1; then
+    actual=$(md5sum "$yacd/index.html" | cut -d' ' -f1)
+else
+    actual=$(md5 -q "$yacd/index.html")   # macOS
+fi
+[ "$revision" = "$actual" ] ||
+    fail "yacd: index.html 改过了，sw.js 的 revision 还是 $revision（应该是 $actual）"
+
 echo "meow config layer: ok"
