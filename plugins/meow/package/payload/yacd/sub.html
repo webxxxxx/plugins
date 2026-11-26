@@ -20,6 +20,9 @@
   .refresh { background: #2980b9; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; width: auto; margin: 0 6px 0 0; color: #fff; border: none; }
   .refresh:hover:not(:disabled) { background: #2471a3; }
   .status { margin-top: 16px; font-size: 13px; color: #888; white-space: pre-wrap; background: #222; padding: 10px; border-radius: 6px; min-height: 20px; }
+  /* 嵌在插件页面的弹层里（?embed=1）：没有自己的标题栏和「返回」，关闭交给弹层。 */
+  body.embed { padding: 12px; }
+  body.embed .header { display: none; }
 </style>
 </head>
 <body>
@@ -38,6 +41,12 @@
 <div class="status" id="status">就绪</div>
 
 <script>
+// 插件页面的「订阅管理」按钮把这一页嵌进弹层：?embed=1 去掉自己的标题栏，
+// 关闭交给弹层；?secret= 是面板密钥（第一次打开时 YACD 还没把它写进 localStorage）。
+const params = new URLSearchParams(location.search);
+const EMBED = params.get('embed') === '1';
+if (EMBED) document.body.classList.add('embed');
+
 function normalizeBase(value) {
     if (typeof value !== 'string') return '';
     const v = value.trim();
@@ -70,6 +79,10 @@ if (rawData) {
 // 这个页面本身就由 meow 的 external-controller 提供；localStorage 里的
 // baseURL 为空/失效时，直接回退到当前 origin，避免拼出 /ui/null/api/...
 API = API || window.location.origin;
+
+// 弹层从插件页面把密钥传过来时以它为准：那种情况下 localStorage 里可能还没有。
+const querySecret = params.get('secret');
+if (querySecret) SECRET = querySecret;
 
 function headers() {
   const h = { "Content-Type": "application/json" };

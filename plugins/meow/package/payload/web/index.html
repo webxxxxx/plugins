@@ -6,6 +6,7 @@
 <style>
   :root { color-scheme: light dark; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; }
   body {
     display: flex; flex-direction: column;
@@ -27,7 +28,12 @@
   #status.up { color: #1a7f37; }
   #status.down { color: #9a6700; }
   #status.bad { color: #cf222e; }
-  #note { margin-left: auto; color: #6e7781; }
+  #subs-open {
+    margin-left: auto; font: inherit; padding: 4px 12px; border-radius: 6px;
+    border: 1px solid #c9ced6; background: #fff; color: inherit; cursor: pointer;
+  }
+  #subs-open:hover { background: #eef1f4; }
+  #subs-open:disabled { opacity: .55; cursor: default; }
   main { position: relative; flex: 1; min-height: 0; }
   iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: #fff; }
   #overlay {
@@ -36,11 +42,40 @@
   }
   main.down #overlay { display: grid; }
   main.down iframe { visibility: hidden; }
+
+  /* 订阅管理：顶部按钮打开弹层，内容是 meow 自己那份 /ui/sub.html。
+     YACD 里不再注入浮动按钮（那套做法已经去掉）。sub.html 自带深色样式，弹层的
+     外壳也跟着深色，两半看起来是一整块。 */
+  dialog {
+    width: min(560px, calc(100vw - 32px));
+    height: min(560px, calc(100vh - 48px));
+    padding: 0; border: 1px solid #303030; border-radius: 10px;
+    background: #1a1a1a; color: #eaeaea; overflow: hidden;
+  }
+  dialog[open] { display: flex; flex-direction: column; }
+  dialog::backdrop { background: rgba(0, 0, 0, .5); }
+  .subs-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-bottom: 1px solid #303030;
+  }
+  .subs-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+  #subs-close {
+    margin-left: auto; border: 0; background: transparent; color: inherit;
+    font: inherit; font-size: 20px; line-height: 1; padding: 2px 9px; border-radius: 6px; cursor: pointer;
+  }
+  #subs-close:hover { background: #2a2a2a; }
+  .subs-body { position: relative; flex: 1; min-height: 0; background: #1a1a1a; }
+  #subs-frame { background: #1a1a1a; }
+  .subs-empty {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    margin: 0; padding: 24px; text-align: center; color: #9aa0a6;
+  }
   @media (prefers-color-scheme: dark) {
     body { background: #0d1117; color: #e6edf3; }
     header { background: #161b22; border-color: #30363d; }
-    select { background: #0d1117; border-color: #3d444d; }
-    #status, #note, #overlay { color: #9198a1; }
+    select, #subs-open { background: #0d1117; border-color: #3d444d; }
+    #subs-open:hover { background: #21262d; }
+    #status, #overlay { color: #9198a1; }
     iframe { background: #0d1117; }
   }
 </style>
@@ -55,17 +90,30 @@
       </select>
     </label>
     <span id="status">读取状态…</span>
-    <span id="note">下面是 meow 自己的面板（YACD）</span>
+    <button id="subs-open" type="button">订阅管理</button>
   </header>
   <main id="panel" class="down">
     <iframe id="ui" title="meow 面板" referrerpolicy="no-referrer"></iframe>
     <div id="overlay"><p id="overlay-text">meow 没在运行，起来之后这里就是它的面板。</p></div>
   </main>
 
+  <dialog id="subs" aria-label="订阅管理">
+    <div class="subs-head">
+      <h2>订阅管理</h2>
+      <button id="subs-close" type="button" aria-label="关闭" title="关闭（Esc）">×</button>
+    </div>
+    <div class="subs-body">
+      <iframe id="subs-frame" title="订阅管理"></iframe>
+      <p class="subs-empty" id="subs-empty" hidden>meow 没在运行，起来之后才能管理订阅。</p>
+    </div>
+  </dialog>
+
   <script type="module">
-    // 这个页面是壳：顶上是代理类型（off / tun / tproxy），下面 iframe 嵌 meow 自带的 YACD。
+    // 这个页面是壳：顶上是代理类型（off / tun / tproxy）和订阅管理，下面 iframe 嵌 meow 自带的 YACD。
     // 选代理类型 → 调插件能力 mode → 写进 state 的 proxy-mode → 看护进程按新形态重启 meow。
     // 刚装好时 state 里没有这个键，插件按 off 走：不接管流量，先选 tun / tproxy 才接管。
+    // 订阅管理不用 YACD 里的浮动按钮：顶部按钮弹一个 <dialog>，里面是 meow 自己那份
+    // /ui/sub.html（还是同一套 /api/subscriptions 接口）。
     import { pluginUI } from './plugin-ui.mjs';
 
     const ui = pluginUI();
@@ -74,11 +122,15 @@
     const panel = document.getElementById('panel');
     const iframe = document.getElementById('ui');
     const overlayText = document.getElementById('overlay-text');
+    const subsButton = document.getElementById('subs-open');
+    const subsDialog = document.getElementById('subs');
+    const subsFrame = document.getElementById('subs-frame');
+    const subsEmpty = document.getElementById('subs-empty');
 
     const NAMES = { off: 'off（不接管）', tun: 'tun（本机 TUN）', tproxy: 'tproxy（网关）' };
 
     // YACD 由 meow 自己在 external-controller 上提供；用当前浏览器访问的主机名，
-    // 兼容 127.0.0.1 / localhost / 局域网地址。
+    // 兼容 127.0.0.1 / localhost / 局域网地址。订阅页是同一个 controller 上的 /ui/sub.html。
     const raw = location.hostname || '127.0.0.1';
     const host = (raw === '[::1]' || raw === '::1' || raw === '::') ? '127.0.0.1' : raw;
     const PANEL = `http://${host}:9090/ui/`;
@@ -100,6 +152,7 @@
       }
       if (last.mode) select.value = last.mode;
       select.disabled = false;
+      subsButton.disabled = false;
 
       if (last.running) {
         const port = last['mixed-port'] ? ` · mixed ${last['mixed-port']}` : '';
@@ -121,6 +174,43 @@
       query.set('t', String(Date.now()));
       iframe.src = `${PANEL}?${query}`;
     }
+
+    // 打开订阅管理：secret 也从这里传（浏览器第一次打开这个页面时 YACD 还没把密钥
+    // 存进 localStorage）；t 只为每次打开都重新拉一遍列表。
+    function subsURL() {
+      const query = new URLSearchParams();
+      query.set('embed', '1');
+      if (last.secret) query.set('secret', last.secret);
+      query.set('t', String(Date.now()));
+      return `${PANEL}sub.html?${query}`;
+    }
+
+    function openSubs() {
+      const up = Boolean(last.running);
+      subsEmpty.hidden = up;
+      subsFrame.hidden = !up;
+      if (up) {
+        subsFrame.src = subsURL();
+      } else {
+        subsFrame.src = 'about:blank';
+      }
+      if (typeof subsDialog.showModal !== 'function') {
+        // 很老的浏览器没有 <dialog>：退化成新窗口，打开的还是同一个页面。
+        if (last.running) window.open(subsURL(), '_blank', 'width=600,height=680');
+        return;
+      }
+      subsDialog.showModal();
+    }
+
+    subsButton.addEventListener('click', openSubs);
+    subsButton.disabled = true; // 读到状态之前先别点：那会儿还不知道 secret
+    document.getElementById('subs-close').addEventListener('click', () => subsDialog.close());
+    // 点弹层外的遮罩也关：dialog 只在自己接住内容之外的点击。Esc 由 <dialog> 自带。
+    subsDialog.addEventListener('click', (event) => {
+      if (event.target === subsDialog) subsDialog.close();
+    });
+    // 关掉之后把 iframe 放回空白，别让隐藏的页面继续拉着那份列表。
+    subsDialog.addEventListener('close', () => { subsFrame.src = 'about:blank'; });
 
     async function read() {
       return JSON.parse(await ui.invoke('mode'));
@@ -168,3 +258,4 @@
     }
   </script>
 </body>
+</html>

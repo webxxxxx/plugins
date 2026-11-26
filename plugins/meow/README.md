@@ -103,10 +103,14 @@ package/
 - `mixed-port: 7890`：HTTP/SOCKS5 混合代理（浏览器可以直接用它，`off` 形态只有它）。
 - `external-controller: 127.0.0.1:9090`，YACD 在 `http://127.0.0.1:9090/ui/`。
 - svcd 控制台的「打开」入口是我们自己的页面（`payload/web/index.html`）：顶部是**代理类型**
-  （`off` / `tun` / `tproxy`），下面用 iframe 嵌 meow 自带的 YACD；面板地址按当前浏览器访问的
+  （`off` / `tun` / `tproxy`）和**订阅管理**按钮，下面用 iframe 嵌 meow 自带的 YACD；
+  面板地址按当前浏览器访问的
   主机名拼（`http://<当前主机>:9090/ui/`），`127.0.0.1` / `localhost` / 局域网地址都能用。
 - 页面上的选择立刻生效，而且是**持久**的：它写进 `<插件目录>/state` 的 `proxy-mode`，
   插件关掉再开也按它走。
+- 顶部还有一个**订阅管理**按钮：点开是一个弹层（`<dialog>`），里面是 meow 自己那份
+  `/ui/sub.html`，添加 / 刷新 / 删除订阅走的还是 `/api/subscriptions`。弹层用右上角的
+  `×`、Esc 或点弹层外面都能关。YACD 里那个浮动订阅按钮已经去掉——入口只在页面顶上。
 - 面板是 meow 自己在 `:9090` 上开的；如果宿主是用 https 打开的，浏览器会拦掉这个
   http iframe（控制台本身走 http 就没这个问题）。
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
@@ -191,6 +195,8 @@ dns-port: 1053          # 劫持 LAN DNS 用的端口
 
 订阅里常常自带一个 `secret`，YACD 于是每次弹登录框。页面的 `mode` 能力会把这个 `secret`
 读出来，拼进 iframe 的 URL（`…:9090/ui/?secret=…`），所以面板打开就是登录状态。
+订阅管理弹层同理：`/ui/sub.html?embed=1&secret=…`，第一次打开这个页面时也不用先在面板里
+登录一遍。
 想彻底关掉密钥：把 `config` 里的 `secret` 改成 `""` 再重启（控制器只监听 `127.0.0.1`）。
 
 ## 本机透明代理（proxy-mode: pc）
