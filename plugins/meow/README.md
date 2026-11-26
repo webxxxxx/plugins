@@ -379,16 +379,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File <插件目录>\<版本>\payl
 
 ```sh
 sh tools/pack.sh                                 # windows-msvc + linux-gnu 两个 .spk
-sh tools/pack.sh meow x86_64-unknown-linux-musl  # 想多出 musl / arm 就加参数
+sh tools/pack.sh meow all                        # 除 mac 外全打（gnu + 三个 musl + windows，测试用）
+sh tools/pack.sh meow linux                      # 只打 linux 四个
+sh tools/pack.sh meow x86_64-unknown-linux-musl  # 单个平台
 ```
 
-**Linux 发哪个包**：`linux-gnu` 是在 Ubuntu 24.04（glibc 2.39）上链出来的，宿主机 glibc
-比它老就直接跑不起来——`meow -t` 报 `version 'GLIBC_2.38' not found`，插件日志里只看得到
-“配置校验失败”。WSL 里的 Debian 12（glibc 2.36）、多数路由器固件都要发 musl 包：
+`all` / `linux` / `musl` 按 `.plugin.json` 里的 `platforms` 展开，mac 那两个会被跳过
+（要 Xcode，只能在 mac 上编）。
+
+**Linux 发哪个包**：`linux-gnu` 是在 bookworm 变体里链出来的（glibc 2.36，用到的符号最高
+GLIBC_2.34；CI 上是 ubuntu-22.04 / 2.35），宿主机 glibc 比它老就还是跑不起来——loader
+直接拒绝执行，报 `version 'GLIBC_2.34' not found` 这种（具体数字看编译机），插件日志里只
+看得到“配置校验失败”。WSL 里的 Debian 12（2.36）够用，但 Debian 11（2.31）、Ubuntu
+20.04（2.31）、多数路由器固件都得发 musl 包（静态，跟宿主 glibc 无关）：
 
 ```sh
 sh tools/pack.sh meow x86_64-unknown-linux-musl
 ```
+
+**gnu 和 musl 各管一头**：`.spk` 里的 `platform` 是打包器盖的章，装上时 svcd 要求它和
+宿主自己的三元组一致（`plugin verify <spk>` 会打 `host match: yes/no`）。所以 gnu 编的
+svcd 只吃 gnu 包，musl 编的 svcd 只吃 musl 包——两个包都要出，不是二选一。
 
 musl 包要用**整份** musl 交叉工具链（musl.cc 那份，自带 musl 版 `libstdc++.a`）。镜像里的
 `musl-gcc` 是 musl-tools 的 C 驱动，C++ 只能退到宿主机的 g++，那头是 glibc 的头和

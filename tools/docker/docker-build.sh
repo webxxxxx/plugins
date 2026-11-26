@@ -24,7 +24,8 @@
 #   -n NAME   构建工作目录名，默认取 -w 那个目录的名字
 #   -p TRIPLE 目标平台：容器里按 tools/cross-env.sh 配好 CC / AR / 链接器和 PATH，
 #             省得 cargo 报「linker cc not found」（不写就从命令里的 --target 读）
-#   -t IMAGE  镜像（默认 rust-cross:1.98.1）
+#   -t IMAGE  镜像；不写就按目标挑：x86_64-unknown-linux-gnu 用 bookworm（glibc 2.36），
+#             其余用 trixie。两个变体见 tools/docker/image.sh，缺了会现建
 #   -j N      并行度（默认 4）
 set -eu
 
@@ -33,7 +34,7 @@ SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 SCRIPT_REPO=$(CDPATH= cd -- "$SELF_DIR/../.." && pwd)
 TOOLS_DIR=$(CDPATH= cd -- "$SELF_DIR/.." && pwd) # cross-env.sh 在 tools/ 下，容器里挂成 /svcd-tools
 WORKSPACE=${SVCD_BUILD_WORKSPACE:-/usr/soft/build_workspace}
-IMAGE=${SVCD_CROSS_IMAGE:-rust-cross:1.98.1}
+IMAGE=${SVCD_CROSS_IMAGE:-}
 JOBS=${JOBS:-4}
 ROOT=
 DIR=.
@@ -118,9 +119,13 @@ command -v docker >/dev/null 2>&1 || {
     echo "docker-build: 找不到 docker（WSL：apt install docker.io && sudo usermod -aG docker \$USER，重开会话）" >&2
     exit 1
 }
+# 没指定就用按目标挑的那个变体（gnu → bookworm 老 glibc，其余 → trixie），缺了现建
+if [ -z "$IMAGE" ]; then
+    IMAGE=$(sh "$SELF_DIR/image.sh" "$TRIPLE") || exit 1
+fi
 docker image inspect "$IMAGE" >/dev/null 2>&1 || {
     echo "docker-build: 还没有镜像 $IMAGE" >&2
-    echo "             先构建：docker build -f $SCRIPT_REPO/tools/docker/rust-cross.Dockerfile -t $IMAGE $SCRIPT_REPO/tools/docker" >&2
+    echo "             先构建：sh $SELF_DIR/image.sh $TRIPLE（或看 tools/docker/README.md）" >&2
     exit 1
 }
 

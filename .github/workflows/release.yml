@@ -137,11 +137,13 @@ jobs:
             false | 0 | no | off) macos=false ;;
           esac
 
-          hosts='["ubuntu-24.04","windows-2025"]'
-          tools='{"include":[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","kind":"linux"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc","kind":"windows"}]}'
+          # Linux 的宿主工具也在 jammy 上出，和 gnu 插件包同一个 glibc 基线（2.35）：
+          # 两个东西都在人家机器上跑，编它们的机器不能比目标机器新。
+          hosts='["ubuntu-22.04","ubuntu-24.04","windows-2025"]'
+          tools='{"include":[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","kind":"linux"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc","kind":"windows"}]}'
           if [ "$macos" = true ]; then
-            hosts='["ubuntu-24.04","macos-15","windows-2025"]'
-            tools='{"include":[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","kind":"linux"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc","kind":"windows"},{"os":"macos-15","target":"universal2-apple-darwin","kind":"macos"}]}'
+            hosts='["ubuntu-22.04","ubuntu-24.04","macos-15","windows-2025"]'
+            tools='{"include":[{"os":"ubuntu-22.04","target":"x86_64-unknown-linux-gnu","kind":"linux"},{"os":"windows-2025","target":"x86_64-pc-windows-msvc","kind":"windows"},{"os":"macos-15","target":"universal2-apple-darwin","kind":"macos"}]}'
           else
             echo "::notice::BUILD_MACOS=$flag — 这次不跑 macos-15 runner，也不产出 *-apple-darwin 包"
           fi
@@ -195,10 +197,14 @@ jobs:
             [ -n "$name" ] || continue
             platforms=$(jq -r '(.ci.platforms // .platforms // [])[]' "$manifest")
             for platform in $platforms; do
+              # Linux 的 gnu 包在 jammy（glibc 2.35）上编：动态链接的二进制把
+              # "要 GLIBC_2.38" 刻在 ELF 里，24.04 编出来的在 Debian 12 / Ubuntu 22.04
+              # 上 loader 直接拒绝执行。musl 是静态的，跟这无关，仍在 24.04 上编。
               case "$platform" in
-                *-apple-darwin) os=macos-15 ;;
-                *-windows-*)     os=windows-2025 ;;
-                *)               os=ubuntu-24.04 ;;
+                *-apple-darwin)      os=macos-15 ;;
+                *-windows-*)         os=windows-2025 ;;
+                *-unknown-linux-gnu) os=ubuntu-22.04 ;;
+                *)                   os=ubuntu-24.04 ;;
               esac
               if [ "$os" = macos-15 ] && [ "$MACOS" != true ]; then
                 continue

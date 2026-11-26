@@ -18,11 +18,21 @@
 #   APT_MIRROR    debian 源，默认阿里云
 #   基础镜像走宿主机 /etc/docker/daemon.json 的 registry-mirrors
 #
-# 构建：
+# 构建（两个变体，同一个 Dockerfile，差别只有基础镜像的 glibc 版本）：
 #   docker build -f tools/docker/rust-cross.Dockerfile -t rust-cross:1.98.1 tools/docker
+#   docker build -f tools/docker/rust-cross.Dockerfile --build-arg BASE_IMAGE=debian:bookworm-slim \
+#       -t rust-cross:1.98.1-bookworm tools/docker
+# 平时不用手敲：tools/docker/image.sh <triple> 会按目标挑变体，缺了就现建。
 # 用法见 tools/docker/README.md；日常用 tools/docker/run.sh 和 tools/pack.sh。
-# bookworm 的 clang 只有 14，而 xwin 带下来的 MSVC STL 要求 Clang ≥ 19，所以用 trixie
-FROM debian:trixie-slim
+#
+# 为什么两个变体：
+#   trixie（默认）  glibc 2.41 + clang 19 —— musl 目标、windows-msvc。xwin 带下来的
+#                   MSVC STL 要求 Clang ≥ 19，而 bookworm 的 clang 只有 14。
+#   bookworm        glibc 2.36 + clang 14 —— x86_64-unknown-linux-gnu 用它编，产物才能
+#                   在 Debian 12 / Ubuntu 22.04 这些老 glibc 上跑（trixie 编出来的要
+#                   2.38/2.39 的符号，Debian 12 是 2.36，loader 直接拒绝）。
+ARG BASE_IMAGE=debian:trixie-slim
+FROM ${BASE_IMAGE}
 
 ARG APT_MIRROR=mirrors.aliyun.com
 
