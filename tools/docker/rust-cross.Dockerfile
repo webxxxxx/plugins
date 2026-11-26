@@ -5,7 +5,7 @@
 # ~/.rustup 和 ~/.cargo/bin 挂进来）：
 #   clang / llvm / libclang   bindgen（BoringSSL、各种 *-sys）要用
 #   nasm                      BoringSSL 在 x86_64 Windows 上的汇编
-#   musl-tools                容器内直接编 x86_64-unknown-linux-musl
+#   musl-tools                没有整份工具链时兜底编 x86_64-unknown-linux-musl（只够纯 C）
 #   cmake / ninja / perl / build-essential  （cargo-xwin 的 C 依赖走 Ninja）
 #   unzip / python3                          （meow 的 build.rs 要解 wintun 压缩包）
 #
@@ -29,7 +29,8 @@ ARG APT_MIRROR=mirrors.aliyun.com
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 编译依赖。clang/llvm/libclang：bindgen；nasm：x86_64 Windows 汇编；
-# musl-tools：容器内直接编 x86_64 musl。
+# musl-tools：没有 musl.cc 那份 x86_64 工具链时兜底（它的 C++ 是宿主机 glibc 的，
+# BoringSSL 那种 C++ 依赖只能靠宿主 /usr/soft/x86_64-linux-musl-cross）。
 RUN set -eux; \
     sed -i "s|deb.debian.org|${APT_MIRROR}|g; s|security.debian.org|${APT_MIRROR}|g" \
         /etc/apt/sources.list.d/debian.sources; \

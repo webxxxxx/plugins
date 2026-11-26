@@ -75,22 +75,36 @@ if [ ! -x "$bin" ]; then
     mkdir -p "$cache"
     tgz="$cache/$dir.tgz"
     ok=0
+    # 断点续传：国内直连 GitHub 往往只有几十 KB/s，600s 的 max-time 会在快下完时掐掉，
+    # 从 0 重来。所以先落到 .part，用 -C - 接着下；同一个源多试几次再换镜像。
+    part="$tgz.part"
     # musl.cc 在 GitHub runner 上不可达，优先用 GitHub Release 镜像，最后回退主站。
     for base in \
         https://github.com/musl-cc/musl.cc/releases/download/v0.0.1 \
         https://github.com/tsl0922/musl-toolchains/releases/download/2021-11-23 \
         https://musl.cc; do
-        if curl -fL --connect-timeout 10 --max-time 600 --retry 2 --retry-delay 3 -o "$tgz" "$base/$dir.tgz" \
-            && tar tzf "$tgz" >/dev/null 2>&1; then
-            ok=1
-            break
-        fi
-        rm -f "$tgz"
+        for try in 1 2 3 4 5 6 7 8; do
+            rc=0
+            curl -fL -C - --connect-timeout 10 --max-time 1800 --retry 2 --retry-delay 3 \
+                -o "$part" "$base/$dir.tgz" || rc=$?
+            if tar tzf "$part" >/dev/null 2>&1; then
+                ok=1
+                break
+            fi
+            # 下整了但包是坏的（两个源拼在一起之类）：别接着续，换源从头下
+            if [ "$rc" = 0 ]; then
+                rm -f "$part"
+                break
+            fi
+        done
+        [ "$ok" = 1 ] && break
+        rm -f "$part"
     done
     if [ "$ok" != 1 ]; then
         echo "cross: could not download $dir.tgz (tried musl.cc and its GitHub mirrors)" >&2
         exit 1
     fi
+    mv "$part" "$tgz"
     tar xzf "$tgz" -C "$cache"
     rm -f "$tgz"
 fi

@@ -390,6 +390,24 @@ sh tools/pack.sh meow x86_64-unknown-linux-musl  # 想多出 musl / arm 就加�
 sh tools/pack.sh meow x86_64-unknown-linux-musl
 ```
 
+musl 包要用**整份** musl 交叉工具链（musl.cc 那份，自带 musl 版 `libstdc++.a`）。镜像里的
+`musl-gcc` 是 musl-tools 的 C 驱动，C++ 只能退到宿主机的 g++，那头是 glibc 的头和
+libstdc++，链接期一定炸（`__isoc23_strtoull` / `fopen64` / `__libc_single_threaded`
+未定义）。一次装好，之后连容器一起用（`/usr/soft` 挂进镜像）：
+
+```sh
+sh tools/cross/install.sh x86_64-unknown-linux-musl /usr/soft   # → /usr/soft/x86_64-linux-musl-cross
+```
+
+工具链装好了还是报 `fopen64` / `__isoc23_strtoull`（或者架构不对），是 BoringSSL 的 cmake
+目录里留着上一次的宿主编译器和 `.o`。`build.sh` 现在把编译器用 `CACHE … FORCE` 写进工具链
+文件（boring-sys 看到 `CMAKE_TOOLCHAIN_FILE` 就不再自己给编译器，只能由这里给全），重跑会
+自己改过来；保险起见先删掉旧目录：
+
+```sh
+rm -rf ${SVCD_BUILD_WORKSPACE:-/usr/soft/build_workspace}/meow/target/x86_64-unknown-linux-musl/release/build/{boring-sys,quiche}-*
+```
+
 插件启动时会先跑一次 `meow -t` 校验配置；这一步失败时它会把自己（meow）的原话打出来，
 并且区分“配置不对”和“二进制在这台机器上跑不起来”，别一律当成配置问题去改。
 
@@ -423,7 +441,7 @@ BoringSSL 由 meow-rs 自己静态链接。构建只产出一个二进制（meow
 | --- | --- |
 | 目标装到 pin 的工具链上 | `rustup target add --toolchain 1.98.1-<本机三元组> <目标>`。装到默认工具链不算数——`rust-toolchain.toml` 把版本固定在 1.98.1 |
 | cmake | BoringSSL 用它构建；Windows 上 `scoop install cmake`，Linux 上 `apt install cmake` |
-| 交叉 C 工具链 | musl 目标需要（`X86_64_MUSL_CROSS` / `AARCH64_CROSS` / `CROSS_PREFIX`）；`build.sh` 会探测 `/usr/soft/*-cross` 和 `/d/soft/x86_64-linux-musl`，找不到就报错 |
+| 交叉 C 工具链 | musl 目标需要（`X86_64_MUSL_CROSS` / `AARCH64_CROSS` / `CROSS_PREFIX`）；`build.sh` 会探测 `/usr/soft/*-cross`、`/usr/local/x86_64-linux-musl-cross`、`/d/soft/x86_64-linux-musl`，找不到就报错。只找到 `musl-gcc` 时也能配起来，但 BoringSSL 一定链不上——装整份：`sh tools/cross/install.sh <triple> /usr/soft` |
 
 `build.sh` 会先写一份 CMake 工具链文件把 `BUILD_TESTING` 关掉：BoringSSL 缺省会把
 google benchmark 一起配进来，而它的特性探测在 Windows 上很容易失败（

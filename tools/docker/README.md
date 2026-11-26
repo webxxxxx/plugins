@@ -16,7 +16,7 @@
 | 目标 | 怎么来的 |
 | --- | --- |
 | `x86_64-unknown-linux-gnu` | 镜像里 gcc |
-| `x86_64-unknown-linux-musl` | 镜像里 `musl-gcc`（debian 的 musl-tools） |
+| `x86_64-unknown-linux-musl` | 宿主 `/usr/soft/x86_64-linux-musl-cross`，挂进容器共用；没有整份工具链时才退到镜像里的 `musl-gcc`（musl-tools），纯 C 够用、带 C++ 依赖的（meow）不够 |
 | `aarch64-unknown-linux-musl` | 宿主 `/usr/soft/aarch64-linux-musl-cross`，挂进容器共用 |
 | `armv7-unknown-linux-musleabihf` | 宿主 `/usr/soft/arm-linux-musleabihf-cross`，同上 |
 | `x86_64-pc-windows-msvc` | `cargo-xwin` + MSVC CRT/SDK（第一次编时下到 `build_workspace/xwin`，约 1.1G，之后复用） |
@@ -156,8 +156,9 @@ sh tools/pack.sh sshd                            # 别的插件（build.sh 支�
 ## 边界
 
 - **macOS 目标**只能 mac 上编。
-- **armv7 / aarch64 的 musl** 依赖宿主的 `/usr/soft/*-cross`；别的机器上要自己解一份
-  同名工具链到 `/usr/soft`，或者用 `SVCD_BUILD_WORKSPACE` 之外的自定义镜像。
+- **musl 的目标**都依赖宿主的 `/usr/soft/*-cross`；别的机器上先装一份，装法：
+  `sh tools/cross/install.sh <triple> /usr/soft`（x86_64 也走这条）。x86_64 少了它会退到
+  镜像里的 `musl-gcc`，只是 musl-tools 的 C++ 是宿主机 glibc 那一套，BoringSSL 一定链不上。
 - 镜像只负责**编译**；清单合并、staging、bundle 仍在宿主机跑（`plugin-tools` + 宿主
   `plugin`），和 CI 走同一条路，产物因此完全一致。
 - 容器以当前 uid/gid 跑（`--user`），`out/`、`dist/` 里的文件属主不会变成 root。

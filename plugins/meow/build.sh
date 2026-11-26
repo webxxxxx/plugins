@@ -71,22 +71,36 @@ case "$PLATFORM" in
   *) echo "unsupported platform: $PLATFORM" >&2; exit 1 ;;
 esac
 
-# BoringSSL 的 cmake 只认绝对路径，armv7 这一支要显式给。追加到上面那份工具链文件里：
-# BUILD_TESTING 那行要留着。
+# BoringSSL 的 cmake 只认绝对路径，而且交叉目标的编译器只能从这里给：
+# boring-sys 看到环境里那份 CMAKE_TOOLCHAIN_FILE 就直接把它交给 cmake，自己不再
+# -D CMAKE_C_COMPILER/CMAKE_CXX_COMPILER，也不再套它自带的 aarch64/arm 工具链文件
+# （boring-sys 5.x build/main.rs：cmake_toolchain_file.is_some() 就 return）。文件里
+# 不写编译器，cmake 会挑宿主机的 /usr/bin/cc：BoringSSL 的 C++ 那一半编成宿主目标
+# 文件，链接期报 fopen64 / __isoc23_strtoull 未定义（或者架构不对）。所以 musl 三个
+# 目标都写全，而且用 FORCE 盖掉旧缓存——换工具链后不重来的话，cmake 会一直沿用
+# 上次那个宿主编译器。BUILD_TESTING 那行要留着。
+if [ -n "$SVCD_CROSS_ROOT" ]; then
+  case "$PLATFORM" in
+    armv7-unknown-linux-musleabihf) _proc=arm ;;
+    aarch64-unknown-linux-musl) _proc=aarch64 ;;
+    *) _proc=x86_64 ;;
+  esac
+  _bin=$SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX
+  cat >> "$TC" <<EOF
+set(CMAKE_SYSTEM_NAME Linux CACHE STRING "meow: cross target" FORCE)
+set(CMAKE_SYSTEM_PROCESSOR $_proc CACHE STRING "meow: cross target" FORCE)
+set(CMAKE_C_COMPILER $_bin-gcc CACHE FILEPATH "meow: cross cc" FORCE)
+set(CMAKE_CXX_COMPILER $_bin-g++ CACHE FILEPATH "meow: cross c++" FORCE)
+set(CMAKE_AR $_bin-ar CACHE FILEPATH "meow: cross ar" FORCE)
+set(CMAKE_RANLIB $_bin-ranlib CACHE FILEPATH "meow: cross ranlib" FORCE)
+set(CMAKE_FIND_ROOT_PATH $SVCD_CROSS_ROOT)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+EOF
+fi
+
 case "$PLATFORM" in
-  armv7-unknown-linux-musleabihf)
-    {
-      echo "set(CMAKE_SYSTEM_NAME Linux)"
-      echo "set(CMAKE_SYSTEM_PROCESSOR arm)"
-      echo "set(CMAKE_C_COMPILER $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-gcc)"
-      echo "set(CMAKE_CXX_COMPILER $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-g++)"
-      echo "set(CMAKE_AR $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-ar)"
-      echo "set(CMAKE_RANLIB $SVCD_CROSS_ROOT/bin/$SVCD_CROSS_PREFIX-ranlib)"
-      echo "set(CMAKE_FIND_ROOT_PATH $SVCD_CROSS_ROOT)"
-      echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)"
-      echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)"
-      echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)"
-    } >> "$TC" ;;
   x86_64-pc-windows-msvc)
     # Windows 上要一个自足的 exe：默认是动态 CRT，产物会 import MSVCP140.dll /
     # VCRUNTIME140.dll，机器上没装 VC++ 运行库就起不来，而装插件不该要求用户先装
