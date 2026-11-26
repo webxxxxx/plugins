@@ -3,8 +3,21 @@
 <meta charset="utf-8">
 <title>meow</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+  // 先把主题定下来，免得闪一下：优先用上一次 YACD 报过来的主题（存在这一页自己的
+  // localStorage 里），没有就看系统偏好；之后由 iframe 里的 theme-bridge.js 持续同步。
+  (function () {
+    var theme = null;
+    try { theme = localStorage.getItem('meow.theme'); } catch (e) {}
+    if (theme !== 'dark' && theme !== 'light') {
+      theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', theme);
+  })();
+</script>
 <style>
-  :root { color-scheme: light dark; }
+  :root { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
   * { box-sizing: border-box; }
   [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; }
@@ -70,14 +83,15 @@
     position: absolute; inset: 0; display: grid; place-items: center;
     margin: 0; padding: 24px; text-align: center; color: #9aa0a6;
   }
-  @media (prefers-color-scheme: dark) {
-    body { background: #0d1117; color: #e6edf3; }
-    header { background: #161b22; border-color: #30363d; }
-    select, #subs-open { background: #0d1117; border-color: #3d444d; }
-    #subs-open:hover { background: #21262d; }
-    #status, #overlay { color: #9198a1; }
-    iframe { background: #0d1117; }
-  }
+  /* 深色皮肤：跟着 YACD 的主题走（见下面的 theme-bridge），不看系统偏好。 */
+  :root[data-theme="dark"] body { background: #0d1117; color: #e6edf3; }
+  :root[data-theme="dark"] header { background: #161b22; border-color: #30363d; }
+  :root[data-theme="dark"] select,
+  :root[data-theme="dark"] #subs-open { background: #0d1117; border-color: #3d444d; }
+  :root[data-theme="dark"] #subs-open:hover { background: #21262d; }
+  :root[data-theme="dark"] #status,
+  :root[data-theme="dark"] #overlay { color: #9198a1; }
+  :root[data-theme="dark"] #ui { background: #0d1117; }
 </style>
 <body>
   <header>
@@ -136,6 +150,26 @@
     const PANEL = `http://${host}:9090/ui/`;
 
     let last = {};
+
+    // 顶部这一栏跟着 YACD 内部切换的主题走。两边不同源，读不到它的 DOM / localStorage，
+    // 所以由 meow 那份 yacd/theme-bridge.js 把 <html data-theme> 的变化 postMessage 过来。
+    const THEME_KEY = 'meow.theme';
+
+    function applyTheme(theme) {
+      const value = theme === 'dark' ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', value);
+      try {
+        localStorage.setItem(THEME_KEY, value);
+      } catch {
+        // 隐私模式下写不进去，不影响这次切换。
+      }
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.source !== iframe.contentWindow) return; // 只认 panel 那个 iframe
+      const data = event.data;
+      if (data && data.type === 'meow:theme') applyTheme(data.theme);
+    });
 
     function say(text, kind = '') {
       statusEl.textContent = text;
