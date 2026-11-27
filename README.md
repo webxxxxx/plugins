@@ -66,7 +66,15 @@ cd tools/cli && cargo build --release
 只做声明与投影。
 
 `plugin bundle` 恒定写 `schema: 1`（源清单写的值会被覆盖，不会降级），`plugin-tools build` 按
-`<id>-<version>-<platform>.spk` 命名产物。
+`<id>-<version>-<platform>[-<device>].spk` 命名产物：清单声明了 `compat.devices` 时追加列表里的
+第一个 id（和 `plugin bundle` 一致），商店按这个后缀认出它只给哪台设备。
+
+同一个三元组要出一个通用包加一个设备专用包时，在 `.plugin.json` 里写 `variants`（例如
+`{"device": "sr6110", "platforms": ["aarch64-unknown-linux-musl"]}`）：每个平台照旧出一个通用包，
+变体再额外出一个，`compat.devices` 由构建写进那一份清单，产物名带 `-<device>`。`build --device
+<id>` 只打变体；`build --platform <t>` 不带 `--device` 仍只打通用包。recipe 里能拿到 `{device}`
+和 `SVCD_DEVICE`，用来挑该拷哪个二进制。
+
 **不产出旧 schema 的包**：还在报 `schema_max: 3` 的老宿主装不上新产物，这是有意的——
 先升级宿主，再用同一条线（main）的 `plugin-tools` 重打包。
 

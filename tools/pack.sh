@@ -22,8 +22,9 @@ usage() {
   不带参数            meow 的 windows-msvc + linux-gnu
   <插件>              插件目录名（plugins/ 下面那个），默认 meow
   <三元组>            想打哪个平台就写哪个，可以写多个
-  -p, --platform <t>  同上，显式写法
-  all                 这个插件 .plugin.json 里除 mac 之外的全部（本地能编的都编一遍）
+  -p, --platform <t>  同上，显式写法；也可以写 <三元组>:<device> 打设备变体
+  -d, --device <id>   设备变体（如 sr6110），只能配单个平台用
+  all                 这个插件 .plugin.json 里除 mac 之外的全部，含 variants（本地能编的都编一遍）
   linux               只要 linux 那几个（gnu + 三个 musl）
   musl                只要 musl 那几个
   OUT_DIR=<dir>       产物落哪（默认 <仓库>/dist）
@@ -43,12 +44,24 @@ USAGE
 
 NAME=meow
 PLATFORMS=
+DEVICE=
+# 读 .plugin.json（platforms/variants 展开）用；Windows 上常常只有 python，
+# 而 python3 可能只是个跑不起来的 shim —— 要求能真的执行才算数。
+PY=
+for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c '' >/dev/null 2>&1; then
+        PY=$candidate
+        break
+    fi
+done
 want_some=   # all / linux / musl：按 .plugin.json 展开成三元组
 while [ $# -gt 0 ]; do
     case "$1" in
     -h|--help) usage; exit 0 ;;
     -p|--platform) [ $# -ge 2 ] || die "-p 后面要跟平台"; PLATFORMS="$PLATFORMS $2"; shift 2 ;;
     --platform=*) PLATFORMS="$PLATFORMS ${1#--platform=}"; shift ;;
+    -d|--device) [ $# -ge 2 ] || die "-d 后面要跟设备 id"; DEVICE=$2; shift 2 ;;
+    --device=*) DEVICE=${1#--device=}; shift ;;
     -*) die "未知选项 $1（--help 看用法）" ;;
     all|every) want_some=all; shift ;;
     linux) want_some=linux; shift ;;
@@ -61,27 +74,62 @@ done
 [ -f "$REPO/plugins/$NAME/package/manifest.json" ] || die "没有这个插件：plugins/$NAME"
 
 # ---- all / linux / musl：平台的唯一来源是插件的 .plugin.json ----
+# 顶层 platforms 出通用包，variants[].platforms 出 <platform>:<device> 变体包。
+json_list() {
+    # $1 = .plugin.json, $2 = list|variants
+    "$PY" - "$1" "$2" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1], encoding="utf-8"))
+if sys.argv[2] == "list":
+    platforms = (meta.get("ci") or {}).get("platforms") or meta.get("platforms") or []
+    for platform in platforms:
+        print(platform)
+else:
+    for variant in meta.get("variants") or []:
+        for platform in variant.get("platforms") or []:
+            print(f"{platform}:{variant['device']}")
+PY
+}
+
 if [ -n "$want_some" ]; then
     [ -f "$REPO/plugins/$NAME/.plugin.json" ] ||
         die "plugins/$NAME 没有 .plugin.json，$want_some 展开不了；直接把三元组列出来"
-    list=$(
-        sed -n '/"platforms"[[:space:]]*:/,/]/p' "$REPO/plugins/$NAME/.plugin.json" |
-            tr -d ' \t' | tr ',' '\n' | sed -n 's/^"\([^"]*\)".*/\1/p' | grep -- '-'
-    )
-    [ -n "$list" ] || die "plugins/$NAME/.plugin.json 里没读到平台清单（all/linux/musl 靠它展开）"
-    for platform in $list; do
+    command -v "$PY" >/dev/null 2>&1 ||
+        die "$want_some 展开需要 python3（读 .plugin.json 的 platforms/variants）"
+    entries=$(json_list "$REPO/plugins/$NAME/.plugin.json" list | tr -d '\r')
+    entries="$entries
+$(json_list "$REPO/plugins/$NAME/.plugin.json" variants | tr -d '\r')"
+    [ -n "$(printf '%s' "$entries" | tr -d ' \n')" ] ||
+        die "plugins/$NAME/.plugin.json 里没读到平台清单（all/linux/musl 靠它展开）"
+    for entry in $entries; do
+        platform=${entry%%:*}
+        device=
+        [ "$platform" = "$entry" ] || device=${entry#*:}
         case "$want_some:$platform" in
         all:*-apple-darwin*)
             echo "pack: 跳过 $platform（darwin 要有 Xcode，只有 mac 上能编）" >&2
             continue
             ;;
-        linux:*-linux-*) PLATFORMS="$PLATFORMS $platform" ;;
-        musl:*-musl*) PLATFORMS="$PLATFORMS $platform" ;;
-        all:*) PLATFORMS="$PLATFORMS $platform" ;;
+        linux:*-linux-*) ;;
+        musl:*-musl*) ;;
+        all:*) ;;
+        *) continue ;;
         esac
+        if [ -n "$device" ]; then
+            PLATFORMS="$PLATFORMS $platform:$device"
+        else
+            PLATFORMS="$PLATFORMS $platform"
+        fi
     done
 fi
 [ -n "$(printf '%s' "$PLATFORMS" | tr -d ' ')" ] || PLATFORMS="x86_64-pc-windows-msvc x86_64-unknown-linux-gnu"
+
+# -d 只能配单个平台：变体本来就只属于某一个三元组。
+if [ -n "$DEVICE" ]; then
+    count=$(printf '%s' "$PLATFORMS" | tr ' ' '\n' | grep -c . || true)
+    [ "$count" = 1 ] || die "--device 要和单个平台一起用（现在有 $count 个）"
+    PLATFORMS="$(printf '%s' "$PLATFORMS" | tr -d ' '):$DEVICE"
+fi
 
 # ---- docker 与镜像 ----
 command -v docker >/dev/null 2>&1 || die "找不到 docker"
@@ -121,17 +169,26 @@ fi
 
 # ---- 逐平台打包 ----
 mkdir -p "$OUT_DIR"
-for platform in $PLATFORMS; do
-    echo "pack: $NAME $platform" >&2
+for entry in $PLATFORMS; do
+    platform=${entry%%:*}
+    device=
+    [ "$platform" = "$entry" ] || device=${entry#*:}
+    label=$platform
+    [ -n "$device" ] && label="$platform ($device)"
+    echo "pack: $NAME $label" >&2
     # 每个平台自己的镜像：gnu 用 bookworm 老底子，其余用默认（见 tools/docker/image.sh）
     platform_image=$(sh "$REPO/tools/docker/image.sh" "$platform") || die "镜像准备失败"
-    SVCD_CROSS_IMAGE=$platform_image SVCD_DOCKER=1 "$TOOLS" build --dir "$REPO/plugins/$NAME" --platform "$platform" ||
-        die "$NAME $platform 打包失败"
+    set -- --dir "$REPO/plugins/$NAME" --platform "$platform"
+    [ -n "$device" ] && set -- "$@" --device "$device"
+    SVCD_CROSS_IMAGE=$platform_image SVCD_DOCKER=1 "$TOOLS" build "$@" ||
+        die "$NAME $label 打包失败"
     # 按清单里的版本取那一个：dist/ 里可能躺着以前版本的包，别拷错了。
     version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         "$REPO/plugins/$NAME/package/manifest.json" | head -n 1)
-    produced=$REPO/plugins/$NAME/dist/$NAME-$version-$platform.spk
-    [ -f "$produced" ] || die "$NAME $platform 没产出 $produced"
+    suffix=
+    [ -n "$device" ] && suffix="-$device"
+    produced=$REPO/plugins/$NAME/dist/$NAME-$version-$platform$suffix.spk
+    [ -f "$produced" ] || die "$NAME $label 没产出 $produced"
     cp "$produced" "$OUT_DIR/"
     echo "pack: → dist/$(basename "$produced")" >&2
 done

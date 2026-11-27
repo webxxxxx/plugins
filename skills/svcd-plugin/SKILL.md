@@ -263,13 +263,17 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **源码留在 `package/` 外面。** `package/` 是打包根，打包器不过滤任何文件：放进去的 `src/`、`Cargo.toml`、`.gitkeep` 都会进 `.spk`。构建产物由 `build.json` 的 `artifact` 复制进 `payload/bin/`；同一目录里上一个平台留下的同名产物（`demo` ↔ `demo.exe`）会在构建前被清掉，否则两种架构会一起进包。
 
+**`vendor/` 放源码，打包前编译。** 和 `meow`、`sshd` 一样：`vendor/<依赖>/` 存上游源码，`build.sh` 在打包时编译，产物落在 `out/` 或 `payload/bin/`。提交二进制会让它跟源码一起腐烂。唯一的例外是设备内核模块：它对着一棵 CI 里没有的厂商内核树编，只能放 `vendor/prebuilt/<三元组>/`，并且同目录必须有 `SHA256SUMS`。`tools/check-vendor.py` 会拦住其余 ELF/`.a`。
+
 **平台差异写进 `platforms/`，不要为它加启动壳。** `.spk` 是按平台产出的（打包器盖 `platform`），而 manifest 的 `exec` / `lifecycle` / `interpreter` 各只有一个；脚本入口又必须挑解释器：POSIX 用 `sh`、Windows 用 `powershell`。需要按平台换入口时，`package/manifest.json` 只留平台无关的字段，入口写进与 `package/` 同级的 `platforms/<家族>.json`（`unix` / `windows`，一个家族一份；`template` 就生成这两份）：同名顶层键整段替换，`null` 删除，`id` / `version` 不许改。同家族里个别三元组真不一样时再加 `platforms/<三元组>.json` 当例外层，它压在家族之上；除此之外 `platforms/` 里只认 7 个三元组和这两个家族名，别的名字直接报错。`platforms/` 下还可以直接放入口脚本，构建时按扩展名分家族（`.sh` → unix，`.ps1`/`.cmd`/`.bat` → windows）复制进 `payload/bin/`，别的平台那份不进包；`platforms/lib/` 是同一件事的库版本，SDK 副本放那里、构建时按同样规则进 `payload/lib/`，所以 Linux 包里不会带 `SvcdPlugin.ps1`。`plugin-tools build` 按平台合并后再交给 `plugin bundle`，副本里缺了清单指的文件会立刻报错（没有 `platforms/` 的插件也查：Windows 上 `rust` / `c` 的产物是 `<name>.exe`，构建会把 `exec.path` 改成实际产物名写进副本，签名 job 从 tar 重打包时没有 `--exec` 可传）。发布流水线因此要从 `--stage dist/stage` 打 tar —— 签名 job 会重新 bundle 那个目录，平台清单必须在那之前就进包。
+
+**同一三元组要出两个包时用 `variants`。** 比如 `aarch64` 既要有通用包（gotatun 用户态），又要有一个只带 `wireguard.ko`、只装到 `sr6110` 的包：`.plugin.json` 写 `"variants": [{"device": "sr6110", "platforms": ["aarch64-unknown-linux-musl"]}]`，构建单元就是“每个平台一个通用包 + 每个变体一个包”。变体的 `compat.devices` 由构建写进那一份清单（base manifest 不写，否则通用包也被一起锁死），产物名按规则带 `-<device>`。`build.json` 的 recipe 能拿到 `{device}`（通用包是空串）和同名环境变量 `SVCD_DEVICE`，用来挑该拷哪个二进制；`--device <id>` 只打那个变体，只给 `--platform` 时仍然只打通用包。变体的 `platforms` 必填——漏了会把内核模块塞进别的平台的包。为什么是“一个插件 + variants”而不是两个插件、以及预编译件的边界，见 `docs/adr/0006-one-plugin-with-variants.md`。
 
 **能力清单一处改全。** 加/删能力时同时改 manifest 的 `capabilities[]` 和代码分支；Rust 用 `cargo test` 兜底，shell 靠 `case` 与清单人工对齐。
 
 **`id` 是身份，`name` 是显示名。** `schema` 恒为 `1`（打包器盖章，源清单写别的值也会被覆盖），`id` 只能是 `[a-z0-9][a-z0-9_-]{0,63}`（不能是 `svc`）：安装目录、日志文件名、`<id>.<能力>` 工具名、`/plugin-ui/<id>/` 都用它。源清单省略 `id` 时取项目目录名；`name` 随便写，中文也行，缺省等于 `id`；命令与 API 只认 `id`，不按显示名解析。
 
-**`platform` / `files[]` / `signature.json` 由打包器盖章。** 源 manifest 不写它们——都是派生的。产物文件名是 `<id>-<version>-<platform>.spk`。
+**`platform` / `files[]` / `signature.json` 由打包器盖章。** 源 manifest 不写它们——都是派生的。产物文件名是 `<id>-<version>-<platform>[-<device>].spk`：声明了 `compat.devices` 的包再追加列表第一个 id（`<id>-<version>-<platform>-<device>.spk`，如 `sr6110`），商店按这个后缀认出设备。含 `.ko` 的包**必须**声明 `compat.devices`，否则打包器直接拒绝——内核模块只对某一代内核/固件有效。
 
 **`outputSchema` 只做声明。** `capabilities[].outputSchema` 可选：写了就投影进 MCP `tools/list`，运行期不校验结果（不写 = 未声明，`{}` = 任意）。工具返回结构化 JSON 时才值得声明（模板里的 `stats` / `info` / `date` 就是示例）。
 
@@ -295,7 +299,8 @@ SDK 没有 raw 实现。
 - **自起 HTTP 服务**：单端口模型由宿主独占。
 - **宿主级定时调度**：没有 cron；定时器在进程内，重启即归零。
 - **权限隔离**：插件以安装者权限运行，隔离是未决问题。
-- **跨目标构建**：`plugin-tools build --platform` 改的是 manifest 的盖章与 `build.json` 里的 `{platform}`；交叉编译器得自己备。`tools/cross/install.sh <triple>` 把 musl.cc 的工具链下到缓存，并交代 `CARGO_TARGET_<TRIPLE>_LINKER`、`CC_<triple>`、`CC` 与 `PATH`（CI 写 `$GITHUB_ENV` / `$GITHUB_PATH`，本地打印 `export` 行）。C 的 `build.json` 用 `{cc}` 取编译器（`$CC` 优先，否则 `gcc`），Rust 用 `--target {platform}` 加 `rustup target add`。
+- **跨目标构建**：`plugin-tools build --platform` 只改 manifest 的盖章和 `build.json` 里的 `{platform}`；工具链那张唯一的表是 `tools/cross-env.sh`——`build.sh` 里 `. "$REPO/tools/cross-env.sh"` 再 `svcd_cross_apply "$PLATFORM"`，别自己拼 `CC_/AR_/CARGO_TARGET_*_LINKER`。`tools/cross/install.sh <triple>` 只负责把 musl.cc 的包下到 `/usr/soft`（CI 写 `$GITHUB_ENV`，本地打印 export 行）。想在本机零安装打包，用 `tools/pack.sh <插件> [平台…]`：它在 docker 里跑构建（给 `build.sh` 的信号是 `SVCD_DOCKER=1`），宿主只要 docker 和一个**叫 `plugin`** 的 svcd 副本（svcd 按 `argv[0]` 分派，CI 的 host artifact 就是这么放的）。
+- C 的 `build.json` 用 `{cc}` 取编译器（`$CC` 优先，否则 `gcc`），Rust 用 `--target {platform}` 加 `rustup target add`。
 
 ## 常见错误 → 症状
 
@@ -307,6 +312,8 @@ SDK 没有 raw 实现。
 | Windows 上启动 `exit=9009` | `interpreter.name` 写了 `python3`（那是 0 字节存根，用 `python` 或 `py`） |
 | Debian 上装不上 | 给 `sh` 写了 `interpreter.version`（dash 的 `--version` 会报错） |
 | 包里出现源码 | 源码或占位文件放进了 `package/` |
+| `vendor/` 里提交了二进制 | `tools/check-vendor.py` 会报错：源码放 `vendor/`、打包时编译；只有内核模块进 `vendor/prebuilt/<三元组>/` |
+| 本机打包报找不到 `cc` / `<triple>-gcc` | 构建脚本没走 `tools/cross-env.sh`，或目标工具链没装（`tools/cross/install.sh <triple>`） |
 | 装不上，提示重打包 | 包不是 `schema: 1` 或没有 `id`——用新版 `plugin-tools build` 重打 |
 | 目录名变成中文/乱码 | 把显示名写进了 `id`；中文只能放 `name` |
 | 改了 SDK 但插件没变 | vendored 副本没同步（`plugin-tools sync`） |

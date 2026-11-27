@@ -49,6 +49,26 @@ jobs:
         working-directory: samples/hello-rust
         run: cargo test --locked
 
+      # Cheap repo-wide guardrails: payload scripts parse and are LF, vendor/
+      # only commits source (prebuilt kernel modules live under vendor/prebuilt),
+      # and the release matrix builder has its own tests instead of running
+      # first at tag time.
+      - name: Repo guardrails
+        shell: bash
+        run: |
+          set -euo pipefail
+          py=
+          for candidate in python3 python; do
+            if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c '' >/dev/null 2>&1; then
+              py=$candidate
+              break
+            fi
+          done
+          [ -n "$py" ] || { echo "::error::no working python found"; exit 1; }
+          "$py" tools/check-shell.py
+          "$py" tools/check-vendor.py
+          ( cd tools/ci && "$py" -m unittest -q test_matrix )
+
       # The plugin-store page's space pre-check lives in the page source; this
       # extracts the real function and runs it with a stubbed host, so the
       # "can this upgrade fit" decision is covered without a browser.

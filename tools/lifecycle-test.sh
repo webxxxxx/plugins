@@ -4,8 +4,8 @@
 #   - 所以 stop 只收尾、不杀进程，也不能按 pidfile 发信号——强杀、断电之后那个 pid
 #     很可能已经被系统复用给别的进程；
 #   - status 只认自己的进程（同样不吃复用 pidfile 的亏）。
-# 三个插件（hysteria / sshd / meow）各跑一遍：造一个假的插件目录，把 pidfile 指向一个
-# 活着但不相干的进程，然后检查 status 不认它、stop 不杀它、pidfile 被删掉。
+# 四个插件（hysteria / sshd / meow / wireguard）各跑一遍：造一个假的插件目录，把 pidfile
+# 指向一个活着但不相干的进程，然后检查 status 不认它、stop 不杀它、pidfile 被删掉。
 #
 # 只在 Linux 上有意义（靠 /proc 认自己的进程），macOS / Windows 上脚本会退回 kill -0。
 # 用法：sh tools/lifecycle-test.sh [仓库根]
@@ -74,5 +74,17 @@ bin="$plugin/1.3.0/payload/bin"
 mkdir -p "$bin" "$plugin/1.3.0/payload/lib" "$plugin/1.3.0/payload/yacd"
 cp "$REPO/plugins/meow/platforms/meow.sh" "$bin/"
 check_stale_pid meow "$plugin" "$bin/meow.sh" "$plugin/data/meow.pid"
+
+# ---- wireguard ----
+# 用户态后端把 gotatun 的 pid 写在 data/gotatun.pid；stop 只能结束
+# /proc/<pid>/exe 指向包内 gotatun 的进程，pidfile 里被复用的无关进程不能碰。
+plugin="$WORK/wireguard"
+bin="$plugin/payload/bin"
+mkdir -p "$bin" "$plugin/payload/lib" "$plugin/data"
+cp "$REPO/plugins/wireguard/package/payload/bin/wireguard.sh" "$bin/"
+cp "$REPO/plugins/wireguard/package/payload/lib/wireguard-lib.sh" "$plugin/payload/lib/"
+printf '#!/bin/sh\nexit 0\n' > "$bin/wg-tool"
+chmod 755 "$bin/wg-tool"
+check_stale_pid wireguard "$plugin" "$bin/wireguard.sh" "$plugin/data/gotatun.pid"
 
 echo 'plugin lifecycle stop/status: ok'

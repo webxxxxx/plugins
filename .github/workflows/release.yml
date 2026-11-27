@@ -162,74 +162,24 @@ jobs:
           MACOS: ${{ steps.targets.outputs.macos }}
         run: |
           set -euo pipefail
+          # The matrix itself lives in tools/ci/matrix.py so it is covered by
+          # test.yml instead of being executable only from a release run.
           changed=""
-          build_all=false
           if [ "$FILTER" = "changed" ]; then
             if [ -z "$PR_NUMBER" ]; then
               echo "::error::changed scope requires a pull_request event"
               exit 1
             fi
-            files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
-            # A build-tool/SDK change can affect every plugin; fall back to the full matrix.
-            if printf '%s\n' "$files" | grep -qE '^(sdk|templates|tools/cli)/'; then
-              build_all=true
-            fi
-            changed=$(printf '%s\n' "$files" | sed -n 's#^plugins/\([^/]*\)/.*#\1#p' | sort -u | tr '\n' ' ')
+            changed=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
           fi
-
-          entries='[]'
-          for dir in plugins/*/; do
-            plugin_dir="${dir%/}"
-            plugin_name="${plugin_dir#plugins/}"
-            include=false
-            if [ "$FILTER" = "all" ] || [ "$build_all" = true ]; then
-              include=true
-            elif [ "$FILTER" = "changed" ]; then
-              case " $changed " in *" $plugin_name "*) include=true ;; esac
-            elif [ "$plugin_dir" = "plugins/$FILTER" ]; then
-              include=true
-            fi
-            [ "$include" = true ] || continue
-
-            manifest="${dir}.plugin.json"
-            [ -f "$manifest" ] || continue
-            name=$(jq -r '.name // empty' "$manifest")
-            [ -n "$name" ] || continue
-            platforms=$(jq -r '(.ci.platforms // .platforms // [])[]' "$manifest")
-            for platform in $platforms; do
-              # Linux 的 gnu 包在 jammy（glibc 2.35）上编：动态链接的二进制把
-              # "要 GLIBC_2.38" 刻在 ELF 里，24.04 编出来的在 Debian 12 / Ubuntu 22.04
-              # 上 loader 直接拒绝执行。musl 是静态的，跟这无关，仍在 24.04 上编。
-              case "$platform" in
-                *-apple-darwin)      os=macos-15 ;;
-                *-windows-*)         os=windows-2025 ;;
-                *-unknown-linux-gnu) os=ubuntu-22.04 ;;
-                *)                   os=ubuntu-24.04 ;;
-              esac
-              if [ "$os" = macos-15 ] && [ "$MACOS" != true ]; then
-                continue
-              fi
-              entries=$(jq -c \
-                --arg plugin "$name" \
-                --arg dir "$plugin_dir" \
-                --arg platform "$platform" \
-                --arg os "$os" \
-                '. + [{plugin: $plugin, dir: $dir, platform: $platform, os: $os}]' \
-                <<<"$entries")
-            done
-          done
-          if [ "$entries" = "[]" ]; then
-            if [ "$FILTER" = "changed" ]; then
-              echo "has_plugins=false" >> "$GITHUB_OUTPUT"
-              echo "matrix={\"include\":[]}" >> "$GITHUB_OUTPUT"
-              echo "no changed plugins; skipping the plugin matrix"
-              exit 0
-            fi
-            echo "::error::no plugins with a .plugin.json were found"
-            exit 1
+          args=(--filter "$FILTER" --output "$GITHUB_OUTPUT")
+          if [ -n "$changed" ]; then
+            args+=(--changed-files "$changed")
           fi
-          echo "has_plugins=true" >> "$GITHUB_OUTPUT"
-          echo "matrix={\"include\":$entries}" >> "$GITHUB_OUTPUT"
+          if [ "$MACOS" = "true" ]; then
+            args+=(--macos)
+          fi
+          python3 tools/ci/matrix.py "${args[@]}"
 
   host:
     name: host tools / ${{ matrix.os }}
@@ -368,8 +318,8 @@ jobs:
             echo "SVCD_PLUGIN_BIN=$GITHUB_WORKSPACE/bin/plugin" >> "$GITHUB_ENV"
           fi
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
-      - name: Install Rust (meow/plugin-store)
-        if: matrix.plugin == 'meow' || matrix.plugin == 'plugin-store'
+      - name: Install Rust (meow/plugin-store/wireguard)
+        if: matrix.plugin == 'meow' || matrix.plugin == 'plugin-store' || matrix.plugin == 'wireguard'
         uses: dtolnay/rust-toolchain@1.98.1
         with:
           targets: ${{ matrix.platform }}
@@ -385,7 +335,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake clang libssl-dev pkg-config make perl curl xz-utils
+            build-essential cmake clang libssl-dev pkg-config make perl curl xz-utils \
+            bzip2 meson ninja-build
       - name: Install macOS build dependencies
         if: runner.os == 'macOS'
         shell: bash
@@ -398,22 +349,27 @@ jobs:
         run: sh tools/cross/install.sh "${{ matrix.platform }}"
       - name: Build unsigned .spk
         shell: bash
-        run: |
+        run: |-
           set -euo pipefail
           cd "${{ matrix.dir }}"
           # --stage 让带 platforms/ 的插件把「合并后的清单 + payload」落到
           # dist/stage/package：签名 job 会重新 bundle 这个目录，所以平台清单
           # 必须在这里就进包，而不是等到签名时。
-          plugin-tools build --platform "${{ matrix.platform }}" --stage dist/stage
+          args=(--platform "${{ matrix.platform }}" --stage dist/stage)
+          if [ -n "${{ matrix.device }}" ]; then
+            # 变体：同一三元组里只给这台设备的包（带内核模块的那个）。
+            args+=(--device "${{ matrix.device }}")
+          fi
+          plugin-tools build "${args[@]}"
       - name: Package the unsigned payload
         shell: bash
-        run: |
+        run: |-
           set -euo pipefail
           # 打的是 stage，不是 package/：前者带着本平台的清单。
           tar -C "${{ matrix.dir }}/dist/stage" -czf pkg.tgz package
       - uses: actions/upload-artifact@v7
         with:
-          name: pkg-${{ matrix.plugin }}-${{ matrix.platform }}
+          name: pkg-${{ matrix.plugin }}-${{ matrix.key }}
           path: pkg.tgz
           if-no-files-found: error
           retention-days: 7
@@ -469,7 +425,18 @@ jobs:
             id=$(jq -r '.id // empty' "$manifest")
             version=$(jq -r '.version // empty' "$manifest")
             exec_path=$(jq -r '.exec.path // empty' "$manifest")
+            # A device-restricted package appends its first `compat.devices` id
+            # to the file name; the store reads the device from that suffix and
+            # the signed manifest stays authoritative for the whole list.
+            device=$(jq -r '.compat.devices[0] // empty' "$manifest")
+            suffix=""
+            if [ -n "$device" ]; then suffix="-$device"; fi
+            # The staged manifest predates `plugin bundle`, so it has no
+            # `platform`: the artifact directory name carries it, with the device
+            # suffix (if any) after it — two packages of the same triple differ
+            # only by that suffix now.
             platform="${dir#pkg-$id-}"
+            if [ -n "$device" ]; then platform="${platform%-$device}"; fi
             if [ -z "$id" ] || [ -z "$version" ] || [ "$platform" = "$dir" ] || [ -z "$platform" ]; then
               echo "::error::bad package artifact $dir (id=$id version=$version platform=$platform)"
               exit 1
@@ -486,7 +453,7 @@ jobs:
                 exit 1
               fi
             fi
-            out="dist/${id}-${version}-${platform}.spk"
+            out="dist/${id}-${version}-${platform}${suffix}.spk"
             bin/plugin bundle "$tmp/package" --platform "$platform" --id "$id" --exec "$exec_path" --key "$RUNNER_TEMP/signing.pem" -o "$out"
             bin/plugin verify "$out" --pubkey "$RUNNER_TEMP/signing.pub"
             rm -rf "$tmp"

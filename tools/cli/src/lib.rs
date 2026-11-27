@@ -174,6 +174,31 @@ pub struct Manifest {
     pub id: Option<String>,
     #[serde(default)]
     pub icons: BTreeMap<String, String>,
+    #[serde(default)]
+    pub compat: Option<Compat>,
+}
+
+/// Device compatibility ids (`compat.devices`); empty/absent means universal.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Compat {
+    #[serde(default)]
+    pub devices: Vec<String>,
+}
+
+impl Manifest {
+    /// The device the artifact name carries: the first declared compat id.
+    ///
+    /// The signed manifest keeps the whole list; the host's bundler only appends
+    /// the first id to the file name because it is a human hint, not the
+    /// authority. The toolchain follows the same rule so a local build does not
+    /// silently produce a universal-looking artifact for a device-restricted
+    /// package.
+    pub fn device(&self) -> Option<&str> {
+        self.compat
+            .as_ref()
+            .and_then(|compat| compat.devices.first())
+            .map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -384,10 +409,17 @@ pub fn read_recipe(root: &Path) -> Result<Option<Recipe>, String> {
 /// `{name}` is the plugin id (see [`plugin_id`]): recipes name files, and the
 /// display name may be Chinese.
 pub fn expand(value: &str, id: &str, version: &str, platform: &str) -> String {
+    expand_unit(value, id, version, platform, "")
+}
+
+/// Same placeholders plus `{device}`, for a recipe that has to tell the
+/// universal build from the device variant (which binary to copy).
+pub fn expand_unit(value: &str, id: &str, version: &str, platform: &str, device: &str) -> String {
     value
         .replace("{name}", id)
         .replace("{version}", version)
         .replace("{platform}", platform)
+        .replace("{device}", device)
 }
 
 /// `{cc}` is the C compiler a recipe runs: `$CC` when the build sets one,
@@ -416,6 +448,7 @@ pub fn build_from_recipe(
     id: &str,
     recipe: Option<&Recipe>,
     platform: &str,
+    device: Option<&str>,
 ) -> Result<Option<String>, String> {
     let Some(spec) = recipe.and_then(|recipe| recipe.build.as_ref()) else {
         return Ok(None);
@@ -427,7 +460,10 @@ pub fn build_from_recipe(
         return Err("build.json: build.artifact is required".into());
     }
 
-    let artifact = expand(&spec.artifact, id, &manifest.version, platform);
+    // `--device` is the unit's device; `SVCD_DEVICE` carries the same value so a
+    // recipe does not have to receive it as a positional argument.
+    let device = device.unwrap_or_default();
+    let artifact = expand_unit(&spec.artifact, id, &manifest.version, platform, device);
     let artifact_path = root.join(&artifact);
     if let Some(parent) = artifact_path.parent() {
         fs::create_dir_all(parent)
@@ -443,17 +479,22 @@ pub fn build_from_recipe(
     }
 
     let cc = compiler(std::env::var("CC").ok().as_deref());
-    let program = expand(&spec.command[0], id, &manifest.version, platform).replace("{cc}", &cc);
+    let program =
+        expand_unit(&spec.command[0], id, &manifest.version, platform, device).replace("{cc}", &cc);
     let args: Vec<String> = spec.command[1..]
         .iter()
-        .map(|part| expand(part, id, &manifest.version, platform).replace("{cc}", &cc))
+        .map(|part| expand_unit(part, id, &manifest.version, platform, device).replace("{cc}", &cc))
         .collect();
 
     let mut command = Command::new(&program);
     command.args(&args).current_dir(root);
+    command.env("SVCD_DEVICE", device);
     for layer in [spec.env.get("*"), spec.env.get(platform)].into_iter().flatten() {
         for (key, value) in layer {
-            command.env(key, expand(value, id, &manifest.version, platform));
+            command.env(
+                key,
+                expand_unit(value, id, &manifest.version, platform, device),
+            );
         }
     }
     println!("$ {program} {}", args.join(" "));
@@ -929,21 +970,32 @@ impl Drop for TempStage {
     }
 }
 
-/// One package to build: identity, version and the target triple.
+/// One package to build: identity, version, target triple and the device the
+/// artifact name carries (first `compat.devices` id, if any).
 pub struct Package<'a> {
     pub id: &'a str,
     pub version: &'a str,
     pub platform: &'a str,
+    pub device: Option<&'a str>,
 }
 
 /// Where a package lands: the host names artifacts `<id>-<version>-<platform>.spk`
-/// because the display name may be Chinese and must not reach a file name.
+/// because the display name may be Chinese and must not reach a file name. A
+/// device-restricted package appends the first compat id
+/// (`<id>-<version>-<platform>-<device>.spk`), matching `plugin bundle`.
 fn spk_path(root: &Path, package: &Package, out: Option<&Path>) -> PathBuf {
     out.map(Path::to_path_buf).unwrap_or_else(|| {
-        root.join("dist").join(format!(
-            "{}-{}-{}.spk",
-            package.id, package.version, package.platform
-        ))
+        let name = match package.device {
+            Some(device) => format!(
+                "{}-{}-{}-{}.spk",
+                package.id, package.version, package.platform, device
+            ),
+            None => format!(
+                "{}-{}-{}.spk",
+                package.id, package.version, package.platform
+            ),
+        };
+        root.join("dist").join(name)
     })
 }
 
@@ -1239,6 +1291,35 @@ pub struct Project {
     pub name: String,
     pub language: String,
     pub platforms: Vec<String>,
+    /// Device-restricted packages built next to the universal one for the same
+    /// triple. A plugin that ships a kernel module needs this: the module only
+    /// matches one firmware generation, while every other host on that triple
+    /// takes the portable build.
+    #[serde(default)]
+    pub variants: Vec<Variant>,
+}
+
+/// A device-restricted build of one or more platforms.
+///
+/// The variant, not the base manifest, owns `compat.devices` for its package:
+/// the same triple also ships a universal build, so the restriction cannot live
+/// in a manifest both share.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Variant {
+    /// Compatibility id the package is limited to (`sr6110`).
+    pub device: String,
+    /// Triples this variant builds. Required: a variant that silently applied
+    /// to every platform would put a kernel module in the portable packages.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+}
+
+/// One package to build: a target triple plus the device whose compatibility
+/// list the package narrows itself to (`None` = universal for the triple).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildUnit {
+    pub platform: String,
+    pub device: Option<String>,
 }
 
 pub fn write_project(project: &Path, meta: &Project) -> Result<(), String> {
@@ -1255,6 +1336,7 @@ pub fn read_project(project: &Path) -> Result<Project, String> {
             name: String::new(),
             language: String::new(),
             platforms: Vec::new(),
+            variants: Vec::new(),
         });
     }
     let bytes = fs::read(&path).map_err(|error| format!("read {}: {}", path.display(), error))?;
@@ -1272,6 +1354,93 @@ pub fn resolve_platforms(project: &Path, explicit: Option<&str>) -> Result<Vec<S
         return Ok(PLATFORMS.iter().map(|value| value.to_string()).collect());
     }
     Ok(declared)
+}
+
+/// One package per platform, plus one per applicable variant.
+///
+/// The universal package for a triple always exists; a variant adds a second
+/// package for that triple, narrowed to one device. `--device` keeps only that
+/// variant, and refusing an unknown id here is what stops a typo from quietly
+/// producing the universal package the caller did not ask for.
+pub fn resolve_units(
+    project: &Path,
+    platform: Option<&str>,
+    device: Option<&str>,
+) -> Result<Vec<BuildUnit>, String> {
+    let platforms = resolve_platforms(project, platform)?;
+    let variants = read_project(project)?.variants;
+    let mut units: Vec<BuildUnit> = platforms
+        .iter()
+        .map(|platform| BuildUnit {
+            platform: platform.clone(),
+            device: None,
+        })
+        .collect();
+    let explicit = platform.is_some();
+    for variant in &variants {
+        let device = variant.device.trim();
+        if device.is_empty() {
+            return Err(".plugin.json: variants[].device must not be empty".into());
+        }
+        if variant.platforms.is_empty() {
+            return Err(format!(
+                ".plugin.json: variant {device} must list the platforms it applies to"
+            ));
+        }
+        for target in &variant.platforms {
+            // An explicit --platform means one package: a variant for another
+            // triple simply does not take part. Without it, a platform outside
+            // the declaration is a typo the build must not paper over.
+            if !platforms.contains(target) {
+                if !explicit {
+                    return Err(format!(
+                        ".plugin.json: variant {device} lists {target}, which is not in platforms"
+                    ));
+                }
+                continue;
+            }
+            let unit = BuildUnit {
+                platform: target.clone(),
+                device: Some(device.to_string()),
+            };
+            if units.contains(&unit) {
+                return Err(format!(
+                    ".plugin.json: variant {device} is declared twice for {target}"
+                ));
+            }
+            units.push(unit);
+        }
+    }
+    if let Some(want) = device {
+        units.retain(|unit| unit.device.as_deref() == Some(want));
+        match units.len() {
+            0 => {
+                return Err(format!(
+                    "no build unit for --device {want}: .plugin.json declares no such variant on {}",
+                    platform.unwrap_or("the declared platforms")
+                ))
+            }
+            1 => {}
+            _ => {
+                return Err(format!(
+                    "--device {want} builds {} platforms; also pass --platform <triple>",
+                    units.len()
+                ))
+            }
+        }
+    }
+    Ok(units)
+}
+
+/// The manifest a device variant ships: the platform-merged one, with
+/// `compat.devices` replaced by the variant's device.
+///
+/// Replacing rather than merging is deliberate — the base manifest is shared
+/// with the universal package, which must stay installable everywhere.
+pub fn with_device_compat(manifest: Value, device: &str) -> Value {
+    let mut manifest = manifest;
+    manifest["compat"] = serde_json::json!({ "devices": [device] });
+    manifest
 }
 
 /// Generate the machine-local Ed25519 signing key as PKCS#8 / SPKI PEM.
@@ -1459,6 +1628,15 @@ mod tests {
             expand("target/release/{name}-{version}-{platform}", "hello", "1.0.0", "x86_64-pc-windows-msvc"),
             "target/release/hello-1.0.0-x86_64-pc-windows-msvc"
         );
+        // `{device}` is the variant's id, empty for the universal package.
+        assert_eq!(
+            expand_unit("out/{platform}/{device}", "wg", "1.0.0", "aarch64-unknown-linux-musl", "sr6110"),
+            "out/aarch64-unknown-linux-musl/sr6110"
+        );
+        assert_eq!(
+            expand_unit("out/{platform}/{device}", "wg", "1.0.0", "aarch64-unknown-linux-musl", ""),
+            "out/aarch64-unknown-linux-musl/"
+        );
     }
 
     #[test]
@@ -1531,6 +1709,100 @@ mod tests {
             vec!["aarch64-apple-darwin".to_string()]
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    /// A variant is one extra package next to the universal one, not a
+    /// replacement: the same triple still ships the portable build.
+    #[test]
+    fn a_variant_adds_a_package_next_to_the_universal_one() {
+        let root = std::env::temp_dir().join(format!("plugin-tools-unit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".plugin.json"),
+            r#"{"name":"x","language":"shell",
+                "platforms":["aarch64-unknown-linux-musl","x86_64-unknown-linux-musl"],
+                "variants":[{"device":"sr6110","platforms":["aarch64-unknown-linux-musl"]}]}"#,
+        )
+        .unwrap();
+
+        let all = resolve_units(&root, None, None).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                BuildUnit {
+                    platform: "aarch64-unknown-linux-musl".into(),
+                    device: None
+                },
+                BuildUnit {
+                    platform: "x86_64-unknown-linux-musl".into(),
+                    device: None
+                },
+                BuildUnit {
+                    platform: "aarch64-unknown-linux-musl".into(),
+                    device: Some("sr6110".into())
+                },
+            ]
+        );
+        // --device names the variant; an id nothing builds is an error, not a
+        // quietly universal package.
+        assert_eq!(
+            resolve_units(&root, None, Some("sr6110")).unwrap(),
+            vec![BuildUnit {
+                platform: "aarch64-unknown-linux-musl".into(),
+                device: Some("sr6110".into())
+            }]
+        );
+        assert!(resolve_units(&root, None, Some("sr6111")).is_err());
+        // --platform narrows to that triple; both of its units still come back.
+        assert_eq!(
+            resolve_units(&root, Some("aarch64-unknown-linux-musl"), None)
+                .unwrap()
+                .len(),
+            2
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A variant that names no platform, or one outside the declaration, would
+    /// put a kernel module in packages meant to be portable.
+    #[test]
+    fn a_variant_must_name_the_platforms_it_builds() {
+        let root = std::env::temp_dir().join(format!("plugin-tools-badvar-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join(".plugin.json"),
+            r#"{"name":"x","language":"shell","platforms":["aarch64-unknown-linux-musl"],
+                "variants":[{"device":"sr6110"}]}"#,
+        )
+        .unwrap();
+        assert!(resolve_units(&root, None, None).is_err());
+
+        fs::write(
+            root.join(".plugin.json"),
+            r#"{"name":"x","language":"shell","platforms":["aarch64-unknown-linux-musl"],
+                "variants":[{"device":"sr6110","platforms":["armv7-unknown-linux-musleabihf"]}]}"#,
+        )
+        .unwrap();
+        assert!(resolve_units(&root, None, None).is_err());
+        // Picking the declared platform by hand still skips the irrelevant
+        // variant instead of failing.
+        assert_eq!(
+            resolve_units(&root, Some("aarch64-unknown-linux-musl"), None)
+                .unwrap()
+                .len(),
+            1
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_device_variant_replaces_the_compat_list() {
+        let base = serde_json::json!({ "compat": { "devices": ["old"] }, "version": "1.0.0" });
+        let narrowed = with_device_compat(base, "sr6110");
+        assert_eq!(narrowed["compat"], serde_json::json!({ "devices": ["sr6110"] }));
+        assert_eq!(narrowed["version"], "1.0.0");
     }
 
     #[test]
@@ -1633,6 +1905,7 @@ mod tests {
             id: "demo",
             version: "1.0.0",
             platform: "x86_64-unknown-linux-musl",
+            device: None,
         };
         assert_eq!(
             spk_path(Path::new("/w/plugins/demo"), &package, None),
@@ -1642,6 +1915,20 @@ mod tests {
         assert_eq!(
             spk_path(Path::new("/w/plugins/demo"), &package, Some(explicit)),
             explicit
+        );
+    }
+
+    #[test]
+    fn a_device_restricted_package_carries_the_first_compat_id() {
+        let package = Package {
+            id: "demo",
+            version: "1.0.0",
+            platform: "aarch64-unknown-linux-musl",
+            device: Some("sr6110"),
+        };
+        assert_eq!(
+            spk_path(Path::new("/w/plugins/demo"), &package, None),
+            Path::new("/w/plugins/demo/dist/demo-1.0.0-aarch64-unknown-linux-musl-sr6110.spk")
         );
     }
 }

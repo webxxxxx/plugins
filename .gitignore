@@ -11,4 +11,6 @@ __pycache__/
 /tools/cli/target/
 
 # 本机在容器里编出来的 plugin-tools 副本
-bin/
+# 锚定仓库根：插件自己的 package/payload/bin 里放的是源码（.sh），
+# 由各插件的 .gitignore 只忽略构建产物。
+/bin/

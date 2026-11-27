@@ -3,6 +3,7 @@
 # normal case here, so pin it rather than depend on core.autocrlf.
 * text=auto
 *.sh   text eol=lf
+*.js   text eol=lf
 *.mjs  text eol=lf
 *.json text eol=lf
 *.rs   text eol=lf
@@ -12,3 +13,13 @@
 *.spk  binary
 *.pem  binary
 *.pub  binary
+
+# 随包发布的内核模块：任何 eol 转换都会破坏 SHA256SUMS 与可执行文件。
+# vendor/ 下的其余内容是源码，按文本处理（*.rs/*.c 等走 text=auto）。
+# 源码 tarball 必须是原字节：eol 转换会直接毁掉 gzip/xz 流。
+*.ko   binary
+*.tar.gz  binary
+*.tar.bz2 binary
+*.tar.xz  binary
+plugins/*/vendor/prebuilt/* binary
+plugins/*/vendor/prebuilt/*/SHA256SUMS -binary text eol=lf

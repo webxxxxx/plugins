@@ -91,13 +91,18 @@ fn usage() {
   build [options]   运行 build.json，然后 plugin bundle
       --dir <path>        插件目录（默认从 cwd 向上找）
       --platform <t>      只打这一个三元组（本地开发用这个）
+      --device <id>       只打这个设备变体（.plugin.json 的 variants[]）
       --key <pem>         用这把钥签名；不给则产出未签名包
-      --out <file>        产物路径（仅在只打一个平台时生效）
+      --out <file>        产物路径（仅在只打一个包时生效）
       --stage <dir>       把包写到 <dir>/package 并从那里打包（发布流水线打 tar 用）
       --no-verify         跳过 plugin verify
 
   不给 --platform 时按插件声明的 platforms 打；.plugin.json 没写 platforms 就打全部 7 个。
-  产物名是 <id>-<version>-<platform>.spk：id 取 manifest.json 的 id，缺省用目录名；
+  .plugin.json 的 variants[] 给同一三元组再出一个设备专用包（比如带内核模块的
+  sr6110 版）：每个平台都有通用包，变体只是额外那一个；--device 指定变体，
+  不给 --device 时 --platform 仍然只打该平台的通用包。
+  产物名是 <id>-<version>-<platform>[-<device>].spk：id 取 manifest.json 的 id，缺省用
+  目录名；设备后缀来自该包 manifest 的 compat.devices[0]，变体包写的是变体的 device。
   显示名（manifest 的 name）可以是中文，但只给人看，不进文件名。
 
   平台差异写在 platforms/ 里（与 package/ 同级，不进包）：<家族>.json（unix / windows）
@@ -138,6 +143,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--force",
     "--no-force",
     "--platform",
+    "--device",
     "--key",
     "--out",
     "--stage",
@@ -485,6 +491,7 @@ fn template(args: &[String]) -> Result<(), String> {
             name: name.to_string(),
             language: language.clone(),
             platforms: platforms.clone(),
+            variants: Vec::new(),
         },
     )?;
 
@@ -786,12 +793,34 @@ fn pack_plugin(args: &[String]) -> Result<Packed, String> {
     let meta = parse_meta(&base)?;
     let id = plugin_id_of(&root, meta.id.as_deref())?;
     let recipe = read_recipe(&root)?;
-    let platforms = plugin_tools::resolve_platforms(&root, flag(args, "--platform"))?;
+    // One unit per package: every declared platform, plus each variant that
+    // names it (a device-restricted build of the same triple).
+    let units = plugin_tools::resolve_units(
+        &root,
+        flag(args, "--platform"),
+        flag(args, "--device"),
+    )?;
+    // Without --device, `--platform` means the universal package: a variant is
+    // asked for by name, so the old one-platform/one-package call keeps working.
+    let units: Vec<_> = if flag(args, "--platform").is_some() && flag(args, "--device").is_none() {
+        units.into_iter().filter(|unit| unit.device.is_none()).collect()
+    } else {
+        units
+    };
+    let mut platforms: Vec<String> = Vec::new();
+    for unit in &units {
+        if !platforms.contains(&unit.platform) {
+            platforms.push(unit.platform.clone());
+        }
+    }
     let key = flag(args, "--key").map(PathBuf::from);
     let out = flag(args, "--out").map(PathBuf::from);
     let stage_root = flag(args, "--stage").map(PathBuf::from);
-    if stage_root.is_some() && platforms.len() > 1 {
-        return Err("--stage holds one package: pass --platform <triple> along with it".into());
+    if (stage_root.is_some() || out.is_some()) && units.len() > 1 {
+        return Err(
+            "--stage/--out hold one package: pass --platform (and --device for a variant) to pick one unit"
+                .into(),
+        );
     }
     check_overlay_names(&root)?;
     if flag(args, "--platform").is_none() {
@@ -803,26 +832,44 @@ fn pack_plugin(args: &[String]) -> Result<Packed, String> {
     // only exist in the package once a staged copy has chosen the matching ones.
     let has_scripts = !plugin_tools::platform_scripts(&root)?.is_empty()
         || !plugin_tools::platform_libs(&root)?.is_empty();
-    if platforms.len() > 1 {
+    if units.len() > 1 {
         if let Some(spec) = recipe.as_ref().and_then(|recipe| recipe.build.as_ref()) {
             let mentions = spec.artifact.contains("{platform}")
-                || spec.command.iter().any(|part| part.contains("{platform}"));
+                || spec.artifact.contains("{device}")
+                || spec
+                    .command
+                    .iter()
+                    .any(|part| part.contains("{platform}") || part.contains("{device}"));
             if !mentions {
                 eprintln!(
-                    "warn: build.json never mentions {{platform}}; the same artifact will be packaged for {} platforms (pass --platform <本机三元组> for a local build)",
-                    platforms.len()
+                    "warn: build.json never mentions {{platform}} or {{device}}; the same artifact will be packaged for all {} units (pass --platform <本机三元组> for a local build)",
+                    units.len()
                 );
             }
         }
     }
-    for platform in &platforms {
-        let merged = merged_manifest(&root, &base, platform)?;
+    for unit in &units {
+        let platform = unit.platform.as_str();
+        // A variant narrows the platform's manifest to one device; the base
+        // manifest belongs to the universal package and must stay unrestricted.
+        let merged = match (merged_manifest(&root, &base, platform)?, unit.device.as_deref()) {
+            (Some(merged), Some(device)) => Some(plugin_tools::with_device_compat(merged, device)),
+            (None, Some(device)) => Some(plugin_tools::with_device_compat(base.clone(), device)),
+            (merged, None) => merged,
+        };
         let view = merged.as_ref().unwrap_or(&base);
         let manifest = parse_manifest(view, &format!("manifest for {platform}"))?;
         plugin_tools::assert_icons(&root, &manifest)?;
         // The recipe decides how to reach a platform; `{platform}` is available to
         // it, so `cargo build --target {platform}` is a one-line change.
-        let exec = build_from_recipe(&root, &manifest, &id, recipe.as_ref(), platform)?;
+        let exec = build_from_recipe(
+            &root,
+            &manifest,
+            &id,
+            recipe.as_ref(),
+            platform,
+            unit.device.as_deref(),
+        )?;
         // A platform overlay replaces `exec` wholesale, so the recipe's rename —
         // which only exists to match the base exec name — no longer applies.
         let exec = if base.get("exec") == view.get("exec") {
@@ -857,17 +904,14 @@ fn pack_plugin(args: &[String]) -> Result<Packed, String> {
             id: &id,
             version: &manifest.version,
             platform,
+            device: manifest.device(),
         };
         let spk = pack(
             &root,
             &package_dir,
             &package,
             key.as_deref(),
-            if platforms.len() == 1 {
-                out.as_deref()
-            } else {
-                None
-            },
+            if units.len() == 1 { out.as_deref() } else { None },
             exec.as_deref(),
         )?;
         if !has(args, "--no-verify") {
