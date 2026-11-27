@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "wireguard",
   "name": "WireGuard 隧道",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "desc": "WireGuard 隧道：内核模块或 gotatun 用户态实现随包，多 peer 管理页面与二维码",
   "protocol": 1,
   "interpreter": {
@@ -10,7 +10,10 @@
   },
   "exec": {
     "path": "payload/bin/wireguardd.sh",
-    "ready": "notify"
+    "args": [
+      "start"
+    ],
+    "ready": "exec"
   },
   "lifecycle": {
     "start": {
@@ -45,6 +48,14 @@
         "type": "object",
         "properties": {},
         "additionalProperties": false
+      },
+      "hook": {
+        "path": "payload/bin/wireguardd.sh",
+        "args": [
+          "hook",
+          "state"
+        ],
+        "timeout": 15
       }
     },
     {
@@ -104,6 +115,14 @@
           "keepalive"
         ],
         "additionalProperties": false
+      },
+      "hook": {
+        "path": "payload/bin/wireguardd.sh",
+        "args": [
+          "hook",
+          "save_settings"
+        ],
+        "timeout": 60
       }
     },
     {
@@ -120,6 +139,14 @@
           "peer_name"
         ],
         "additionalProperties": false
+      },
+      "hook": {
+        "path": "payload/bin/wireguardd.sh",
+        "args": [
+          "hook",
+          "add_peer"
+        ],
+        "timeout": 30
       }
     },
     {
@@ -136,6 +163,14 @@
           "peer_id"
         ],
         "additionalProperties": false
+      },
+      "hook": {
+        "path": "payload/bin/wireguardd.sh",
+        "args": [
+          "hook",
+          "remove_peer"
+        ],
+        "timeout": 30
       }
     },
     {
@@ -152,6 +187,14 @@
           "peer_id"
         ],
         "additionalProperties": false
+      },
+      "hook": {
+        "path": "payload/bin/wireguardd.sh",
+        "args": [
+          "hook",
+          "peer_config"
+        ],
+        "timeout": 15
       }
     }
   ]

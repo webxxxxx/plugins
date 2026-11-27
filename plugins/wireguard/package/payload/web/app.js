@@ -285,7 +285,9 @@ $('settings-form').addEventListener('submit', async (event) => {
   try {
     const result = await call('save_settings', body, 90000);
     settingsDirty = false;
-    toast(result?.restarted ? '已保存，隧道已重建' : '已保存');
+    if (result?.restarted) toast('已保存，隧道已重建');
+    else if (result?.rebuilding) toast('已保存，看守进程正在按新设置重建隧道');
+    else toast('已保存');
     await refresh();
   } catch (error) {
     toast(`保存失败：${error.message}`, 'error');

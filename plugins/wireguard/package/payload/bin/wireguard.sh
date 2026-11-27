@@ -209,6 +209,10 @@ do_down() {
     ip link set "$WG_IF" down 2>/dev/null || true
     ip link del "$WG_IF" 2>/dev/null || true
 
+    # 看守（被监督进程）这时已经被宿主结束了，它留下的 pidfile 只删不发信号：
+    # 强杀之后那个 pid 可能已经被复用给别的进程。
+    rm -f "$GUARDIAN_PID"
+
     log "已停止"
     return 0
 }

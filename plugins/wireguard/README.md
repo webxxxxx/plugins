@@ -24,11 +24,11 @@ macOS / Windows 还没做：它们要换网络层（`ifconfig`/`route`/`pf`、`n
 ## 产物
 
 ```
-wireguard-1.2.0-x86_64-unknown-linux-musl.spk
-wireguard-1.2.0-aarch64-unknown-linux-musl.spk
-wireguard-1.2.0-armv7-unknown-linux-musleabihf.spk
-wireguard-1.2.0-x86_64-unknown-linux-gnu.spk
-wireguard-1.2.0-aarch64-unknown-linux-musl-sr6110.spk   ← compat.devices: ["sr6110"]
+wireguard-1.2.1-x86_64-unknown-linux-musl.spk
+wireguard-1.2.1-aarch64-unknown-linux-musl.spk
+wireguard-1.2.1-armv7-unknown-linux-musleabihf.spk
+wireguard-1.2.1-x86_64-unknown-linux-gnu.spk
+wireguard-1.2.1-aarch64-unknown-linux-musl-sr6110.spk   ← compat.devices: ["sr6110"]
 ```
 
 设备后缀来自该包 manifest 的 `compat.devices[0]`。通用包没有 `compat`，任何设备都能装；
@@ -45,7 +45,7 @@ package/
 └── payload/
     ├── bin/
     │   ├── wireguard.sh  生命周期：prepare / up / down / status
-    │   ├── wireguardd.sh 常驻进程：启动时建隧道 + JSON-RPC 能力 + 看守循环
+    │   ├── wireguardd.sh 被监督进程：启动时建隧道 + 前台看守；能力钩子也是它（hook 子命令）
     │   ├── wg-lan-fix.sh 内核后端的 LAN 自愈循环（sr6110 专用）
     │   ├── wg-tool       构建产物（wg）
     │   └── wireguard.ko  或 gotatun：构建产物，按包选一个
@@ -63,7 +63,8 @@ vendor/prebuilt/…/wireguard.ko  SR6110 内核模块：唯一预编译件（要
 | 动作 | 做什么 |
 |---|---|
 | `lifecycle.start`（`wireguard.sh prepare`） | 生成服务端密钥、迁移旧配置、等 LAN 口拿到 IPv4、解析 `WG_LAN_IF=auto`。必须退出，不建接口。 |
-| `exec`（`wireguardd.sh`） | **被监督进程**：启动时 `wireguard.sh up` 把隧道拉起来（gotatun 因此是它的子进程，宿主停服按进程组收走），然后进协议 1 循环。 |
+| `exec`（`wireguardd.sh start`） | **被监督进程**：启动时 `wireguard.sh up` 把隧道拉起来（gotatun 因此是它的子进程，宿主停服按进程组收走），然后在前台看守。没有协议通道（`exec.ready` 是 `exec`）。 |
+| 能力钩子（`wireguardd.sh hook <能力>`） | 管理页面的 `state` / `save_settings` / `add_peer` / `remove_peer` / `peer_config`：宿主每次 `tools/call` 起一次本脚本，`arguments` 从 stdin 读，stdout 就是这次调用的文本结果（svcd #342）。 |
 | 看守循环 | 内核后端：跑 `wg-lan-fix.sh`（厂商固件会刷回 `rp_filter` / 策略路由）；用户态后端：`gotatun` 死了就重建。 |
 | `lifecycle.stop` | 进程消失**之后**收尾：撤规则、清 `ip rule` / table 200、停 gotatun、`ip link del wg0`。 |
 | `lifecycle.status` | 一行 JSON（`running` / `impl` / `listen_port` / `peers` / `lan`），给 `svc status` 的 probe 用。 |
@@ -76,9 +77,10 @@ vendor/prebuilt/…/wireguard.ko  SR6110 内核模块：唯一预编译件（要
 | `data/peers.tsv` | peer 列表（含客户端私钥，0600）；每行 `id 名称 隧道地址 公钥 私钥 创建时间` |
 | `data/settings` | 管理页面保存的隧道设置（0600，shell 可 source 的 `KEY=value`），含 `WG_IMPL` / `WG_LAN_FIX` |
 | `data/gotatun.pid` | 用户态后端的进程号；`stop` 时校验命令行后再杀（防 pid 复用） |
+| `data/wireguardd.pid` | 看守（被监督进程）的进程号；能力钩子是另一个进程，靠它回 `status.guardian`（同样校验命令行） |
 
 日志只写 stderr，宿主落到自己的日志目录（Linux 默认 `/var/log/svcd/wireguard.log`）。
-`gotatun` 的 stdout 也改道 stderr——stdout 是宿主的协议通道。
+`gotatun` 的 stdout 也改道 stderr——stdout 是宿主收日志的地方（没有协议通道，能力走钩子）。
 
 ## 管理页面
 
@@ -108,7 +110,7 @@ vendor/prebuilt/…/wireguard.ko  SR6110 内核模块：唯一预编译件（要
 通用包直接装（`compat` 为空，任何设备可装）：
 
 ```sh
-plugin install wireguard-1.2.0-aarch64-unknown-linux-musl.spk
+plugin install wireguard-1.2.1-aarch64-unknown-linux-musl.spk
 plugin start wireguard
 ```
 
@@ -116,7 +118,7 @@ SR6110 用变体包，并且要先写设备兼容标识（只做一次）：
 
 ```sh
 svc compat init --device sr6110
-plugin install wireguard-1.2.0-aarch64-unknown-linux-musl-sr6110.spk
+plugin install wireguard-1.2.1-aarch64-unknown-linux-musl-sr6110.spk
 plugin start wireguard
 ```
 

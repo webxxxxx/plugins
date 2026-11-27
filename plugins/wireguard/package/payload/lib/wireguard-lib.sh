@@ -2,7 +2,7 @@
 # wireguard-lib.sh — wireguard 插件共用的路径、设置、密钥与 peer 存储。
 #
 # 调用方先设置 HERE（payload/bin），再 source 本文件。wireguard.sh（生命周期）、
-# wireguardd.sh（协议进程）和 wg-lan-fix.sh（自愈循环）都从这里取同一份状态。
+# wireguardd.sh（被监督的看守进程）和 wg-lan-fix.sh（自愈循环）都从这里取同一份状态。
 #
 # 所有插件文件都落在插件目录内：
 #   <插件目录>/data/settings    设置（管理页面写，0600）
@@ -27,13 +27,15 @@ WG_TOOL="$HERE/wg-tool"
 KO="$HERE/wireguard.ko"
 GOTATUN="$HERE/gotatun"
 GOTATUN_PID="$DATA/gotatun.pid"
+# 被监督进程（看守）的 pid：能力钩子是另一个进程，只能靠它知道看守还在不在。
+GUARDIAN_PID="$DATA/wireguardd.pid"
 WG_SOCK="/var/run/wireguard/$WG_IF.sock"
 
 PATH=/etc/sr/bin:/kmodule/bin:/sbin:/usr/sbin:/bin:/usr/bin
 export PATH
 
 log() { echo "wireguard: $*" >&2; }
-# 生命周期脚本里 fail 只写日志；在协议进程（WIREGUARD_CAPABILITY=1）里同时写到
+# 生命周期脚本里 fail 只写日志；在能力钩子（WIREGUARD_CAPABILITY=1）里同时写到
 # stdout，宿主的 tools/call 才会把这段话作为 isError 的文本带给管理页面。
 fail() {
     log "$*"

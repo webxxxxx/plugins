@@ -170,6 +170,13 @@ jobs:
         shell: bash
         run: sh tools/lifecycle-test.sh
 
+      # 能力钩子（svcd #342）：ready: exec 的插件没有协议通道，能力是短命钩子——
+      # arguments 从 stdin 进、stdout 是结果，失败原因也走 stdout。
+      - name: 能力钩子（wireguard）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: sh tools/wireguard-hook-test.sh
+
       - name: meow 配置层（PowerShell）
         if: runner.os == 'Windows'
         shell: pwsh

@@ -1,13 +1,15 @@
 #!/bin/sh
 # wireguardd: the supervised process for the wireguard plugin.
 #
-# 它同时做三件事：
+# 它同时做两件事：
 #   1. 启动时把隧道拉起来（wireguard.sh up）——必须是本进程的子进程，宿主
 #      停服按进程组 SIGTERM 才能把 gotatun 一起收走；
-#   2. 在 stdout 上讲协议 1（JSON-RPC），给管理页面提供 state / save_settings /
-#      add_peer / remove_peer / peer_config；
-#   3. 在后台看守：内核后端跑 wg-lan-fix.sh 自愈循环，用户态后端看 gotatun
+#   2. 在前台看守：内核后端跑 wg-lan-fix.sh 自愈循环，用户态后端看 gotatun
 #      是否还活着，死了就重建。
+#
+# 没有协议通道（清单里 exec.ready 是 exec）：管理页面的 state / save_settings /
+# add_peer / remove_peer / peer_config 是能力钩子，宿主每次调用起一次本脚本
+# （`wireguardd.sh hook <能力>`），arguments 从 stdin 读，stdout 就是结果。
 #
 # 设置和 peer 都存在插件目录里（data/settings、data/peers.tsv）；没有单独的
 # 配置文件，所有可改项都在管理页面。
@@ -16,6 +18,12 @@ set -u
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$HERE/../lib/svcd-plugin.sh"
 . "$HERE/../lib/wireguard-lib.sh"
+
+# 能力钩子的结果就是 stdout，所以 fail 在那里也要写到 stdout（生命周期脚本里它只写
+# 日志）。放在 load_settings 之前：设置读不出来时那句话也要带给管理页面。
+case "${1:-}" in
+hook) WIREGUARD_CAPABILITY=1 ;;
+esac
 
 load_settings || exit 1
 migrate_legacy_peer || true
@@ -119,8 +127,21 @@ check_settings() {
     return 0
 }
 
+# 看守就是这个被监督进程本身（前台循环），所以「看守在不在」等于「它还在不在」。
+# 认 pid 也认命令行：强杀留下的 pidfile 里那个 pid 可能已经被复用给别的进程。
 guardian_running() {
-    [ -n "${GUARD_WATCH:-}" ] && kill -0 "$GUARD_WATCH" 2>/dev/null
+    _pid=$(cat "$GUARDIAN_PID" 2>/dev/null) || return 1
+    [ -n "$_pid" ] || return 1
+    kill -0 "$_pid" 2>/dev/null || return 1
+    if [ -r "/proc/$_pid/cmdline" ]; then
+        grep -qF -- "wireguardd.sh" "/proc/$_pid/cmdline" 2>/dev/null
+        return
+    fi
+    _argv=$(ps -o args= -p "$_pid" 2>/dev/null) || return 0
+    case "$_argv" in
+    *wireguardd.sh*) return 0 ;;
+    esac
+    return 1
 }
 
 active_peers() {
@@ -234,30 +255,37 @@ save_settings() {
     if ! write_settings; then
         [ -f "$SETTINGS.bak" ] && mv "$SETTINGS.bak" "$SETTINGS"
         load_settings || true
-        [ "$restart" = 1 ] && WG_SKIP_WAIT=1 "$HERE/wireguard.sh" start >/dev/null 2>&1 || true
+        # 隧道已经拆了；重建归看守进程（它按恢复后的设置自己 up），这里不能起进程：
+        # 钩子起的 gotatun 会挂在钩子自己的进程组下，钩子一退就成了孤儿。
         return 1
     fi
     if ! load_settings; then
         [ -f "$SETTINGS.bak" ] && mv "$SETTINGS.bak" "$SETTINGS"
         load_settings || true
-        [ "$restart" = 1 ] && WG_SKIP_WAIT=1 "$HERE/wireguard.sh" start >/dev/null 2>&1 || true
         return 1
     fi
 
     if [ "$restart" = 1 ] || [ "$old_lan" != "$WG_LAN_IF" ] || [ "$old_table" != "$WG_TABLE" ]; then
         pkill -f "$HERE/wg-lan-fix.sh" 2>/dev/null || true
     fi
-    if [ "$restart" = 1 ]; then
-        if ! WG_SKIP_WAIT=1 "$HERE/wireguard.sh" start >/dev/null 2>&1; then
-            [ -f "$SETTINGS.bak" ] && mv "$SETTINGS.bak" "$SETTINGS"
-            load_settings || true
-            "$HERE/wireguard.sh" start >/dev/null 2>&1 || true
-            fail "设置已回滚：隧道重建失败"
-            return 1
-        fi
-    fi
     rm -f "$SETTINGS.bak"
-    printf '{"ok":true,"restarted":%s}' "$([ "$restart" = 1 ] && echo true || echo false)"
+    # 重建不在钩子里做：钩子是短命进程，它起的 gotatun 会挂在钩子自己的进程组下，
+    # 钩子一退就成了孤儿，宿主按进程组停服也收不走。上面已经把隧道拆了，重建交给
+    # 看守进程（guard 每 5 秒看一眼接口 / gotatun），这里只等接口回来。
+    _restarted=false
+    if [ "$restart" = 1 ]; then
+        n=0
+        while [ "$n" -lt 20 ]; do
+            if ip link show "$WG_IF" >/dev/null 2>&1; then
+                _restarted=true
+                break
+            fi
+            sleep 1
+            n=$((n + 1))
+        done
+    fi
+    printf '{"ok":true,"restarted":%s,"rebuilding":%s}' "$_restarted" \
+        "$([ "$restart" = 1 ] && [ "$_restarted" = false ] && echo true || echo false)"
 }
 
 add_peer() {
@@ -337,35 +365,31 @@ peer_config_text() {
 
 # 看守：两个后端只有“怎么保活”不同。
 #   kernel    -> 周期跑 wg-lan-fix.sh（厂商固件会刷回 rp_filter / 策略路由）
-#   userspace -> gotatun 死了就重建隧道
-start_guard() {
-    _parent=$$
-    (
-        while kill -0 "$_parent" 2>/dev/null; do
-            case "$(wg_impl)" in
-            kernel)
-                if ip link show "$WG_IF" >/dev/null 2>&1; then
-                    [ "$WG_LAN_FIX" = off ] || "$HERE/wg-lan-fix.sh" >&2 || true
-                else
-                    # 接口被删 / 模块被卸载：重建。失败时隔久一点再试，别刷屏。
-                    WG_SKIP_WAIT=1 "$HERE/wireguard.sh" up >&2 || sleep 25
-                fi
-                ;;
-            userspace)
-                if ! gotatun_alive; then
-                    log "gotatun 不在了，重建隧道"
-                    WG_SKIP_WAIT=1 "$HERE/wireguard.sh" up >&2 || sleep 25
-                fi
-                ;;
-            esac
-            sleep 5
-        done
-    ) &
-    GUARD_WATCH=$!
-}
-
-svcd_status() {
-    printf 'running, peers %s' "$(active_peers 2>/dev/null || echo 0)"
+# 前台看守：内核后端维护 wg-lan-fix 的自愈循环，用户态后端看 gotatun 还活着没有。
+# 它就是这个进程的主体——以前跑在后台子 shell 里，前台被协议通道占着。
+guard() {
+    while :; do
+        # save_settings 在钩子里跑，拆隧道时顺手删了 pidfile（stop 的收尾规矩）；
+        # 这里补回来，否则 status.guardian 会一直报 false。存在就不写，省一次闪存写。
+        [ -f "$GUARDIAN_PID" ] || echo $$ > "$GUARDIAN_PID"
+        case "$(wg_impl)" in
+        kernel)
+            if ip link show "$WG_IF" >/dev/null 2>&1; then
+                [ "$WG_LAN_FIX" = off ] || "$HERE/wg-lan-fix.sh" >&2 || true
+            else
+                # 接口被删 / 模块被卸载：重建。失败时隔久一点再试，别刷屏。
+                WG_SKIP_WAIT=1 "$HERE/wireguard.sh" up >&2 || sleep 25
+            fi
+            ;;
+        userspace)
+            if ! gotatun_alive; then
+                log "gotatun 不在了，重建隧道"
+                WG_SKIP_WAIT=1 "$HERE/wireguard.sh" up >&2 || sleep 25
+            fi
+            ;;
+        esac
+        sleep 5
+    done
 }
 
 handle() {
@@ -382,10 +406,26 @@ handle() {
     esac
 }
 
-# 隧道由被监督进程自己拉起来：gotatun 必须是它的子进程，宿主停服按进程组
-# SIGTERM 才能一起收走；内核后端走同一条路，两个后端行为一致。
-# 先建隧道再起看守：反过来的话看守会和这里的 up 并发建接口。
-"$HERE/wireguard.sh" up >&2 || log "隧道启动失败，看守会重试；管理页面也可保存设置触发重建"
-start_guard
-WIREGUARD_CAPABILITY=1
-svcd_plugin_serve handle
+# 能力钩子入口：宿主每次 tools/call 起一次本脚本，$1 是能力名，arguments 在 stdin
+# （写完就关），stdout 原样成为这次调用的文本结果。
+hook_call() {
+    _args=$(cat)
+    [ -n "$_args" ] || _args='{}'
+    handle "${1:-}" "$_args"
+}
+
+# 被监督进程。先建隧道再起看守：反过来的话看守会和这里的 up 并发建接口。
+run() {
+    echo $$ > "$GUARDIAN_PID"
+    "$HERE/wireguard.sh" up >&2 || log "隧道启动失败，看守会重试；管理页面也可保存设置触发重建"
+    guard
+}
+
+case "${1:-}" in
+start) run ;;
+hook)  shift; hook_call "$@" ;;
+*)
+    echo "usage: $0 start|hook <capability>" >&2
+    exit 2
+    ;;
+esac
