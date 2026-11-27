@@ -176,7 +176,8 @@ package/
   `DOMAIN,…` / `DOMAIN-WILDCARD,…`），所以 `behavior` 必须是 `classical`：写成 `domain`
   会把每条原样当成一个域名塞进 trie，`DOMAIN-SUFFIX,00cdn.com` 变成一条永远匹配不到的
   字面域名——不报错、不给警告，规则集等于空的。1.3.6 之前写下的 `domain` 会在启动时就地
-  改成 `classical`，别的 provider 不动；
+  改成 `classical`，别的 provider 不动。同理，`listeners: null`（router 形态补 tproxy 入口时
+  会撞上）也是先把空段换成真块头再补，不让同一个顶层键出现两次；
 - meow 只在自己的家目录（`<插件目录>/data`）里找 geo 库和 provider 的表。把同名文件放在
   `config` 旁边（`<插件目录>/Country.mmdb` 这种，手搭的那套就是 config 和库放一个目录）
   也行：启动时会搬进数据目录，已有的不覆盖。`GeoLite2-ASN.mmdb` 和 `geosite.dat` 都没有

@@ -396,14 +396,16 @@ prepare_config() {
 
 # router 形态要一个 tproxy 入口：有就沿用（端口以它为准），没有就补一条。
 # 补的时候插在 listeners: 下面；连 listeners 块都没有就整块追加。
+# "listeners: null" / "~" / "[]" 是 meow 对「这个段没设过」的序列化（订阅一更新它就把
+# 整份 config 重写一遍）：先换成真块头再补。不这么办，追加出来的第二份 listeners 和它
+# 凑成同一个键两次，meow 报 duplicate entry with key "listeners" 直接起不来。
 ensure_tproxy_listener() {
     _port=$1
     [ -n "$(tproxy_entry)" ] && return 0
-    if grep -qE '^listeners:[ \t]*$' "$CONFIG"; then
+    if grep -qE '^listeners:' "$CONFIG"; then
         _tmp="$CONFIG.tmp.$$"
         awk -v port="$_port" '
-            { print }
-            /^listeners:[ \t]*$/ && !done {
+            function item() {
                 print "  - name: tproxy"
                 print "    type: tproxy"
                 print "    port: " port
@@ -411,6 +413,18 @@ ensure_tproxy_listener() {
                 print "    firewall: false"
                 done = 1
             }
+            BEGIN { done = 0 }
+            /^listeners:[ \t]*$/ {
+                print
+                if (!done) item()
+                next
+            }
+            /^listeners:[ \t]*(null|~|\[\])[ \t]*(#.*)?$/ {
+                print "listeners:"
+                if (!done) item()
+                next
+            }
+            { print }
         ' "$CONFIG" > "$_tmp" && mv "$_tmp" "$CONFIG"
         return 0
     fi

@@ -245,6 +245,49 @@ grep -q 'type: tproxy' "$_plugin/config" && fail 'router-leave: 切到 off 之�
 grep -qx '  listen: 127.0.0.1:5353' "$_plugin/config" || fail 'router-leave: 切到 off 之后 dns.listen 没还原'
 grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'router-leave: 切到 off 之后 tproxy-port 还在'
 
+# ---- "listeners: null" + router：补 tproxy 入口不能补出第二份 listeners ----
+# meow 重写 config 时把没设过的段写成 "listeners: null"；只认 "listeners:" 空块头的代码会
+# 整块追加，同一个键两份，meow 报 duplicate entry with key "listeners" 直接起不来。
+fixture "$WORK/listeners-null"
+cat > "$_plugin/config" <<'LN'
+mixed-port: 7890
+dns:
+  enable: true
+  listen: 127.0.0.1:5353
+listeners: null
+rules:
+  - MATCH,DIRECT
+LN
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+[ "$(grep -c '^listeners:' "$_plugin/config")" = 1 ] ||
+    fail "listeners-null: listeners 有 $(grep -c '^listeners:' "$_plugin/config") 份"
+grep -qx '    type: tproxy' "$_plugin/config" || fail 'listeners-null: 没补上 tproxy 入口'
+grep -q 'listeners: null' "$_plugin/config" && fail 'listeners-null: null 还留着'
+cp "$_plugin/config" "$WORK/listeners-null.once"
+run_meow mode >/dev/null
+cmp -s "$WORK/listeners-null.once" "$_plugin/config" || fail 'listeners-null: 第二次跑改了文件'
+
+# ---- 已经被写成两份 listeners 的旧配置：启动时把 null 那份清掉 ----
+fixture "$WORK/listeners-dup"
+cat > "$_plugin/config" <<'LD'
+mixed-port: 7890
+listeners: null
+listeners:
+  - name: tproxy
+    type: tproxy
+    port: 7893
+    listen: 0.0.0.0
+    firewall: false
+rules:
+  - MATCH,DIRECT
+LD
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+[ "$(grep -c '^listeners:' "$_plugin/config")" = 1 ] ||
+    fail "listeners-dup: 修完还是有 $(grep -c '^listeners:' "$_plugin/config") 份 listeners"
+grep -qx '    type: tproxy' "$_plugin/config" || fail 'listeners-dup: tproxy 入口被删了'
+
 # ---- cn_domains 的表是古典写法：behavior 不能是 domain ----
 # domain 型把 "DOMAIN-SUFFIX,00cdn.com" 当成一个域名塞进 trie，永远匹配不到，日志还一声
 # 不响；1.3.5 之前的模板就是这么写的，启动时就地改过来。别的 provider 一个字不动。
@@ -270,7 +313,7 @@ grep -qx '    behavior: classical' "$_plugin/config" ||
     fail 'cn-behavior: 别人的 behavior 也被改了'
 grep -q 'DOMAIN-SUFFIX,' "$_plugin/data/cn_domains.yaml" ||
     fail 'cn-behavior: 落下去的表不是古典写法'
-grep -qx '    behavior: classical' "$REPO/plugins/meow/package/payload/config.yaml" ||
+grep -q '^    behavior: classical' "$REPO/plugins/meow/package/payload/config.yaml" ||
     fail 'cn-behavior: 模板里的 behavior 不是 classical'
 
 # ---- 包里带的数据文件：第一次落地到数据目录，之后不覆盖 ----
