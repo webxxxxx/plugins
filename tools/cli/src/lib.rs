@@ -842,6 +842,20 @@ fn manifest_paths(manifest: &Value) -> Vec<(String, String)> {
                     walk(&label, child, found);
                 }
             }
+            // Arrays hold as many payload paths as objects do: `capabilities[]`
+            // is one array per capability, and `capabilities[].hook.path` is a
+            // file like any other. Missing this arm made the stage check blind to
+            // capability hooks while its own doc comment promised otherwise.
+            Value::Array(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    let label = if label.is_empty() {
+                        index.to_string()
+                    } else {
+                        format!("{label}[{index}]")
+                    };
+                    walk(&label, child, found);
+                }
+            }
             Value::String(path) if value_is_payload_path(path) => {
                 found.push((label.to_string(), path.clone()));
             }

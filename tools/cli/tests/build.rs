@@ -52,6 +52,26 @@ const MANIFEST: &str = r#"{
   ]
 }"#;
 
+/// The same plugin with a capability answered by a one-shot hook (svcd #342).
+/// The hook path is a payload file like any other, so the stage has to hold it:
+/// `capabilities[]` is an array, and an array arm is easy to forget in the walk.
+const MANIFEST_WITH_HOOK: &str = r#"{
+  "schema": 1,
+  "id": "demo",
+  "name": "示例插件",
+  "version": "1.0.0",
+  "desc": "fixture",
+  "exec": { "path": "payload/bin/demo", "ready": "exec" },
+  "capabilities": [
+    {
+      "name": "echo",
+      "desc": "Echo a message",
+      "inputSchema": { "type": "object", "properties": { "message": { "type": "string" } } },
+      "hook": { "path": "payload/bin/echo.sh", "args": ["echo"], "timeout": 5 }
+    }
+  ]
+}"#;
+
 /// A plugin directory: manifest, one payload file, no build step.
 fn project(tag: &str, manifest: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("plugin-tools-it-{tag}-{}", std::process::id()));
@@ -162,9 +182,50 @@ fn a_missing_icon_fails_before_the_host_is_called() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A project whose manifest declares a capability hook and that ships a family
+/// overlay — the overlay is what makes the build stage a copy, and the stage is
+/// where a named payload path is checked.
+fn hooked_project(tag: &str) -> PathBuf {
+    let root = project(tag, MANIFEST_WITH_HOOK);
+    std::fs::create_dir_all(root.join("platforms")).unwrap();
+    std::fs::write(
+        root.join("platforms/unix.json"),
+        "{\n  \"exec\": { \"path\": \"payload/bin/demo\", \"ready\": \"exec\" }\n}",
+    )
+    .unwrap();
+    root
+}
+
 #[test]
-fn a_declared_icon_lets_the_build_through() {
-    let root = project(
+fn a_missing_capability_hook_fails_before_the_host_is_called() {
+    let root = hooked_project("capability-hook-missing");
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-unknown-linux-gnu"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("payload/bin/echo.sh"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(
+        stderr(&output).contains("capabilities[0].hook.path"),
+        "the error should name where the path came from: {}",
+        stderr(&output)
+    );
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_capability_hook_in_the_package_lets_the_build_through() {
+    let root = hooked_project("capability-hook-ok");
+    std::fs::write(root.join("package/payload/bin/echo.sh"), "#!/bin/sh\n").unwrap();
+    let (output, _calls) = run(&root, &["build", "--platform", "x86_64-unknown-linux-gnu"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_declared_icon_lets_the_build_through() {    let root = project(
         "icons-ok",
         &MANIFEST.replace(
             "\"capabilities\"",
