@@ -1,0 +1,158 @@
+{
+  "schema": 1,
+  "id": "wireguard",
+  "name": "WireGuard 隧道",
+  "version": "1.2.0",
+  "desc": "WireGuard 隧道：内核模块或 gotatun 用户态实现随包，多 peer 管理页面与二维码",
+  "protocol": 1,
+  "interpreter": {
+    "name": "sh"
+  },
+  "exec": {
+    "path": "payload/bin/wireguardd.sh",
+    "ready": "notify"
+  },
+  "lifecycle": {
+    "start": {
+      "path": "payload/bin/wireguard.sh",
+      "args": [
+        "prepare"
+      ],
+      "timeout": 45
+    },
+    "stop": {
+      "path": "payload/bin/wireguard.sh",
+      "args": [
+        "stop"
+      ]
+    },
+    "status": {
+      "path": "payload/bin/wireguard.sh",
+      "args": [
+        "status"
+      ]
+    }
+  },
+  "ui": {
+    "type": "web",
+    "entry": "index.html"
+  },
+  "capabilities": [
+    {
+      "name": "state",
+      "desc": "读取隧道设置、peer 列表、服务端公钥与运行状态",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "save_settings",
+      "desc": "保存隧道设置；涉及接口/端口/网段的改动会重建 wg0",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "lan_interface": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "network": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "mtu": {
+            "type": "integer",
+            "minimum": 576,
+            "maximum": 1500
+          },
+          "table": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          },
+          "endpoint": {
+            "type": "string"
+          },
+          "dns": {
+            "type": "string"
+          },
+          "allowed_ips": {
+            "type": "string"
+          },
+          "keepalive": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 65535
+          }
+        },
+        "required": [
+          "lan_interface",
+          "port",
+          "network",
+          "address",
+          "mtu",
+          "table",
+          "endpoint",
+          "allowed_ips",
+          "keepalive"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "add_peer",
+      "desc": "生成一套客户端密钥并新增 peer，返回客户端配置（含私钥）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "peer_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "peer_name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "remove_peer",
+      "desc": "删除 peer（内核与本地记录一起删）",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "peer_id"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "peer_config",
+      "desc": "返回指定 peer 的客户端配置文本，用于二维码/下载",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "peer_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "peer_id"
+        ],
+        "additionalProperties": false
+      }
+    }
+  ]
+}

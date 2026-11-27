@@ -1,0 +1,6 @@
+/out
+/dist
+
+# 构建产物：由 build.json 在构建时从 vendor/ 复制进 payload，不进仓库
+/package/payload/bin/*
+!/package/payload/bin/*.sh
