@@ -271,6 +271,8 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **能力清单一处改全。** 加/删能力时同时改 manifest 的 `capabilities[]` 和代码分支；Rust 用 `cargo test` 兜底，shell 靠 `case` 与清单人工对齐。
 
+**能力要么走通道，要么挂短命钩子。** 一个能力只有一种投递方式：`ready: notify` 的插件有协议通道，能力由 `svcd_plugin_serve` 的 handler 回答，且**不许**声明 `hook`；`ready: exec` / `port` 的插件没有通道，因此每个能力都**必须**声明 `capabilities[].hook = {path, args?, env?, timeout?}`（包内相对路径，1..300 秒）。宿主每次 `tools/call` 起一次那个动作：`arguments` 写进 stdin 然后关掉，stdout 原文就是这次调用的文本结果（不解析 JSON，空输出就是空文本），stderr 进 `<id>-hooks.log`，超过契约内联上限算这次调用失败而不是截断。所以「一个常驻进程 + 偶尔被调一次」不必为了能力面再养一个通道 shell（`meow` / `wireguard` 就是这么改的）。
+
 **`id` 是身份，`name` 是显示名。** `schema` 恒为 `1`（打包器盖章，源清单写别的值也会被覆盖），`id` 只能是 `[a-z0-9][a-z0-9_-]{0,63}`（不能是 `svc`）：安装目录、日志文件名、`<id>.<能力>` 工具名、`/plugin-ui/<id>/` 都用它。源清单省略 `id` 时取项目目录名；`name` 随便写，中文也行，缺省等于 `id`；命令与 API 只认 `id`，不按显示名解析。
 
 **`platform` / `files[]` / `signature.json` 由打包器盖章。** 源 manifest 不写它们——都是派生的。产物文件名是 `<id>-<version>-<platform>[-<device>].spk`：声明了 `compat.devices` 的包再追加列表第一个 id（`<id>-<version>-<platform>-<device>.spk`，如 `sr6110`），商店按这个后缀认出设备。含 `.ko` 的包**必须**声明 `compat.devices`，否则打包器直接拒绝——内核模块只对某一代内核/固件有效。
