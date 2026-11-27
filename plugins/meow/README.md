@@ -1,8 +1,8 @@
 # meow — mihomo 兼容代理内核
 
-把 [meow-rs](https://github.com/madeye/meow-rs) 编译成 svcd 插件。插件没有
-JSON-RPC 能力；生命周期是 `start` / `stop` / `status`，启动后由 meow 自己
-提供 mixed 代理端口和 YACD 面板。
+把 [meow-rs](https://github.com/madeye/meow-rs) 编译成 svcd 插件。生命周期是
+`start` / `stop` / `status`，启动后由 meow 自己提供 mixed 代理端口和 YACD 面板；
+页面顶部的代理类型是一个能力（`mode`），Linux/macOS 上由短命钩子回答，没有协议通道。
 
 同一份源码支持 Linux、Windows 11 和 macOS。入口的家族差异写在
 `platforms/unix.json` / `platforms/windows.json` 里：Linux/macOS 用 `meow.sh`（POSIX），
@@ -135,14 +135,17 @@ package/
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
   改到代理组后即可用面板切换。
 
-清单里 `exec.ready` 是 `notify`：宿主先发一条 `svcd.ping`，收到回复才算启动成功，
-之后这条路才是能力通道（`ready: exec` 的 stdout 只进日志，页面调不到任何能力）。
+清单里 `exec.ready` 是 `exec`：宿主 spawn 完就算启动，stdout 只进日志，**没有协议通道**。
+页面顶部的代理类型是一个能力（`mode`），挂的是短命钩子（`capabilities[].hook`，svcd #342）：
+每次调用由宿主起一次 `meow.sh hook mode`，`arguments` 从 stdin 读、stdout 就是这次调用的
+文本结果。所以「一个常驻进程 + 偶尔被调一次」就够了，不必再养一个通道 shell。Windows 上
+pwsh 不能 `exec`，那边仍是 `ready: notify` + 协议 1 通道（见 `platforms/windows.json`）。
 
-宿主的 `exec` 就是那个**看护进程**（`exec.args` 是 `start`）：meow 是自己的子进程，
-能力通道跑在后台（页面上的代理类型调的就是它）。`pc` / `off` 形态起进程就返回；`router`
-形态还要等 tproxy 端口监听、挂好 iptables 规则。启动前会跑 `meow -t` 校验配置，失败就返回
-非零而不是秒退。孩子自己退出时看护循环跟着退出（宿主据此重启或报错）；页面切了代理类型
-就让孩子退出，看护循环读到新的 `proxy-mode` 后按新形态重启。`stop` 在进程退出之后跑：
+宿主的 `exec` 就是那个**看护进程**（`exec.args` 是 `start`）：meow 是自己的子进程。
+`pc` / `off` 形态起进程就返回；`router` 形态还要等 tproxy 端口监听、挂好 iptables 规则。
+启动前会跑 `meow -t` 校验配置，失败就返回非零而不是秒退。孩子自己退出时看护循环跟着退出
+（宿主据此重启或报错）；页面切了代理类型，钩子只写 `state`、结束孩子就走，看护循环读到新的
+`proxy-mode` 后按新形态重启。`stop` 在进程退出之后跑：
 宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL；Windows 直接强杀整棵树），`stop`
 只收尾——先撤 TProxy 规则，再删掉强杀留下的 pidfile，它不杀进程；`status` 输出一行 JSON。
 

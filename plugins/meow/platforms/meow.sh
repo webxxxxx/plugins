@@ -25,12 +25,13 @@
 # 宿主监督的是 exec（exec.args = start）：start 一直不返回，直到看护进程退出；
 # stop 在进程退出之后跑，只做收尾（撤规则、删 pidfile）；status 按需探测。
 # 路径全部从脚本位置推导，数据落在 <插件目录>/data。
-# 清单里 exec.ready 是 notify：宿主先发一条 svcd.ping，收到回复才算启动成功，之后
-# 这条路就是能力通道（ready: exec 的 stdout 只进日志，页面调不到任何能力）。
+# 清单里 exec.ready 是 exec：宿主 spawn 完就算启动，stdout 只进日志，没有协议通道
+# （#342）。页面 A 的代理类型选择器走能力钩子：宿主每次调用起一个短命进程
+# （meow.sh hook mode），arguments 从 stdin 读，它的 stdout 就是这次调用的结果。
 #
-# start 现在是「看护进程」而不是把 meow exec 掉：meow 是自己的子进程，通道能力跑在
-# 后台（页面 A 的代理类型选择器调它），孩子退出后前台循环按 config 里的新形态重启。
-# 这样页面改 proxy-mode 不需要额外进程，也不必重启插件。
+# start 是「看护进程」而不是把 meow exec 掉：meow 是自己的子进程，孩子退出后前台
+# 循环按 config 里的新形态重启。钩子进程和看护进程之间只靠 <插件目录>/state 与
+# pidfile 交接：钩子只写 state、结束孩子就走，重启由看护循环做。
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -896,7 +897,7 @@ start_child() {
         echo "meow: 代理类型是 off —— 只开 mixed-port，不接管系统流量（页面上选 tun / tproxy 才接管）" >&2
     fi
     echo "meow starting mode=$_mode (config=$CONFIG)" >&2
-    # stdin 接 /dev/null：宿主的通道口只留在看护进程里，meow 不该继承它。
+    # stdin 接 /dev/null：meow 不读 stdin，别让它等着宿主那边的输入。
     # -d 是 meow 的家目录：缓存、规则提供者的缓存都落在这里，所以指到插件自己的
     # data/，不要指 payload（那是版本目录，升级时会被换掉）。
     "$HERE/meow" -d "$DATA" -f "$CONFIG" --ext-ui "$ROOT/yacd" >&2 < /dev/null &
@@ -1098,19 +1099,18 @@ handle_mode() {
     do_set_mode "$_want"
 }
 
-# 宿主 `svc status` 的一行摘要。
-svcd_status() {
-    _mode=$(mode_of 2>/dev/null) || _mode=off
-    if running; then
-        printf '%s (mode=%s)' 'running' "$(label_of "$_mode")"
-    else
-        printf '%s (mode=%s)' 'meow is not running' "$(label_of "$_mode")"
-    fi
+# 能力钩子入口（清单里的 capabilities[].hook）：宿主每次 tools/call 起一次本脚本，
+# arguments 从 stdin 读（写完就关），我们的 stdout 原样成为这次调用的文本结果。
+# $1 是能力名，与通道那侧 handle <name> <arguments> 同形，所以直接交给 handle。
+do_hook() {
+    _args=$(cat)
+    [ -n "$_args" ] || _args='{}'
+    handle "${1:-}" "$_args"
 }
 
+# EXIT 收尾：先把 trap 清空，免得 cleanup_child 里的 kill/rm 再把这里叫一次。
 cleanup_on_exit() {
     trap '' TERM INT HUP EXIT
-    [ -n "${CHANNEL:-}" ] && kill "$CHANNEL" 2>/dev/null
     cleanup_child
 }
 
@@ -1124,19 +1124,11 @@ do_start() {
     fi
     rm -f "$PIDFILE"
     if [ ! -f "$SDK" ]; then
-        echo "meow: 缺少通道 SDK（$SDK），页面上的代理类型开关不可用" >&2
+        echo "meow: 缺少 $SDK（能力钩子要用它解析 arguments）" >&2
         return 1
     fi
-
-    SELF=$$
     trap 'cleanup_on_exit' EXIT
     trap 'exit 0' TERM INT HUP
-    # 后台作业的 stdin 会被 shell 接到 /dev/null，所以先把宿主的通道口存成 fd 5 再给它。
-    exec 5<&0
-    # 通道能力跑在后台：它只改写 config 并结束孩子，重启交给下面的前台循环。
-    # SDK 收到 svcd.shutdown 会自己 exit，所以「通道断了就叫醒看护循环」只能挂在 EXIT 上。
-    ( trap 'kill -TERM "$SELF" 2>/dev/null' EXIT; svcd_plugin_serve handle <&5 ) &
-    CHANNEL=$!
     supervise
     rc=$?
     exit "$rc"
@@ -1222,8 +1214,9 @@ case "${1:-}" in
     start)    do_start ;;
     stop)     do_stop ;;
     status)   do_status ;;
+    hook)     shift; do_hook "$@" ;;
     mode)     do_mode ;;
     set-mode) shift; do_set_mode "${1:-}" ;;
     fw)       shift; do_fw "$@" ;;
-    *)        echo "usage: $0 start|stop|status|mode|set-mode off|tun|tproxy|fw [up|down|status]" >&2; exit 2 ;;
+    *)        echo "usage: $0 start|stop|status|hook <capability>|mode|set-mode off|tun|tproxy|fw [up|down|status]" >&2; exit 2 ;;
 esac

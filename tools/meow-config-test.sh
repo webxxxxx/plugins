@@ -550,69 +550,84 @@ grep -qx 'proxy-mode:.*' "$_plugin/config" && fail 'migrate-old: proxy-mode 还�
 grep -qx 'lan-interface:.*' "$_plugin/config" && fail 'migrate-old: lan-interface 还留在 config 里'
 grep -qx 'lan-interface: br-wan' "$_plugin/state" || fail 'migrate-old: lan-interface 没搬进 state'
 
-# ---- 通道：页面调 mode 读状态、切代理类型，看护循环按新形态重启 ----
-# 串起 meow.sh start 的完整形态：帧从 stdin 进，回复从 stdout 出，切完必须自己重启。
-# 只在 Linux 上跑：MSYS/Cygwin 的 fork + 信号模型撑不起「后台读管道 + 前台 wait」，测出来的
-# 是仿真层的脾气，不是脚本的行为。CI 与 WSL 都走 Linux 这一支。
-if [ "$(uname -s)" != Linux ]; then
-    echo "skip: 通道测试只在 Linux 上跑（当前 $(uname -s)）" >&2
-else
-fixture "$WORK/channel"
-cat > "$WORK/feed.sh" <<'FEED'
-sleep 1
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mode","arguments":{}}}'
-sleep 1
-printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"mode","arguments":{"mode":"tun"}}}'
-sleep 3
-printf '%s\n' '{"jsonrpc":"2.0","id":3,"method":"svcd.shutdown"}'
-FEED
+# ---- 能力钩子：页面调 mode 读状态、切代理类型 ----
+# 钩子就是一次普通执行（#342）：arguments 从 stdin 进，stdout 就是这次调用的结果。
+# 这一半只用 shell，两个平台都跑。
+fixture "$WORK/hook"
 MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
-if timeout 25 sh -c 'sh "$1" | SVCD_PLUGIN_DIR="$2" sh "$3" start' sh \
-    "$WORK/feed.sh" "$_plugin" "$MEOW_SH" \
-    > "$WORK/channel.out" 2> "$WORK/channel.err"; then
-    :
-else
-    fail "channel: 看护进程没干净退出（$(cat "$WORK/channel.err")）"
-fi
-channel_has() {
-    grep -qF "$1" "$WORK/channel.out" && return 0
-    {
-        echo "--- channel.out"
-        cat "$WORK/channel.out"
-        echo "--- channel.err"
-        cat "$WORK/channel.err"
-    } >&2
-    fail "channel: $2"
+hook_mode() {
+    printf '%s\n' "$1" | SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" hook mode
 }
 
-# 能力结果是 JSON 里的字符串，引号会被转义：文件里是 \"mode\":\"off\"。
-# 刚装好（还没写过 state）第一次读就该是缺省的 off，切成 tun 之后看护循环按 pc 重启。
-channel_has 'mode\":\"off\"' '读状态没回缺省的 off'
-channel_has 'changing\":true' '切代理类型没回执'
-[ "$(state_of)" = pc ] || fail 'channel: 切完没落到 state'
-grep -q 'proxy-mode off → pc' "$WORK/channel.err" || fail 'channel: 看护循环没按新形态重启'
-[ -f "$_plugin/data/meow.pid" ] && fail 'channel: 退出后还留着 pidfile'
+# 刚装好（还没写过 state）第一次读就该是缺省的 off。
+if ! hook_mode '{}' > "$WORK/hook-read.out" 2> "$WORK/hook-read.err"; then
+    fail "hook: 读状态退出非零（$(cat "$WORK/hook-read.err")）"
+fi
+grep -qF '"mode":"off"' "$WORK/hook-read.out" ||
+    fail "hook: 读状态没回缺省的 off（$(cat "$WORK/hook-read.out")）"
+
+if ! hook_mode '{"mode":"tun"}' > "$WORK/hook-set.out" 2> "$WORK/hook-set.err"; then
+    fail "hook: 切代理类型退出非零（$(cat "$WORK/hook-set.err")）"
+fi
+grep -qF '"changing":true' "$WORK/hook-set.out" || fail 'hook: 切代理类型没回执'
+[ "$(state_of)" = pc ] || fail 'hook: 切完没落到 state'
+
+# 参数不认识就报错退出，state 一个字都不许动。
+if hook_mode '{"mode":"bogus"}' >/dev/null 2>&1; then
+    fail 'hook: 非法代理类型没被拒'
+fi
+grep -qx 'proxy-mode: pc' "$_plugin/state" || fail 'hook: 被拒的调用改动了 state'
+
+# ---- 钩子与看护循环的交接：钩子只写 state，重启由前台看护循环做 ----
+# 只在 Linux 上跑：MSYS/Cygwin 的 fork + 信号模型撑不起「后台看护 + 前台 wait」，
+# 测出来的是仿真层的脾气，不是脚本的行为。CI 与 WSL 都走 Linux 这一支。
+if [ "$(uname -s)" != Linux ]; then
+    echo "skip: 看护循环的交接只在 Linux 上跑（当前 $(uname -s)）" >&2
+else
+fixture "$WORK/handoff"
+MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
+SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" start > "$WORK/handoff.out" 2> "$WORK/handoff.err" &
+SUPERVISOR=$!
+n=0
+while [ "$n" -lt 100 ] && [ ! -s "$_plugin/data/meow.pid" ]; do
+    sleep 0.1
+    n=$((n + 1))
+done
+[ -s "$_plugin/data/meow.pid" ] || fail 'handoff: 看护进程没把孩子拉起来'
+
+hook_mode '{"mode":"tun"}' >/dev/null 2>&1 || fail 'handoff: 钩子切换失败'
+n=0
+while [ "$n" -lt 100 ] && ! grep -q 'proxy-mode off → pc' "$WORK/handoff.err"; do
+    sleep 0.1
+    n=$((n + 1))
+done
+grep -q 'proxy-mode off → pc' "$WORK/handoff.err" ||
+    fail "handoff: 看护循环没按新形态重启（$(cat "$WORK/handoff.err")）"
+
+kill -TERM "$SUPERVISOR" 2>/dev/null || true
+wait "$SUPERVISOR" 2>/dev/null || true
+[ -f "$_plugin/data/meow.pid" ] && fail 'handoff: 退出后还留着 pidfile'
 
 # ---- 选中的形态起不来：自动降成 off，别让插件一直起不来 ----
 # pc 形态（Linux 上是 tproxy-port + nft）在这台机器上起不来时，宿主重启撞的还是同一堵墙：
 # 插件一直起不来，页面也就永远打不开。所以先把代理类型降成 off，起一个普通的 mixed-port，
 # 修好之后在页面上重新选 tun。
 fixture "$WORK/fallback"
+MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
 mkdir -p "$_plugin/data"
 : > "$_plugin/data/fail-pc"
 printf 'proxy-mode: pc\n' > "$_plugin/state"
-cat > "$WORK/fallback-feed.sh" <<'FEED'
-sleep 3
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"svcd.shutdown"}'
-FEED
-if timeout 25 sh -c 'sh "$1" | SVCD_PLUGIN_DIR="$2" sh "$3" start' sh \
-    "$WORK/fallback-feed.sh" "$_plugin" "$_plugin/1.3.0/payload/bin/meow.sh" \
-    > "$WORK/fallback.out" 2> "$WORK/fallback.err"; then
-    :
-else
-    fail "fallback: 看护进程没干净退出（$(cat "$WORK/fallback.err")）"
-fi
-grep -q '降成 off' "$WORK/fallback.err" || fail 'fallback: 降级没写进日志'
+SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" start > "$WORK/fallback.out" 2> "$WORK/fallback.err" &
+SUPERVISOR=$!
+n=0
+while [ "$n" -lt 100 ] && ! grep -q '降成 off' "$WORK/fallback.err"; do
+    sleep 0.1
+    n=$((n + 1))
+done
+kill -TERM "$SUPERVISOR" 2>/dev/null || true
+wait "$SUPERVISOR" 2>/dev/null || true
+grep -q '降成 off' "$WORK/fallback.err" ||
+    fail "fallback: 降级没写进日志（$(cat "$WORK/fallback.err")）"
 [ "$(state_of)" = off ] || fail "fallback: state 没降成 off（$(state_of)）"
 grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'fallback: 降成 off 之后 tproxy-port 还在'
 [ -f "$_plugin/data/meow.pid" ] && fail 'fallback: 退出后还留着 pidfile'

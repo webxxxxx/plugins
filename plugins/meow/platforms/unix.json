@@ -7,7 +7,7 @@
     "args": [
       "start"
     ],
-    "ready": "notify"
+    "ready": "exec"
   },
   "lifecycle": {
     "stop": {
@@ -22,5 +22,34 @@
         "status"
       ]
     }
-  }
+  },
+  "capabilities": [
+    {
+      "name": "mode",
+      "desc": "读取或切换代理类型：off 不接管、tun 本机 TUN（proxy-mode: pc）、tproxy 网关（proxy-mode: router）。写进 config 的 proxy-mode，重启后仍然生效；Windows 上 tproxy 会被拒绝。",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "off",
+              "tun",
+              "tproxy"
+            ],
+            "description": "省略则只读当前状态"
+          }
+        },
+        "additionalProperties": false
+      },
+      "hook": {
+        "path": "payload/bin/meow.sh",
+        "args": [
+          "hook",
+          "mode"
+        ],
+        "timeout": 10
+      }
+    }
+  ]
 }
