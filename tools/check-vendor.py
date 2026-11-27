@@ -32,6 +32,15 @@ MAGIC = {
 }
 
 
+# GitHub runners on Windows default to a cp1252 stdout; our messages and the
+# ::error:: annotations are UTF-8. Reconfigure instead of dropping the detail.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:  # pragma: no cover - Python < 3.7
+        pass
+
+
 def tracked_vendor_files() -> list[Path]:
     result = subprocess.run(
         ["git", "-C", str(ROOT), "ls-files", "-z", "--", "plugins/*/vendor/*"],

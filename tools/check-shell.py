@@ -24,6 +24,15 @@ ROOT = Path(__file__).resolve().parent.parent
 SKIP_DIRS = {"vendor", "target", "node_modules", ".git", "dist", ".scaffold", "out"}
 
 
+# GitHub runners on Windows default to a cp1252 stdout; our messages and the
+# ::error:: annotations are UTF-8. Reconfigure instead of dropping the detail.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:  # pragma: no cover - Python < 3.7
+        pass
+
+
 def scripts() -> list[Path]:
     found: list[Path] = []
     for path in ROOT.rglob("*.sh"):
@@ -33,9 +42,19 @@ def scripts() -> list[Path]:
     return sorted(found)
 
 
+def checker_for(path: Path) -> str | None:
+    """A bash script is checked with bash, everything else with dash/sh."""
+    try:
+        first = path.read_bytes().split(b"\n", 1)[0].decode("utf-8", "replace")
+    except OSError:
+        return None
+    if "bash" in first:
+        return shutil.which("bash") or shutil.which("sh")
+    return shutil.which("dash") or shutil.which("sh")
+
+
 def main() -> int:
-    checker = shutil.which("dash") or shutil.which("sh")
-    if not checker:
+    if not (shutil.which("dash") or shutil.which("sh")):
         print("check-shell: 找不到 dash/sh，无法做语法检查", file=sys.stderr)
         return 1
 
@@ -45,6 +64,10 @@ def main() -> int:
         data = path.read_bytes()
         if b"\r\n" in data:
             problems.append(f"{rel}: 有 CRLF 行尾（payload 脚本必须是 LF）")
+        checker = checker_for(path)
+        if not checker:
+            problems.append(f"{rel}: 找不到解释器做语法检查")
+            continue
         try:
             result = subprocess.run(
                 [checker, "-n", str(path)],

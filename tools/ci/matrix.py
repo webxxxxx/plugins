@@ -36,6 +36,15 @@ OS_BY_PLATFORM = {
 DEFAULT_OS = "ubuntu-24.04"
 
 
+# GitHub runners on Windows default to a cp1252 stdout; our messages and the
+# ::error:: annotations are UTF-8. Reconfigure instead of dropping the detail.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:  # pragma: no cover - Python < 3.7
+        pass
+
+
 def os_for(platform: str) -> str:
     for pattern, os_name in OS_BY_PLATFORM.items():
         if fnmatch.fnmatchcase(platform, pattern):
