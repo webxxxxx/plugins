@@ -164,16 +164,17 @@ cp "$_plugin/config" "$WORK/duplicate-null.once"
 run_meow mode >/dev/null
 cmp -s "$WORK/duplicate-null.once" "$_plugin/config" || fail 'duplicate-null: 第二次跑改了文件'
 
-# ---- 只有 "tun: null"（还没补过块）：换成真块头再写键，不能写成两份 ----
+# ---- 只有 "tun: null"：本来就是没开，一个字都不用改 ----
+# 只认真块头（"tun:"），null / ~ 这种空段是 meow 序列化出来的，别去动它——改了反而多出
+# 几行噪音，下次它重写又变回 null。
 fixture "$WORK/null-only"
 cat > "$_plugin/config" <<'NUL'
 mixed-port: 7891
 tun: null
 NUL
+cp "$_plugin/config" "$WORK/null-only.before"
 run_meow mode >/dev/null
-[ "$(grep -c '^tun:' "$_plugin/config")" = 1 ] || fail 'null-only: tun 写成了两份'
-grep -A1 -x 'tun:' "$_plugin/config" | grep -qx '  enable: false' || fail 'null-only: enable 没写进去'
-grep -q 'null' "$_plugin/config" && fail 'null-only: null 还留着'
+cmp -s "$WORK/null-only.before" "$_plugin/config" || fail 'null-only: 配置被改了'
 
 # ---- router 形态碰到 "dns: null"：同样换成真块头，不能补出第二个 dns ----
 fixture "$WORK/dns-null"
@@ -211,7 +212,9 @@ fixture "$WORK/router"
 # 直接写缓存：网关形态的平台检查不走这里，这里只测受管键怎么写。
 printf 'proxy-mode: router\n' > "$_plugin/state"
 run_meow fw status >/dev/null
-grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'router: 顶层 tproxy-port 应该被删掉'
+# 顶层 tproxy-port 会和 listeners 里的入口抢端口：置空（不删行，用户的注释留着）
+grep -qE '^tproxy-port:[ \t]*[0-9]' "$_plugin/config" &&
+    fail 'router: 顶层 tproxy-port 应该置空（会和 listeners 里的入口抢端口）'
 grep -qx '  listen: 0.0.0.0:1053' "$_plugin/config" || fail 'router: dns.listen 没改成 0.0.0.0:1053'
 grep -qx '    type: tproxy' "$_plugin/config" || fail 'router: 没补 tproxy 入口'
 grep -qx '    firewall: false' "$_plugin/config" || fail 'router: tproxy 入口没写 firewall: false'
@@ -244,6 +247,53 @@ run_meow mode >/dev/null
 grep -q 'type: tproxy' "$_plugin/config" && fail 'router-leave: 切到 off 之后 tproxy 入口还在'
 grep -qx '  listen: 127.0.0.1:5353' "$_plugin/config" || fail 'router-leave: 切到 off 之后 dns.listen 没还原'
 grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'router-leave: 切到 off 之后 tproxy-port 还在'
+
+# ---- 手写的网关配置：格式原样保留，只改该改的那两行 ----
+# 路由器上那份是顶格写 listeners、带行尾注释、routing-mark / tun: null 都在的写法。
+# 插件只该动 behavior 和 provider 的绝对路径，别重排缩进、别补第二条入口、别删 mark。
+fixture "$WORK/surgical"
+cat > "$_plugin/config" <<'SG'
+mixed-port: null                                   # 网关不需要 LAN 侧 HTTP/SOCKS
+mode: rule
+log-level: warning
+dns:
+  enable: true
+  listen: "0.0.0.0:1053"                            # 必须配 meow-fw.sh 的 DNS_PORT
+geodata:
+  mmdb-path: '@DATA@/Country.mmdb'
+rule-providers:
+  cn_domains:
+    type: file
+    behavior: domain
+    path: /etc/sr/meow/cn_domains.yaml
+strict: null
+tproxy-port: null
+# tproxy-sni 已废弃，改用上面的 sniffer
+routing-mark: 9527
+listeners:
+- name: tproxy-tcp
+  type: tproxy
+  port: 7893
+  listen: "0.0.0.0"
+  firewall: false
+  max-connections: 4096
+tun: null
+max-connections: 4096
+rules:
+  - MATCH,DIRECT
+SG
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+[ "$(grep -c 'type: tproxy' "$_plugin/config")" = 1 ] || fail 'surgical: 又补了一条 tproxy 入口'
+grep -qx 'routing-mark: 9527' "$_plugin/config" || fail 'surgical: routing-mark 被删了'
+grep -qx '# tproxy-sni 已废弃，改用上面的 sniffer' "$_plugin/config" ||
+    fail 'surgical: 顶格注释被吞了'
+grep -qx '  max-connections: 4096' "$_plugin/config" || fail 'surgical: 用户的 max-connections 被动过'
+grep -qx '    behavior: classical' "$_plugin/config" || fail 'surgical: behavior 没改成 classical'
+grep -qx '    path: cn_domains.yaml' "$_plugin/config" || fail 'surgical: provider 的绝对路径没换'
+[ "$(grep -c '^mixed-port: 7890' "$_plugin/config")" = 0 ] || fail 'surgical: 网关形态不该塞 mixed-port'
+grep -q '^  listen: "0.0.0.0:1053"' "$_plugin/config" || fail 'surgical: dns.listen 被重写了'
+grep -qx 'tun: null' "$_plugin/config" || fail 'surgical: tun: null 被改写了'
 
 # ---- "listeners: null" + router：补 tproxy 入口不能补出第二份 listeners ----
 # meow 重写 config 时把没设过的段写成 "listeners: null"；只认 "listeners:" 空块头的代码会

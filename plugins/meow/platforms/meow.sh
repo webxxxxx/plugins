@@ -173,23 +173,41 @@ is_port() {
 # 只做三件事：改顶层标量、删顶层键、改块内的标量。注释、顺序和缩进都原样保留，
 # 因为这份文件里还有订阅和规则，不能被重新序列化。
 
-# set_key <文件> <键> <值>：有就替换那一行，没有就追加到末尾。
+# set_key <文件> <键> <值>：有就替换那一行，没有就追加到末尾。值已经一样就一个字不动，
+# 行尾注释跟着留着（别把 "mixed-port: null   # 网关不需要…" 改成光秃秃一行）。
 set_key() {
     _tmp="$1.tmp.$$"
     awk -v key="$2" -v val="$3" '
+        function same(s,   v) {
+            v = s
+            sub("^" key ":[ \t]*", "", v)
+            sub(/[ \t]*#.*$/, "", v)
+            gsub(/^[ \t]+|[ \t]+$/, "", v)
+            gsub(/^["\047]|["\047]$/, "", v)
+            return v == val
+        }
         BEGIN { done = 0 }
-        $0 ~ "^" key ":[ \t]*" { print key ": " val; done = 1; next }
+        $0 ~ "^" key ":[ \t]*" {
+            if (same($0)) { print; done = 1; next }
+            comment = ""
+            if (match($0, /#.*/)) comment = " " substr($0, RSTART)
+            print key ": " val comment
+            done = 1
+            next
+        }
         { print }
         END { if (!done) print key ": " val }
     ' "$1" > "$_tmp" && mv "$_tmp" "$1"
 }
 
 # del_key <文件> <键>：删掉键本身和它下面的缩进行（块也跟着走）。
+# 顶格注释是和键平级的，不在块里，原样留着（删 tproxy-port 时别把下面那行
+# "# tproxy-sni 已废弃 …" 一起吃掉）。
 del_key() {
     _tmp="$1.tmp.$$"
     awk -v key="$2" '
         BEGIN { skip = 0 }
-        /^[^ \t#]/ {
+        /^[^ \t]/ {
             skip = ($0 ~ ("^" key ":[ \t]*"))
             if (skip) next
             print; next
@@ -310,6 +328,51 @@ heal_null_duplicates() {
     echo "meow: 配置里重复的 null 占位已清掉，同一个键只留真块" >&2
 }
 
+# rule-providers 里 file 型 provider 的 path 是绝对路径时（手搭的那套常写 /etc/sr/meow/…），
+# meow 会拒："path ... escapes the provider directory"——它的 provider 路径必须在 -d 里面。
+# 把这种文件搬进数据目录，path 行改写成文件名（原文件不动）；找不到文件就只改路径，反正
+# 原来也加载不了。
+fix_provider_paths() {
+    _abs=$(awk '
+        /^rule-providers:[ \t]*$/ { inrp = 1; next }
+        /^[^ \t#]/ { inrp = 0 }
+        inrp && /^[ \t]+path:[ \t]*/ {
+            v = $0
+            sub(/^[ \t]+path:[ \t]*/, "", v)
+            sub(/[ \t]*#.*$/, "", v)
+            gsub(/^["\047]|["\047]$/, "", v)
+            if (v ~ /^\//) print v
+        }
+    ' "$CONFIG" 2>/dev/null)
+    [ -n "$_abs" ] || return 0
+    printf '%s\n' "$_abs" | while IFS= read -r _p; do
+        [ -n "$_p" ] || continue
+        _b=${_p##*/}
+        if [ -f "$_p" ] && [ ! -f "$DATA/$_b" ]; then
+            cp "$_p" "$DATA/$_b.tmp.$$" 2>/dev/null && mv "$DATA/$_b.tmp.$$" "$DATA/$_b" 2>/dev/null
+        fi
+        echo "meow: rule-provider 的 $_p 换成数据目录里的 $_b（meow 只认 -d 里面的路径）" >&2
+    done
+    _tmp="$CONFIG.tmp.$$"
+    awk '
+        /^rule-providers:[ \t]*$/ { inrp = 1; print; next }
+        /^[^ \t#]/ { inrp = 0; print; next }
+        inrp && /^[ \t]+path:[ \t]*\// {
+            head = $0
+            sub(/path:[ \t]*\/.*$/, "path: ", head)
+            v = $0
+            sub(/^[ \t]+path:[ \t]*/, "", v)
+            sub(/[ \t]*#.*$/, "", v)
+            gsub(/^["\047]|["\047]$/, "", v)
+            n = split(v, parts, "/")
+            print head parts[n]
+            next
+        }
+        { print }
+    ' "$CONFIG" > "$_tmp" && mv "$_tmp" "$CONFIG"
+    return 0
+}
+
 # meow 不认识我们的键（proxy-mode 现在住在 state，另外两个是 router 的可选项）。
 strip_our_keys() {
     del_key "$1" proxy-mode
@@ -388,55 +451,61 @@ prepare_config() {
     strip_our_keys "$CONFIG"
     heal_null_duplicates "$CONFIG"
     fix_cn_domains_behavior "$CONFIG"
+    fix_provider_paths
     if [ ! -f "$STATE" ]; then
         write_state "$(mode_of 2>/dev/null || printf off)"
     fi
     return 0
 }
 
-# router 形态要一个 tproxy 入口：有就沿用（端口以它为准），没有就补一条。
-# 补的时候插在 listeners: 下面；连 listeners 块都没有就整块追加。
-# "listeners: null" / "~" / "[]" 是 meow 对「这个段没设过」的序列化（订阅一更新它就把
-# 整份 config 重写一遍）：先换成真块头再补。不这么办，追加出来的第二份 listeners 和它
-# 凑成同一个键两次，meow 报 duplicate entry with key "listeners" 直接起不来。
+# router 形态要一个 tproxy 入口：有就沿用（端口以它为准），没有就往 listeners 块尾补一条。
+#   - 块里的条目顶格写（"listeners:" 下面直接 "- name: …"）还是缩进写都行，按它现有的缩进
+#     补——混着写 YAML 会报错；
+#   - "listeners: null / ~ / []" 是 meow 对「这个段没设过」的序列化，先换成真块头再补；
+#   - 连 listeners 都没有才整块追加。
 ensure_tproxy_listener() {
     _port=$1
     [ -n "$(tproxy_entry)" ] && return 0
-    if grep -qE '^listeners:' "$CONFIG"; then
-        _tmp="$CONFIG.tmp.$$"
-        awk -v port="$_port" '
-            function item() {
+    _tmp="$CONFIG.tmp.$$"
+    awk -v port="$_port" '
+        function item(   pre_) {
+            print pre_ "- name: tproxy"
+            print pre_ "  type: tproxy"
+            print pre_ "  port: " port
+            print pre_ "  listen: 0.0.0.0"
+            print pre_ "  firewall: false"
+            done = 1
+        }
+        function indent_of(s) { match(s, /^[ \t]*/); return substr(s, 1, RLENGTH) }
+        BEGIN { inblock = 0; seen = 0; done = 0; pre = "  " }
+        {
+            # 块结束：顶格的、又不是列表条目的行。补在块尾，再打印这一行。
+            if (inblock && $0 !~ /^[ \t]*-/ && $0 ~ /^[^ \t]/) {
+                if (!done) item(pre)
+                inblock = 0
+            }
+            if (!inblock) {
+                if ($0 ~ /^listeners:[ \t]*$/) { inblock = 1; seen = 1; print; next }
+                if ($0 ~ /^listeners:[ \t]*(null|~|\[\])[ \t]*(#.*)?$/) {
+                    print "listeners:"; inblock = 1; seen = 1; next
+                }
+            }
+            if (inblock && $0 ~ /^[ \t]*-/) pre = indent_of($0)
+            print
+        }
+        END {
+            if (inblock && !done) item(pre)
+            if (!seen) {
+                print ""
+                print "listeners:"
                 print "  - name: tproxy"
                 print "    type: tproxy"
                 print "    port: " port
                 print "    listen: 0.0.0.0"
                 print "    firewall: false"
-                done = 1
             }
-            BEGIN { done = 0 }
-            /^listeners:[ \t]*$/ {
-                print
-                if (!done) item()
-                next
-            }
-            /^listeners:[ \t]*(null|~|\[\])[ \t]*(#.*)?$/ {
-                print "listeners:"
-                if (!done) item()
-                next
-            }
-            { print }
-        ' "$CONFIG" > "$_tmp" && mv "$_tmp" "$CONFIG"
-        return 0
-    fi
-    {
-        echo ""
-        echo "listeners:"
-        echo "  - name: tproxy"
-        echo "    type: tproxy"
-        echo "    port: $_port"
-        echo "    listen: 0.0.0.0"
-        echo "    firewall: false"
-    } >> "$CONFIG"
+        }
+    ' "$CONFIG" > "$_tmp" && mv "$_tmp" "$CONFIG"
     return 0
 }
 
@@ -458,25 +527,28 @@ tproxy_port() {
 # router 形态把入口放在 listeners: 里；切回 pc / off 时那条 tproxy 必须摘掉：顶层
 # tproxy-port 和它抢同一个端口，meow 报 "port 7893 already used by listener 'tproxy'"，
 # 插件直接起不来（页面上选过 tproxy 再选 tun 就撞这个）。只认我们补的那种写法
-# （- name: tproxy 加它下面的缩进项），别人的 listener 一个字不动。
+# （- name: tproxy 加它下面的缩进项），别人的 listener 一个字不动；条目顶格/缩进都认。
 remove_tproxy_listener() {
-    grep -qE '^listeners:[ \t]*$' "$CONFIG" 2>/dev/null || return 0
+    grep -qE '^listeners:' "$CONFIG" 2>/dev/null || return 0
     _tmp="$CONFIG.tmp.$$"
     awk '
+        function is_item(s) { return s ~ /^[ \t]*-[ \t]/ || s ~ /^[ \t]*-$/ }
         BEGIN { inblock = 0; skip = 0 }
-        /^[^ \t#]/ {
-            skip = 0
-            inblock = ($0 ~ /^listeners:[ \t]*$/)
-            print; next
-        }
         {
-            if (inblock && $0 ~ /^[ \t]*-[ \t]*(name:[ \t]*)?tproxy[ \t]*$/) { skip = 1; next }
-            if (inblock && $0 ~ /^[ \t]*-[ \t]/) skip = 0
-            if (skip) next
-            print
+            if ($0 ~ /^[^ \t]/ && !is_item($0)) {
+                skip = 0
+                inblock = ($0 ~ /^listeners:[ \t]*$/)
+                print; next
+            }
+            if (!inblock) { print; next }
+            if (is_item($0)) {
+                skip = ($0 ~ /^[ \t]*-[ \t]*(name:[ \t]*)?tproxy[ \t]*$/)
+                if (skip) next
+                print; next
+            }
+            if (!skip) print
         }
-    ' "$CONFIG" > "$_tmp" || { rm -f "$_tmp"; return 1; }
-    mv "$_tmp" "$CONFIG"
+    ' "$CONFIG" > "$_tmp" && mv "$_tmp" "$CONFIG"
     return 0
 }
 
@@ -495,9 +567,12 @@ apply_settings() {
     _mode=$1
     _port=$(yaml_number mixed-port 7890)
     is_port "$_port" || { echo "meow: mixed-port 不是端口：'$_port'" >&2; return 1; }
-    set_key "$CONFIG" mixed-port "$_port"
+    # 网关形态不需要 LAN 侧的 mixed-port：用户写成 null 就让它 null，别硬塞一个 7890 开给
+    # 整个 LAN。off / pc 才需要这个口。
+    [ "$_mode" = router ] || set_key "$CONFIG" mixed-port "$_port"
     # 订阅里带进来的 tun 块要关掉：三种形态的透明代理都不靠订阅自带的 tun。
-    if grep -qE '^tun:' "$CONFIG"; then
+    # "tun: null"（meow 序列化出来的空段）本来就是没开，不用改写它。
+    if grep -qE '^tun:[ \t]*$' "$CONFIG"; then
         set_block_key "$CONFIG" tun enable false
     fi
 
@@ -520,13 +595,16 @@ apply_settings() {
         set_key "$CONFIG" routing-mark "$_mark"
         ;;
     router)
-        # 入口是 listeners 里的 tproxy 项，顶层 tproxy-port 会和它抢端口。
-        del_key "$CONFIG" tproxy-port
-        del_key "$CONFIG" routing-mark
-        set_block_key "$CONFIG" dns enable true
+        # 入口是 listeners 里的 tproxy 项：顶层 tproxy-port 会让 meow 再开一个入口、和它
+        # 抢同一个端口，所以置空（不删行）；routing-mark 必须留着——meow 的出向靠它打
+        # SO_MARK，meow-fw.sh 的 "-m mark --mark … -j RETURN" 也认这个值。
+        set_key "$CONFIG" tproxy-port null
+        [ "$(dns_enable)" = true ] || set_block_key "$CONFIG" dns enable true
         _dns=$(our_or dns-port 1053)
         is_port "$_dns" || { echo "meow: dns-port 不是端口：'$_dns'" >&2; return 1; }
-        set_block_key "$CONFIG" dns listen "0.0.0.0:$_dns"
+        # 已经是 0.0.0.0:<dns-port> 就别重写（引号、行尾注释都留着）
+        [ "$(dns_listen)" = "0.0.0.0 $_dns" ] ||
+            set_block_key "$CONFIG" dns listen "0.0.0.0:$_dns"
         _tproxy=$(tproxy_port)
         is_port "$_tproxy" || { echo "meow: tproxy-port 不是端口：'$_tproxy'" >&2; return 1; }
         ensure_tproxy_listener "$_tproxy"
@@ -542,7 +620,8 @@ apply_settings() {
 # ---- router 形态 ----
 
 # listeners: 里第一个 type: tproxy 的条目 → "端口 firewall listen"。
-# 只支持块写法（- name: … 换行 port: …），一行流式 map 不认。
+# 只认块写法（- name: … 换行 port: …），一行流式 map 不认；条目和字段顶格、缩进都认
+# ——手写的网关配置常见 "listeners:" 下面直接顶格写 "- name: tproxy-tcp"。
 tproxy_entry() {
     awk '
     function clean(s) { sub(/[ \t]*#.*$/, "", s); gsub(/^[ \t]+|[ \t]+$/, "", s); gsub(/"/, "", s); return s }
@@ -554,10 +633,15 @@ tproxy_entry() {
         sub("^" key ":[ \t]*", "", s)
         return clean(s)
     }
+    function is_item(s) { return s ~ /^[ \t]*-[ \t]/ || s ~ /^[ \t]*-$/ }
     BEGIN { inblock = 0; done = 0; type = ""; port = ""; fw = ""; listen = "" }
-    /^[^ \t#]/ { inblock = ($0 ~ /^listeners:[ \t]*$/); next }
+    # 顶格行：新的顶层键结束 listeners 块；顶格写的 "- name: …" 仍是块里的条目。
+    /^[^ \t#]/ {
+        if (!is_item($0)) { inblock = ($0 ~ /^listeners:[ \t]*$/); next }
+        if (!inblock) next
+    }
     !inblock { next }
-    /^[ \t]*-[ \t]*/ {
+    is_item($0) {
         if (type == "tproxy") { print port, fw, listen; done = 1; exit }
         type = ""; port = ""; fw = ""; listen = ""
     }
@@ -618,7 +702,7 @@ load_router_params() {
     DNS_ADDR=${1:-}
     DNS_PORT=${2:-}
     DNS_ENABLE=$(dns_enable)
-    MARK=$(our routing-mark)
+    MARK=$(yaml_number routing-mark "$(our_or routing-mark 9527)")
     case "$MARK" in null) MARK='' ;; esac
 }
 
