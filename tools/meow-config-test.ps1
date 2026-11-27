@@ -73,6 +73,7 @@ function New-Fixture([string]$Name) {
     New-Item -ItemType Directory -Force -Path (Join-Path $payload 'lib') | Out-Null
     Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/config.yaml') (Join-Path $payload 'config.yaml')
     Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/Country.mmdb') (Join-Path $payload 'Country.mmdb')
+    Copy-Item (Join-Path $Repo 'plugins/meow/package/payload/cn_domains.yaml') (Join-Path $payload 'cn_domains.yaml')
     Write-Text (Join-Path $plugin 'config') (Get-MeowConfig)
 
     $script:PLUGIN_ROOT = $plugin
@@ -224,6 +225,20 @@ Write-Text $target 'updated-by-meow'
 Seed-DataFiles
 if ((Read-Text $target) -ne 'updated-by-meow') { Fail 'geodata: 覆盖了已有的库' }
 
+foreach ($name in @('GeoLite2-ASN.mmdb', 'geosite.dat')) {
+    $placeholder = Join-Path $DATA $name
+    if (-not (Test-Path -LiteralPath $placeholder)) { Fail "geodata: 没有 $name 的空占位" }
+    if ((Get-Item -LiteralPath $placeholder).Length -ne 0) { Fail "geodata: $name 的占位不是空的" }
+}
+
+# ---- 放在 config 旁边（<插件目录>\<名字>）的库也算数：搬进数据目录 ----
+$plugin = New-Fixture 'geodata-beside'
+Write-Text (Join-Path $plugin 'geosite.dat') "real-geosite`n"
+Write-Text (Join-Path $plugin 'GeoLite2-ASN.mmdb') "real-asn`n"
+Seed-DataFiles
+if ((Read-Text (Join-Path $DATA 'geosite.dat')) -notmatch 'real-geosite') { Fail 'geodata: config 旁边的 geosite.dat 没搬进数据目录' }
+if ((Read-Text (Join-Path $DATA 'GeoLite2-ASN.mmdb')) -notmatch 'real-asn') { Fail 'geodata: config 旁边的 GeoLite2-ASN.mmdb 没搬进数据目录' }
+
 # ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
 $plugin = New-Fixture 'data-placeholder'
 Write-Text $CONFIG (@(
@@ -266,6 +281,32 @@ $text = Read-Text $CONFIG
 if ($text -match 'type: tproxy') { Fail 'tproxy-listener: 那条 tproxy 没摘掉' }
 if ($text -notmatch 'type: hysteria2') { Fail 'tproxy-listener: 别人的 listener 被删了' }
 if ($text -notmatch '- name: hy2') { Fail 'tproxy-listener: 别人的 listener 名字被动了' }
+
+# ---- cn_domains 的表是古典写法：behavior 不能是 domain ----
+# domain 型把 "DOMAIN-SUFFIX,00cdn.com" 当成一个域名塞进 trie，永远匹配不到，日志还一声
+# 不响；1.3.5 之前的模板就是这么写的，启动时就地改过来。别的 provider 一个字不动。
+$plugin = New-Fixture 'cn-behavior'
+Seed-DataFiles   # 迁移要看数据目录里那份表是不是古典写法
+Write-Text $CONFIG (@(
+    'mixed-port: 7890'
+    'rule-providers:'
+    '  cn_domains:'
+    '    type: file'
+    '    behavior: domain'
+    '    path: cn_domains.yaml'
+    '  other:'
+    '    type: file'
+    '    behavior: domain'
+    '    path: other.yaml'
+    'rules:'
+    '  - RULE-SET,cn_domains,DIRECT'
+) -join "`n")
+Prepare-Config
+$text = Read-Text $CONFIG
+if ($text -notmatch '(?m)^    behavior: classical') { Fail 'cn-behavior: cn_domains 的 behavior 没改成 classical' }
+if (([regex]::Matches($text, 'behavior: domain')).Count -ne 1) { Fail 'cn-behavior: 别人的 behavior 也被改了' }
+$template = Read-Text (Join-Path $Repo 'plugins/meow/package/payload/config.yaml')
+if ($template -notmatch '(?m)^    behavior: classical') { Fail 'cn-behavior: 模板里的 behavior 不是 classical' }
 
 # ---- 迁移：1.2/1.3 的 meow.yaml 搬回 config，旧开关搬进 state ----
 $plugin = New-Fixture 'migrate'

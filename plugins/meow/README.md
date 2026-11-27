@@ -162,11 +162,22 @@ package/
   （两份都是有内容的块属于没见过的写法，不猜，让 meow 自己报错）。不清的话 YAML 直接
   `duplicate entry with key "tun"`，meow 一个字符都不认，插件就再也起不来；
 - 包里带了两份数据文件，第一次启动会放进数据目录，已经有的不动（可能是 meow 自己更新过的）：
-  `Country.mmdb`（约 130 KB 的精简库，别的 geo 库缺失时 meow 会自己下载）和
+  `Country.mmdb`（约 130 KB 的精简库）和
   `cn_domains.yaml`（`rule-providers` 里那份域名表）。后者非放数据目录不可：meow 的
   `file` 型 provider 的 `path` 相对数据目录解析，不许指到数据目录外面，留在安装目录里
   等于没带，每次启动都会报 `rule-provider 'cn_domains': payload prefetch failed`，
-  那条 `RULE-SET` 也就一直是空集；
+  那条 `RULE-SET` 也就一直是空集。那张表是 meow 的**古典写法**（`DOMAIN-SUFFIX,…` /
+  `DOMAIN,…` / `DOMAIN-WILDCARD,…`），所以 `behavior` 必须是 `classical`：写成 `domain`
+  会把每条原样当成一个域名塞进 trie，`DOMAIN-SUFFIX,00cdn.com` 变成一条永远匹配不到的
+  字面域名——不报错、不给警告，规则集等于空的。1.3.6 之前写下的 `domain` 会在启动时就地
+  改成 `classical`，别的 provider 不动；
+- meow 只在自己的家目录（`<插件目录>/data`）里找 geo 库和 provider 的表。把同名文件放在
+  `config` 旁边（`<插件目录>/Country.mmdb` 这种，手搭的那套就是 config 和库放一个目录）
+  也行：启动时会搬进数据目录，已有的不覆盖。`GeoLite2-ASN.mmdb` 和 `geosite.dat` 都没有
+  时会各放一个**空文件**占位——meow 只在文件缺失时才去 GitHub 下，而 GEOIP / GEOSITE /
+  IP-ASN 规则一用到就下，设备的上游还没通时那一段会一直卡着。空的代价：GEOSITE 规则
+  不命中（跟没库一样），IP-ASN 规则会当场报「GeoLite2-ASN 库加载失败」而不是卡在下载上；
+  真有库就替换掉这两个空文件；
 - 从 1.2/1.3 升级：旧的 `<插件目录>/meow.yaml` 会被搬回 `config`，旧的 `proxy-mode` 搬进 `state`；
 - 更老的布局（开关和订阅写在一起）也认，插件会把自己的键摘出来放进 `state`；
 - 想把 `config` 恢复出厂：删掉它再 `plugin restart meow`。

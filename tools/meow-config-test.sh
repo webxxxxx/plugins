@@ -245,6 +245,34 @@ grep -q 'type: tproxy' "$_plugin/config" && fail 'router-leave: 切到 off 之�
 grep -qx '  listen: 127.0.0.1:5353' "$_plugin/config" || fail 'router-leave: 切到 off 之后 dns.listen 没还原'
 grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'router-leave: 切到 off 之后 tproxy-port 还在'
 
+# ---- cn_domains 的表是古典写法：behavior 不能是 domain ----
+# domain 型把 "DOMAIN-SUFFIX,00cdn.com" 当成一个域名塞进 trie，永远匹配不到，日志还一声
+# 不响；1.3.5 之前的模板就是这么写的，启动时就地改过来。别的 provider 一个字不动。
+fixture "$WORK/cn-behavior"
+cat > "$_plugin/config" <<'CB'
+mixed-port: 7890
+rule-providers:
+  cn_domains:
+    type: file
+    behavior: domain
+    path: cn_domains.yaml
+  other:
+    type: file
+    behavior: domain
+    path: other.yaml
+rules:
+  - RULE-SET,cn_domains,DIRECT
+CB
+run_meow mode >/dev/null
+grep -qx '    behavior: classical' "$_plugin/config" ||
+    fail 'cn-behavior: cn_domains 的 behavior 没改成 classical'
+[ "$(grep -c 'behavior: domain' "$_plugin/config")" = 1 ] ||
+    fail 'cn-behavior: 别人的 behavior 也被改了'
+grep -q 'DOMAIN-SUFFIX,' "$_plugin/data/cn_domains.yaml" ||
+    fail 'cn-behavior: 落下去的表不是古典写法'
+grep -qx '    behavior: classical' "$REPO/plugins/meow/package/payload/config.yaml" ||
+    fail 'cn-behavior: 模板里的 behavior 不是 classical'
+
 # ---- 包里带的数据文件：第一次落地到数据目录，之后不覆盖 ----
 # Country.mmdb 是 GEOIP 规则要用的库；cn_domains.yaml 是 file 型 rule-provider 的表，而
 # file 型的 path 相对数据目录解析——留在安装目录里等于没带，meow 每次启动都报
@@ -256,13 +284,34 @@ for _f in Country.mmdb cn_domains.yaml; do
     cmp -s "$_plugin/1.3.0/payload/$_f" "$_plugin/data/$_f" ||
         fail "geodata: 落下去的不是包里那份 $_f"
 done
+# meow 缺这两份库时会自己去 GitHub 下（GEOIP / GEOSITE / IP-ASN 规则一用到就下），设备
+# 上游还没通时那一步会一直卡着：先放空占位，别让启动挂在下载上。
+for _f in GeoLite2-ASN.mmdb geosite.dat; do
+    [ -f "$_plugin/data/$_f" ] || fail "geodata: 没有 $_f 的空占位"
+    [ -s "$_plugin/data/$_f" ] && fail "geodata: $_f 的占位不是空的"
+done
 echo 'updated-by-meow' > "$_plugin/data/Country.mmdb"
 echo 'updated-by-meow' > "$_plugin/data/cn_domains.yaml"
+echo 'real-asn' > "$_plugin/data/GeoLite2-ASN.mmdb"
 run_meow mode >/dev/null
 grep -qx 'updated-by-meow' "$_plugin/data/Country.mmdb" ||
     fail 'geodata: 覆盖了数据目录里已有的库'
-grep -qx 'updated-by-meow' "$_plugin/data/cn_domains.yaml" ||
-    fail 'geodata: 覆盖了数据目录里已有的域名表'
+grep -qx 'real-asn' "$_plugin/data/GeoLite2-ASN.mmdb" ||
+    fail 'geodata: 覆盖了数据目录里已有的 ASN 库'
+
+# ---- 放在 config 旁边（<插件目录>/<名字>）的库也算数：搬进数据目录 ----
+# 手搭的那套把 config.yaml 和 geo 库、域名表放在同一个目录里，meow 在那儿自动找得到；
+# 插件这边 meow 的家目录是 <插件目录>/data，所以启动时把它们搬进去。
+fixture "$WORK/geodata-beside"
+printf 'real-geosite\n' > "$_plugin/geosite.dat"
+printf 'real-asn\n' > "$_plugin/GeoLite2-ASN.mmdb"
+run_meow mode >/dev/null
+grep -qx 'real-geosite' "$_plugin/data/geosite.dat" ||
+    fail 'geodata: config 旁边的 geosite.dat 没搬进数据目录'
+grep -qx 'real-asn' "$_plugin/data/GeoLite2-ASN.mmdb" ||
+    fail 'geodata: config 旁边的 GeoLite2-ASN.mmdb 没搬进数据目录'
+grep -q 'DOMAIN-SUFFIX,' "$_plugin/data/cn_domains.yaml" ||
+    fail 'geodata: 包里的域名表没落地'
 
 # ---- 老配置里残留的 @DATA@：启动时换成真数据目录（否则 GeoIP 库按字面路径打不开）----
 fixture "$WORK/data-placeholder"

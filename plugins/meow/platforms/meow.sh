@@ -49,22 +49,39 @@ STATE="$PLUGIN_ROOT/state"                       # 我们自己的：只缓存�
 FW="$HERE/meow-fw.sh"
 SDK="$ROOT/lib/svcd-plugin.sh"                   # 宿主 SDK：通道循环与能力分发
 
-# 包里带的两样东西落进数据目录：
-#   Country.mmdb     精简版（130 KB）：很多路由器直连不通 GitHub，meow 自己下 7 MB 会失败，
-#                    而 GEOIP 规则没有库整份配置都起不来；
-#   cn_domains.yaml  file 型 rule-provider 的表。
-# 数据目录里已经有了就不动——那可能是 meow 自己更新过的。cn_domains.yaml 非放这儿不可：
-# meow 的 file 型 path 相对数据目录解析（resolve_contained），不许指到数据目录外面，留在
-# 安装目录里等于没带，每次启动都报 payload prefetch failed、那条 RULE-SET 一直是空集。
+# meow 的 geo 库和 rule-provider 的表都只在它的「家目录」（-d，也就是 <插件目录>/data）
+# 里找：file 型 provider 的 path 还受 resolve_contained 约束，指不到数据目录外面。所以
+# 放在 config 旁边（<插件目录>/<名字>，手搭的那套就是这么放的）也得搬进来才算数：
+#   Country.mmdb      精简版（130 KB）：很多路由器直连不通 GitHub，meow 自己下 7 MB 会失败，
+#                     而 GEOIP 规则没有库整份配置都起不来；
+#   cn_domains.yaml   file 型 rule-provider 的表（古典写法，DOMAIN-SUFFIX,…）；
+#   GeoLite2-ASN.mmdb / geosite.dat  见下面空的占位。
+# 数据目录里已经有了就不动——那可能是 meow 自己更新过的。
 seed_data_files() {
-    for _name in Country.mmdb cn_domains.yaml; do
-        [ -f "$ROOT/$_name" ] || continue
+    for _name in Country.mmdb cn_domains.yaml GeoLite2-ASN.mmdb geosite.dat; do
         [ -f "$DATA/$_name" ] && continue
+        _src=''
+        if [ -f "$PLUGIN_ROOT/$_name" ]; then
+            _src="$PLUGIN_ROOT/$_name"
+        elif [ -f "$ROOT/$_name" ]; then
+            _src="$ROOT/$_name"
+        fi
+        [ -n "$_src" ] || continue
         _seed="$DATA/$_name.tmp.$$"
-        if cp "$ROOT/$_name" "$_seed" 2>/dev/null && mv "$_seed" "$DATA/$_name" 2>/dev/null; then
-            echo "meow: 已把包里的 $_name 放进 $DATA" >&2
+        if cp "$_src" "$_seed" 2>/dev/null && mv "$_seed" "$DATA/$_name" 2>/dev/null; then
+            echo "meow: 已把 $_src 放进 $DATA" >&2
         else
             rm -f "$_seed"
+        fi
+    done
+    # 这两份 meow 只在文件缺失时去 GitHub 下，而 GEOIP / GEOSITE / IP-ASN 规则一用到就下：
+    # 路由器的上游还没通时那一步会一直卡着，插件跟着起不来。放个空文件占位，meow 就当它
+    # 存在——用不到就不读；用到了 GEOSITE 只是不命中，IP-ASN 会当场报「库加载失败」而不是
+    # 卡在下载上。有真的库就替换掉这两个空文件。
+    for _name in GeoLite2-ASN.mmdb geosite.dat; do
+        [ -f "$DATA/$_name" ] && continue
+        if : > "$DATA/$_name" 2>/dev/null; then
+            echo "meow: 已放一个空的 $_name 占位，免得 meow 去 GitHub 下（有真的就替换掉它）" >&2
         fi
     done
     return 0
@@ -300,6 +317,50 @@ strip_our_keys() {
     del_key "$1" dns-port
 }
 
+# 包里那份 cn_domains.yaml 是 mihomo 的古典写法（DOMAIN-SUFFIX,… / DOMAIN,… /
+# DOMAIN-WILDCARD,…），而 1.3.5 之前的模板把它声明成 behavior: domain。domain 型把每条原样
+# 当域名塞进 trie，"DOMAIN-SUFFIX,00cdn.com" 于是成了一条永远匹配不到的字面域名——不报错、
+# 不给警告，规则集等于空的。旧配置里的 domain 就地改成 classical；别的 provider 一个字不动。
+fix_cn_domains_behavior() {
+    grep -qE '^rule-providers:' "$1" 2>/dev/null || return 0
+    grep -qE '^[[:space:]]+behavior:[[:space:]]*domain[[:space:]]*$' "$1" || return 0
+    # 只在数据目录里那份表确实是古典写法时才动。用户自己换成一张纯域名表的话，
+    # behavior: domain 反而是对的。
+    grep -q 'DOMAIN-' "$DATA/cn_domains.yaml" 2>/dev/null || return 0
+    _tmp="$1.tmp.$$"
+    awk '
+        # 顶层键：rule-providers 开始，别的顶层键结束。
+        /^[^ \t#]/ {
+            inproviders = ($0 ~ /^rule-providers:[ \t]*$/)
+            ours = -1
+            print; next
+        }
+        {
+            if (inproviders) {
+                line = $0
+                sub(/^[ \t]+/, "", line)
+                ind = length($0) - length(line)
+                if (ind == 0) { print; next }
+                # provider 名那一行：记住缩进，它就是我们的那一段的起点。
+                if (line ~ /^cn_domains:[ \t]*$/) { ours = ind; print; next }
+                # 回到同级或更浅的缩进，说明 cn_domains 这一段结束了。
+                if (ours >= 0 && ind <= ours) { ours = -1 }
+                if (ours >= 0 && line ~ /^behavior:[ \t]*domain[ \t]*$/) {
+                    sub(/domain[ \t]*$/, "classical")
+                }
+            }
+            print
+        }
+    ' "$1" > "$_tmp" || { rm -f "$_tmp"; return 1; }
+    if cmp -s "$1" "$_tmp"; then
+        rm -f "$_tmp"
+        return 0
+    fi
+    mv "$_tmp" "$1" || { rm -f "$_tmp"; return 1; }
+    echo "meow: rule-providers.cn_domains 的 behavior 改成 classical（那份表是古典写法）" >&2
+    return 0
+}
+
 # 保证 <插件目录>/config 是 meow 的配置且干净：
 #   1.2/1.3 把 meow 的配置放在 meow.yaml，搬回 config，旧开关搬进 state；
 #   更老的布局把开关和订阅写在一起，把我们那几个键挪走。
@@ -326,6 +387,7 @@ prepare_config() {
     migrate_state "$CONFIG"
     strip_our_keys "$CONFIG"
     heal_null_duplicates "$CONFIG"
+    fix_cn_domains_behavior "$CONFIG"
     if [ ! -f "$STATE" ]; then
         write_state "$(mode_of 2>/dev/null || printf off)"
     fi

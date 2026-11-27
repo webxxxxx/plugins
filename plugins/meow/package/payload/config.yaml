@@ -42,10 +42,14 @@ geodata:
   asn-path: '@DATA@/GeoLite2-ASN.mmdb'
   geosite-path: '@DATA@/geosite.dat'
 
+# 包里那份 cn_domains.yaml 是 mihomo 的古典写法（DOMAIN-SUFFIX,… / DOMAIN,… /
+# DOMAIN-WILDCARD,…），所以 behavior 必须是 classical。写成 domain 的后果很安静：meow 把每条
+# 当成一个域名塞进 trie，"DOMAIN-SUFFIX,00cdn.com" 变成一条永远匹配不到的字面域名，日志一声
+# 不响，规则集等于空的。老版本写下的 domain 会在启动时就地改过来。
 rule-providers:
   cn_domains:
     type: file
-    behavior: domain
+    behavior: classical
     path: cn_domains.yaml
 
 rules:

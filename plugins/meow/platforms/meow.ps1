@@ -79,24 +79,41 @@ function Write-Note([string]$Text) {
     [Console]::Error.WriteLine("meow: $Text")
 }
 
-# 包里带的两样东西落进数据目录：
-#   Country.mmdb     精简版（130 KB）：很多设备直连不通 GitHub，meow 自己下 7 MB 会失败，
-#                    而 GEOIP 规则没有库整份配置都起不来；
-#   cn_domains.yaml  file 型 rule-provider 的表。
-# 数据目录里已经有了就不动——那可能是 meow 自己更新过的。cn_domains.yaml 非放这儿不可：
-# meow 的 file 型 path 相对数据目录解析（resolve_contained），不许指到数据目录外面，留在
-# 安装目录里等于没带，每次启动都报 payload prefetch failed、那条 RULE-SET 一直是空集。
+# meow 的 geo 库和 rule-provider 的表都只在它的「家目录」（-d，也就是 <插件目录>\data）里找：
+# file 型 provider 的 path 还受 resolve_contained 约束，指不到数据目录外面。所以放在 config
+# 旁边（<插件目录>\<名字>，手搭的那套就是这么放的）也得搬进来才算数：
+#   Country.mmdb / cn_domains.yaml  包里带的，见 payload；
+#   GeoLite2-ASN.mmdb / geosite.dat 见下面空的占位。
+# 数据目录里已经有了就不动——那可能是 meow 自己更新过的。
 function Seed-DataFiles {
-    foreach ($name in @('Country.mmdb', 'cn_domains.yaml')) {
-        $source = Join-Path $ROOT $name
-        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { continue }
+    foreach ($name in @('Country.mmdb', 'cn_domains.yaml', 'GeoLite2-ASN.mmdb', 'geosite.dat')) {
+        $target = Join-Path $DATA $name
+        if (Test-Path -LiteralPath $target -PathType Leaf) { continue }
+        $beside = Join-Path $PLUGIN_ROOT $name
+        $source = $null
+        if (Test-Path -LiteralPath $beside -PathType Leaf) {
+            $source = $beside
+        } elseif (Test-Path -LiteralPath (Join-Path $ROOT $name) -PathType Leaf) {
+            $source = Join-Path $ROOT $name
+        }
+        if (-not $source) { continue }
+        try {
+            Copy-Item -LiteralPath $source -Destination $target -Force
+            Write-Note "已把 $source 放进 $DATA"
+        } catch {
+            Write-Note "$name 放不进 $DATA（$($_.Exception.Message)）"
+        }
+    }
+    # 这两份 meow 只在文件缺失时去 GitHub 下，而 GEOIP / GEOSITE / IP-ASN 规则一用到就下：
+    # 设备的上游还没通时那一步会一直卡着，插件跟着起不来。放个空文件占位，meow 就当它存在。
+    foreach ($name in @('GeoLite2-ASN.mmdb', 'geosite.dat')) {
         $target = Join-Path $DATA $name
         if (Test-Path -LiteralPath $target -PathType Leaf) { continue }
         try {
-            Copy-Item -LiteralPath $source -Destination $target -Force
-            Write-Note "已把包里的 $name 放进 $DATA"
+            New-Item -ItemType File -Force -Path $target | Out-Null
+            Write-Note "已放一个空的 $name 占位，免得 meow 去 GitHub 下（有真的就替换掉它）"
         } catch {
-            Write-Note "$name 放不进 $DATA（$($_.Exception.Message)）"
+            Write-Note "$name 占位放不进 $DATA（$($_.Exception.Message)）"
         }
     }
 }
@@ -330,6 +347,53 @@ function Repair-NullDuplicates([string]$Path) {
     }
 }
 
+# 包里那份 cn_domains.yaml 是 mihomo 的古典写法（DOMAIN-SUFFIX,… / DOMAIN,… /
+# DOMAIN-WILDCARD,…），而 1.3.5 之前的模板把它声明成 behavior: domain。domain 型把每条原样
+# 当域名塞进 trie，"DOMAIN-SUFFIX,00cdn.com" 于是成了一条永远匹配不到的字面域名——不报错、
+# 不给警告，规则集等于空的。旧配置里的 domain 就地改成 classical；别的 provider 一个字不动。
+function Repair-CnDomainsBehavior([string]$Path) {
+    # 只在数据目录里那份表确实是古典写法时才动。用户自己换成一张纯域名表的话，
+    # behavior: domain 反而是对的。
+    $payload = Join-Path $DATA 'cn_domains.yaml'
+    if (-not (Test-Path -LiteralPath $payload -PathType Leaf)) { return }
+    if (([System.IO.File]::ReadAllText($payload)) -notmatch 'DOMAIN-') { return }
+    $lines = [System.IO.File]::ReadAllLines($Path)
+    $out = New-Object System.Collections.Generic.List[string]
+    $inProviders = $false
+    $ours = -1
+    $changed = $false
+    foreach ($line in $lines) {
+        if ($line -match '^[^\s#]') {
+            $inProviders = ($line -match '^rule-providers:\s*$')
+            $ours = -1
+            $out.Add($line)
+            continue
+        }
+        if ($inProviders) {
+            $body = $line.Trim()
+            $indent = $line.Length - $line.TrimStart().Length
+            if ($indent -gt 0) {
+                if ($body -match '^cn_domains:\s*$') {
+                    $ours = $indent
+                    $out.Add($line)
+                    continue
+                }
+                if ($ours -ge 0 -and $indent -le $ours) { $ours = -1 }
+                if ($ours -ge 0 -and $body -match '^behavior:\s*domain\s*$') {
+                    $out.Add(($line -replace 'domain\s*$', 'classical'))
+                    $changed = $true
+                    continue
+                }
+            }
+        }
+        $out.Add($line)
+    }
+    if ($changed) {
+        Write-Lines $Path $out
+        Write-Note 'rule-providers.cn_domains 的 behavior 改成 classical（那份表是古典写法）'
+    }
+}
+
 # @DATA@ 是写进 YAML 里的：Windows 路径的反斜杠在双引号标量里会被当成转义
 # （\P 直接让配置解析失败）。正斜杠两边都认，也不会让 YAML 翻脸。
 function Get-DataPath {
@@ -400,6 +464,7 @@ function Prepare-Config {
     Migrate-State $CONFIG
     Remove-OurKeys $CONFIG
     Repair-NullDuplicates $CONFIG
+    Repair-CnDomainsBehavior $CONFIG
     if (-not (Test-Path -LiteralPath $STATE -PathType Leaf)) { Write-State (Get-Mode) }
 }
 
