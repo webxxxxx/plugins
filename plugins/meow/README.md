@@ -95,6 +95,12 @@ package/
 装好之后插件目录里是两个文件：`config`（meow 的订阅与规则，`plugin editconfig meow` 编辑它）
 和 `state`（插件自己的代理类型缓存）。
 
+设备上安装要留大约**两倍包大小**的空闲空间：宿主要把新版本整份解开（每个平台 12–15 MB），
+这期间旧版本还在，装完才删。分区只剩十几 MB 时会报 `not enough space to install: need …`；
+先腾地方，或者备份 `config` / `state` 之后卸掉旧版本再装。二进制已经是 `opt-level = "z"`
++ LTO + strip，10 MB 左右基本就是这个功能集的下限，包里其余是 yacd 面板和 130 KB 的
+`Country.mmdb`。
+
 打包前会清掉别的平台留下的同名产物（`meow` ↔ `meow.exe`），所以每个平台的包
 里只有自己那份内核。
 
