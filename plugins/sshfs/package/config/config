@@ -1,0 +1,33 @@
+# SSHFS 挂载配置
+#
+# 安装时本文件被复制到 <插件目录>/config；改完执行：svc restart sshfs
+#
+# 位置约定：
+#   配置   <插件目录>/config          本文件，宿主管理
+#   密钥   <插件目录>/data/ssh/       SSHFS_KEY 默认 data/ssh/id_ed25519；
+#                                     文件不存在时首次启动生成一套 ed25519 密钥
+#   日志   stderr                     宿主写进 <日志目录>/sshfs.log 并轮转
+#                                     （Linux 默认 /var/log/svcd）
+#
+# 下面四项没有默认值，必须填（不填启动会报错）：
+#   SSHFS_HOST   远端地址
+#   SSHFS_USER   登录用户
+#   SSHFS_PATH   要挂载的远端目录
+#   SSHFS_PORT   SSH 端口
+#
+# SSHFS_HOST=192.168.10.45
+# SSHFS_USER=root
+# SSHFS_PATH=/root/zte
+# SSHFS_PORT=22
+
+# 以下都可以省略：
+#   SSHFS_MNT   挂载点，默认 data/mnt（插件目录内）；也可以写绝对路径挂到别处
+#   SSHFS_KEY   私钥路径，默认 data/ssh/id_ed25519；也可以写绝对路径
+#   SSHFS_ALIVE ServerAliveInterval，默认 15
+#
+# 相对路径按插件目录解释。未填 SSHFS_KEY 时首次启动生成密钥，
+# 公钥写到 <SSHFS_KEY>.pub，加到远端用户的 ~/.ssh/authorized_keys。
+#
+# SSHFS_MNT=data/mnt
+# SSHFS_KEY=data/ssh/id_ed25519
+# SSHFS_ALIVE=15
