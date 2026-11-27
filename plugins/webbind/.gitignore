@@ -1,0 +1,6 @@
+/out
+/dist
+
+# 本插件没有编译产物：payload/bin 里的 .sh 就是源码，别的都别进包
+/package/payload/bin/*
+!/package/payload/bin/*.sh

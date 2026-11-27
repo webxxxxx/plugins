@@ -1,0 +1,7 @@
+{
+  "name": "webbind",
+  "language": "shell",
+  "platforms": [
+    "aarch64-unknown-linux-musl"
+  ]
+}

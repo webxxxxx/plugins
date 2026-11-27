@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "id": "webbind",
+  "name": "厂商后台插件入口",
+  "version": "1.0.0",
+  "desc": "把插件页与「应用插件」菜单接进厂商 httpd：bind mount + app.js 菜单注入，停止时还原原厂后台",
+  "protocol": 1,
+  "compat": {
+    "devices": [
+      "sr6110"
+    ]
+  },
+  "interpreter": {
+    "name": "sh"
+  },
+  "exec": {
+    "path": "payload/bin/webbind.sh",
+    "args": [
+      "start"
+    ],
+    "ready": "exec"
+  },
+  "lifecycle": {
+    "stop": {
+      "path": "payload/bin/webbind.sh",
+      "args": [
+        "stop"
+      ],
+      "timeout": 20
+    },
+    "status": {
+      "path": "payload/bin/webbind.sh",
+      "args": [
+        "status"
+      ]
+    }
+  },
+  "capabilities": []
+}
