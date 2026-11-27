@@ -424,6 +424,24 @@ fix_cn_domains_behavior() {
     return 0
 }
 
+# meow 面板上"添加订阅"会用订阅里那份 rules 整体替换本地的：订阅里没带 rules 时，本地的
+# 规则就只剩 "rules: []"（实测 3855 条规则一声不响全没），代理按最后那条兜底走。这里只提示、
+# 不动文件——meow 每次保存前会把旧配置改名成 config.yaml.bak，想找回来从那儿抄。
+warn_rules_wiped() {
+    [ -f "$CONFIG.bak" ] || return 0
+    grep -q '^subscriptions:' "$CONFIG" 2>/dev/null || return 0
+    _items=$(awk '
+        /^rules:[ \t]*(\[\])?[ \t]*(#.*)?$/ { inblock = 1; next }
+        /^[^ \t#]/ { inblock = 0 }
+        inblock && /^[ \t]*-[ \t]/ { n++ }
+        END { print n + 0 }
+    ' "$CONFIG" 2>/dev/null)
+    [ "${_items:-0}" = 0 ] || return 0
+    grep -qE '^[ \t]*-[ \t]' "$CONFIG.bak" 2>/dev/null || return 0
+    echo "meow: 配置里 rules 是空的（添加订阅时被订阅内容顶掉了），加之前那份在 $CONFIG.bak" >&2
+    return 0
+}
+
 # 保证 <插件目录>/config 是 meow 的配置且干净：
 #   1.2/1.3 把 meow 的配置放在 meow.yaml，搬回 config，旧开关搬进 state；
 #   更老的布局把开关和订阅写在一起，把我们那几个键挪走。
@@ -452,6 +470,7 @@ prepare_config() {
     heal_null_duplicates "$CONFIG"
     fix_cn_domains_behavior "$CONFIG"
     fix_provider_paths
+    warn_rules_wiped
     if [ ! -f "$STATE" ]; then
         write_state "$(mode_of 2>/dev/null || printf off)"
     fi
@@ -526,28 +545,58 @@ tproxy_port() {
 
 # router 形态把入口放在 listeners: 里；切回 pc / off 时那条 tproxy 必须摘掉：顶层
 # tproxy-port 和它抢同一个端口，meow 报 "port 7893 already used by listener 'tproxy'"，
-# 插件直接起不来（页面上选过 tproxy 再选 tun 就撞这个）。只认我们补的那种写法
-# （- name: tproxy 加它下面的缩进项），别人的 listener 一个字不动；条目顶格/缩进都认。
+# 插件直接起不来（页面上选过 tproxy 再选 tun 就撞这个）。
+# 认三种写法：我们补的 "- name: tproxy"、手写的 "- name: tproxy-tcp"、任何自己写着
+# "type: tproxy" 的条目（meow 重写配置之后条目是顶格的，名字照抄用户的）。别人的
+# listener 一个字不动；条目顶格/缩进都认。
 remove_tproxy_listener() {
     grep -qE '^listeners:' "$CONFIG" 2>/dev/null || return 0
     _tmp="$CONFIG.tmp.$$"
     awk '
         function is_item(s) { return s ~ /^[ \t]*-[ \t]/ || s ~ /^[ \t]*-$/ }
-        BEGIN { inblock = 0; skip = 0 }
+        function clean(s) { sub(/[ \t]*#.*$/, "", s); gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+        function field(line, key,   s) {
+            s = line
+            sub(/^[ \t]*/, "", s)
+            sub(/^-[ \t]*/, "", s)
+            if (index(s, key ":") != 1) return ""
+            s = substr(s, length(key) + 2)
+            return clean(s)
+        }
+        # 条目先攒着：要看它下面的 type 才知道是不是 tproxy 入口。
+        function ours() {
+            if (name ~ /^tproxy(-[A-Za-z0-9_.-]+)?$/) return 1
+            if (type == "tproxy") return 1
+            return (raw ~ /^[ \t]*-[ \t]*tproxy[ \t]*$/)
+        }
+        function flush(   i) {
+            if (n == 0) return
+            if (!ours()) for (i = 1; i <= n; i++) print buf[i]
+            n = 0
+        }
+        BEGIN { inblock = 0; n = 0; name = ""; type = ""; raw = "" }
         {
-            if ($0 ~ /^[^ \t]/ && !is_item($0)) {
-                skip = 0
+            if (is_item($0)) {
+                if (!inblock) { print; next }
+                flush()
+                n = 1; buf[n] = $0; raw = $0
+                name = field($0, "name"); type = field($0, "type")
+                next
+            }
+            if ($0 ~ /^[^ \t#]/) {
+                flush()
                 inblock = ($0 ~ /^listeners:[ \t]*$/)
                 print; next
             }
-            if (!inblock) { print; next }
-            if (is_item($0)) {
-                skip = ($0 ~ /^[ \t]*-[ \t]*(name:[ \t]*)?tproxy[ \t]*$/)
-                if (skip) next
-                print; next
+            if (n > 0) {
+                n++; buf[n] = $0
+                if (name == "") name = field($0, "name")
+                if (type == "") type = field($0, "type")
+                next
             }
-            if (!skip) print
+            print
         }
+        END { flush() }
     ' "$CONFIG" > "$_tmp" && mv "$_tmp" "$CONFIG"
     return 0
 }
@@ -599,6 +648,15 @@ apply_settings() {
         # 抢同一个端口，所以置空（不删行）；routing-mark 必须留着——meow 的出向靠它打
         # SO_MARK，meow-fw.sh 的 "-m mark --mark … -j RETURN" 也认这个值。
         set_key "$CONFIG" tproxy-port null
+        # meow 面板上"添加订阅"时，它把整份配置按内存里的 raw 重写一遍：文件里原本没有的
+        # 键会被写成 "routing-mark: null"（注释、顺序也一起没了）。meow 没有 mark 就不给
+        # 自己的出向打 SO_MARK，而 meow-fw.sh 装的那条放行规则认的是这个值，于是两边对不上。
+        # 所以这里把它当受管键写一遍：配置里已有的数字 → state → 9527。
+        _mark=$(yaml_number routing-mark "$(our_or routing-mark 9527)")
+        case "$_mark" in
+            ''|*[!0-9]*) echo "meow: routing-mark 只能是数字：'$_mark'" >&2; return 1 ;;
+        esac
+        set_key "$CONFIG" routing-mark "$_mark"
         [ "$(dns_enable)" = true ] || set_block_key "$CONFIG" dns enable true
         _dns=$(our_or dns-port 1053)
         is_port "$_dns" || { echo "meow: dns-port 不是端口：'$_dns'" >&2; return 1; }
@@ -744,13 +802,14 @@ validate_router() {
         echo "meow: 没有可用的 dns.listen，跳过 DNS 劫持（只劫持 TCP）" >&2
         DNS_PORT=''
     fi
-    if [ -z "$MARK" ]; then
-        echo "meow: config 里没有 routing-mark，跳过 SO_MARK 放行规则" >&2
-    else
-        case "$MARK" in
-            *[!0-9]*) router_hint "routing-mark 不是数字：'$MARK'"; return 1 ;;
-        esac
-    fi
+    # 0 等于“不设”：iptables 的 "--mark 0" 匹配的是所有没打标的包，那条 RETURN 会把整个
+    # 劫持全放过去（表上看规则都在，实际一个包都不进 meow）。
+    case "$MARK" in
+        '') echo "meow: config 里没有 routing-mark，跳过 SO_MARK 放行规则" >&2 ;;
+        0) echo "meow: routing-mark 是 0（等于不设 mark），跳过 SO_MARK 放行规则" >&2
+           MARK='' ;;
+        *[!0-9]*) router_hint "routing-mark 不是数字：'$MARK'"; return 1 ;;
+    esac
     case "$(sed -n 's/^ipv6:[[:space:]]*\([a-z]*\).*/\1/p' "$CONFIG" | head -n 1)" in
         true) echo "meow: ipv6: true 而规则只做 v4 REDIRECT，LAN 客户端的 AAAA 会绕过代理；网关形态建议 ipv6: false" >&2 ;;
     esac

@@ -259,18 +259,36 @@ function Remove-TproxyListener([string]$Path) {
     $lines = [System.IO.File]::ReadAllLines($Path)
     $out = New-Object System.Collections.Generic.List[string]
     $inBlock = $false
-    $skip = $false
-    foreach ($line in $lines) {
-        if ($line -match '^[^\s#]') {
-            $skip = $false
-            $inBlock = ($line -match '^listeners:\s*$')
+    $i = 0
+    while ($i -lt $lines.Count) {
+        $line = $lines[$i]
+        $isItem = ($line -match '^[ \t]*-([ \t]|$)')
+        if (-not $isItem) {
+            # 列表条目顶格写也算，它不是“块结束”；只有别的顶层键才结束 listeners 块。
+            if ($line -match '^[^ \t#]') { $inBlock = ($line -match '^listeners:\s*$') }
             $out.Add($line)
+            $i++
             continue
         }
-        if ($inBlock -and $line -match '^\s*-\s*(name:\s*)?tproxy\s*$') { $skip = $true; continue }
-        if ($inBlock -and $line -match '^\s*-\s') { $skip = $false }
-        if ($skip) { continue }
-        $out.Add($line)
+        # 一个条目连它下面缩进的字段一起拿出来：要看 type 才知道是不是 tproxy 入口。
+        $j = $i + 1
+        while ($j -lt $lines.Count -and $lines[$j] -notmatch '^[ \t]*-([ \t]|$)' -and
+            $lines[$j] -notmatch '^[^ \t#]') { $j++ }
+        $item = @($lines[$i..($j - 1)])
+        $name = ''
+        $type = ''
+        foreach ($body in $item) {
+            if (-not $name -and $body -match '^[ \t]*-?[ \t]*name:[ \t]*([^ \t#]+)') {
+                $name = $Matches[1].Trim('"')
+            }
+            if (-not $type -and $body -match '^[ \t]*-?[ \t]*type:[ \t]*([^ \t#]+)') {
+                $type = $Matches[1].Trim('"')
+            }
+        }
+        $ours = $inBlock -and (($name -match '^tproxy(-[A-Za-z0-9_.-]+)?$') -or
+            ($type -eq 'tproxy') -or ($item[0] -match '^[ \t]*-[ \t]*tproxy[ \t]*$'))
+        if (-not $ours) { foreach ($body in $item) { $out.Add($body) } }
+        $i = $j
     }
     Write-Lines $Path $out
 }

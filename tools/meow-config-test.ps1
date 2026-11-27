@@ -282,6 +282,38 @@ if ($text -match 'type: tproxy') { Fail 'tproxy-listener: 那条 tproxy 没摘�
 if ($text -notmatch 'type: hysteria2') { Fail 'tproxy-listener: 别人的 listener 被删了' }
 if ($text -notmatch '- name: hy2') { Fail 'tproxy-listener: 别人的 listener 名字被动了' }
 
+# ---- meow 自己重写过的配置：条目顶格写，那条 tproxy 一样要摘掉 ----
+# 在路由器面板上"添加订阅"之后，meow 会把整份配置按结构体重写：注释没了、条目顶格、
+# 没设过的键摊成 null。这份配置拷到 Windows 上，那条 tproxy 入口必须在 pc 形态里摘干净，
+# 别的条目和后面的顶层键一个字都不能动。
+$plugin = New-Fixture 'tproxy-listener-canonical'
+Write-Text $CONFIG (@(
+    'mixed-port: null'
+    'routing-mark: null'
+    'listeners:'
+    '- name: tproxy-tcp'
+    '  type: tproxy'
+    '  port: 7893'
+    '  listen: 0.0.0.0'
+    '  firewall: false'
+    '  max-connections: 4096'
+    '- name: hy2'
+    '  type: hysteria2'
+    '  port: 8443'
+    'tun: null'
+    'max-connections: 4096'
+    'rules:'
+    '- MATCH,DIRECT'
+) -join "`n")
+Prepare-Config
+Apply-Settings 'pc' | Out-Null
+$text = Read-Text $CONFIG
+if ($text -match 'type: tproxy') { Fail 'tproxy-listener-canonical: 顶格写的 tproxy 没摘掉' }
+if ($text -notmatch 'type: hysteria2') { Fail 'tproxy-listener-canonical: 别人的 listener 被删了' }
+if ($text -notmatch 'MATCH,DIRECT') { Fail 'tproxy-listener-canonical: 规则被吃掉了' }
+if ($text -notmatch 'max-connections: 4096') { Fail 'tproxy-listener-canonical: 后面的顶层键被吃掉了' }
+if ($text -match 'routing-mark') { Fail 'tproxy-listener-canonical: routing-mark 没摘掉（Windows 不需要）' }
+
 # ---- cn_domains 的表是古典写法：behavior 不能是 domain ----
 # domain 型把 "DOMAIN-SUFFIX,00cdn.com" 当成一个域名塞进 trie，永远匹配不到，日志还一声
 # 不响；1.3.5 之前的模板就是这么写的，启动时就地改过来。别的 provider 一个字不动。

@@ -338,6 +338,102 @@ run_meow mode >/dev/null
     fail "listeners-dup: 修完还是有 $(grep -c '^listeners:' "$_plugin/config") 份 listeners"
 grep -qx '    type: tproxy' "$_plugin/config" || fail 'listeners-dup: tproxy 入口被删了'
 
+# ---- meow 自己重写过的配置：加完订阅那份，routing-mark 是 null ----
+# meow 面板上"添加订阅"会把整份配置按它内存里的 raw 重写一遍：注释没了、顺序按结构体排、
+# 没设过的键全部摊成 "x: null"，listeners 的条目落到顶格。启动时文件里没有 routing-mark
+# 的话，它就这么写回 null —— 而 meow-fw.sh 的 "-m mark --mark 9527 -j RETURN" 认的是这个
+# 值，两边对不上。插件把受管键再写一遍，其余一个字不动。
+fixture "$WORK/meow-rewrite"
+cat > "$_plugin/config" <<'MR'
+port: null
+mixed-port: null
+mode: null
+log-level: warning
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+  - 223.5.5.5
+proxies:
+- type: direct
+  name: n1
+proxy-groups: []
+rules:
+- MATCH,DIRECT
+rule-providers: null
+subscriptions:
+- name: s1
+  url: http://127.0.0.1:1/sub.yaml
+  interval: null
+  last-updated: 1
+tproxy-port: null
+routing-mark: null
+listeners:
+- name: tproxy-tcp
+  type: tproxy
+  port: 7893
+  listen: 0.0.0.0
+  firewall: false
+  max-connections: 4096
+tun: null
+max-connections: 4096
+MR
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+grep -qx 'routing-mark: 9527' "$_plugin/config" ||
+    fail 'meow-rewrite: routing-mark: null 没补成 9527'
+[ "$(grep -c '^listeners:' "$_plugin/config")" = 1 ] ||
+    fail "meow-rewrite: listeners 变成了 $(grep -c '^listeners:' "$_plugin/config") 份"
+[ "$(grep -c 'type: tproxy' "$_plugin/config")" = 1 ] ||
+    fail 'meow-rewrite: tproxy 入口变成了两份'
+grep -qx '  listen: 0.0.0.0:1053' "$_plugin/config" ||
+    fail 'meow-rewrite: dns.listen 被改掉了'
+grep -qE '^tproxy-port:[ \t]*[0-9]' "$_plugin/config" &&
+    fail 'meow-rewrite: 顶层 tproxy-port 没置空'
+grep -q 'name: s1' "$_plugin/config" || fail 'meow-rewrite: 订阅被弄丢了'
+cp "$_plugin/config" "$WORK/meow-rewrite.once"
+run_meow mode >/dev/null
+cmp -s "$WORK/meow-rewrite.once" "$_plugin/config" ||
+    fail 'meow-rewrite: 第二次跑改了文件'
+
+# 用户自己定的 mark 要跟着走，别一律写成 9527。
+fixture "$WORK/mark-keep"
+printf 'mixed-port: 7890\nrouting-mark: 1234\nrules:\n  - MATCH,DIRECT\n' > "$_plugin/config"
+printf 'proxy-mode: router\n' > "$_plugin/state"
+run_meow mode >/dev/null
+grep -qx 'routing-mark: 1234' "$_plugin/config" || fail 'mark-keep: 用户的 routing-mark 被改成 9527 了'
+
+# pc 形态同理：null 也是没设，补回 9527；0 不算 mark，别往 iptables 里塞 --mark 0。
+fixture "$WORK/pc-nullmark"
+printf 'mixed-port: 7890\nrouting-mark: null\nrules:\n  - MATCH,DIRECT\n' > "$_plugin/config"
+run_meow set-mode tun >/dev/null
+run_meow mode >/dev/null
+grep -qx 'routing-mark: 9527' "$_plugin/config" || fail 'pc-nullmark: null 没补成 9527'
+
+# ---- 加订阅把本地 rules 顶掉了：启动时提示一句，但别猜着恢复 ----
+# meow 保存订阅时用订阅里那份 rules 整体替换本地的；订阅没带 rules，本地规则就只剩
+# "rules: []"，代理按兜底规则走。提示指向 meow 自己留的 config.yaml.bak。
+fixture "$WORK/rules-wiped"
+printf 'mixed-port: 7890\nsubscriptions:\n- name: s1\n  url: http://127.0.0.1:1/x.yaml\nrules: []\nrouting-mark: null\n' > "$_plugin/config"
+printf 'mixed-port: 7890\nrules:\n  - RULE-SET,cn_domains,DIRECT\n  - MATCH,DIRECT\n' > "$_plugin/config.bak"
+_out=$(run_meow mode 2>&1)
+case "$_out" in
+    *'rules 是空的'*) ;;
+    *) fail 'rules-wiped: 规则被订阅顶掉了没提示' ;;
+esac
+grep -q 'rules: \[\]' "$_plugin/config" || fail 'rules-wiped: 提示归提示，不该动配置'
+grep -q 'RULE-SET,cn_domains' "$_plugin/config" && fail 'rules-wiped: 不该自动拿备份恢复（猜的）'
+
+# 没有订阅（或者备份里也没规则）就别乱叫。
+fixture "$WORK/rules-empty-ok"
+printf 'mixed-port: 7890\nrules: []\n' > "$_plugin/config"
+_out=$(run_meow mode 2>&1)
+case "$_out" in
+    *'rules 是空的'*) fail 'rules-empty-ok: 没订阅也提示了' ;;
+esac
+
 # ---- cn_domains 的表是古典写法：behavior 不能是 domain ----
 # domain 型把 "DOMAIN-SUFFIX,00cdn.com" 当成一个域名塞进 trie，永远匹配不到，日志还一声
 # 不响；1.3.5 之前的模板就是这么写的，启动时就地改过来。别的 provider 一个字不动。

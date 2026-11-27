@@ -157,16 +157,33 @@ package/
 
 `config` 里那几个**受管键**（`mixed-port`、`tun`、`dns`、`tproxy-port`、`routing-mark`）由插件
 在每次 `start` 时按形态写好，你不需要填；其余内容（订阅、规则、注释）原样保留。
-`mixed-port` 以你写的为准：插件只在你没写的时候补 `7890`。
+`mixed-port` 以你写的为准：插件只在你没写的时候补 `7890`。`routing-mark` 也一样：配置里是
+数字就沿用，是 `null` 或者没有，就按 `state` 里的值、再退到 `9527`——meow 自己的出向靠它打
+`SO_MARK`，router 形态下 `meow-fw.sh` 的 `-m mark --mark <它> -j RETURN` 也认这个值，空着
+两边就对不上。
 
 - 第一次安装时 `config` 从包里的 `payload/config.yaml` 生成（`@DATA@` 渲染成数据目录）；
   老版本生成过的配置里如果还留着字面量 `@DATA@`，每次 `start` 都会就地换成真实数据目录
   （否则 meow 会拿 `@DATA@/Country.mmdb` 去找 GeoIP 库，加载失败后整份配置都起不来，
   面板添加订阅的接口会报 HTTP 400）；
-- meow 添加订阅时会把整份 `config` 重写一遍，没设过的段写成 `tun: null` 这种空占位；
-  插件启动时会把「顶层键出现两次、其中一份是 `null` / `~` / `{}`」的那种清掉，只留真块
-  （两份都是有内容的块属于没见过的写法，不猜，让 meow 自己报错）。不清的话 YAML 直接
-  `duplicate entry with key "tun"`，meow 一个字符都不认，插件就再也起不来；
+- meow 保存配置时会把整份 `config` 重写一遍（面板上「添加订阅」就走这条路：`POST
+  /api/subscriptions` 之后它把内存里的那份 raw 序列化回文件）。0.21.2 实测的行为：
+  - 注释全没（整行的和行尾的都算），顺序按它自己的结构体重排，引号规范化；
+  - 没设过的键全部摊成 `null`。`routing-mark` 就是这么变成 `null` 的：加订阅时文件里没有
+    这个键，它内存里就没有值，写回时按「这个段没设过」序列化；下次 `start` 插件会补回数字；
+  - `proxies` / `proxy-groups` / `rules` **被订阅内容整体替换**：订阅里没带 `rules:` 就变成
+    `rules: []`，本地自己写的规则一条不剩（代理只剩兜底那条）。插件启动时会在 stderr 提示
+    一句，并指向 `config.yaml.bak`——meow 每次保存前把旧文件改名过去，只有一代。不想丢规则就
+    别在面板上加订阅，直接把节点贴进 `proxies`；加了就从 `.bak` 里把 `rules:` 抄回来；
+  - 它不认识的顶层键直接丢弃（实测 `unified-delay`、`tcp-concurrent`、`find-process-mode`、
+    `global-client-fingerprint`、`profile:` 都没了）；`dns` / `sniffer` / `listeners` / `tun` /
+    `geodata` / `rule-providers` / `proxy-providers` / `hosts` / `sub-rules` 的值都保留，只是
+    没填的字段摊成 `null`，`listeners:` 的条目改成顶格写；
+  - 有两处是「接受但忽略」（日志里有 WARN）：`tun.stack`、`sniffer.force-dns-mapping`。
+  插件这边只兜底、不假装能拦住它：每次 `start` 把受管键按形态再写一遍（`routing-mark` 从
+  `null` 修回数字），`listeners:` 里那条 `type: tproxy` 的入口在 `pc` / `off` 形态下摘掉
+  （条目顶格写也认），`tun: null` 这种空占位和真块撞成两份时清掉占位那份——不清的话 YAML
+  直接 `duplicate entry with key "tun"`，meow 一个字符都不认，插件就再也起不来；
 - 包里带了两份数据文件，第一次启动会放进数据目录，已经有的不动（可能是 meow 自己更新过的）：
   `Country.mmdb`（约 130 KB 的精简库）和
   `cn_domains.yaml`（`rule-providers` 里那份域名表）。后者非放数据目录不可：meow 的
@@ -210,7 +227,7 @@ proxy-mode: off         # off | pc | router（Windows 只认 off / pc）；刚�
 ```yaml
 mixed-port: 7890        # HTTP + SOCKS 同一个口，off 形态下只有它
 tproxy-port: 7893       # Linux 的 pc 形态用；Windows 走 TUN
-routing-mark: 9527      # Linux pc 的出向 SO_MARK
+routing-mark: 9527      # 出向 SO_MARK：Linux pc 由 meow 自己打，router 由 meow-fw.sh 认
 ```
 
 网关形态（`router`）还要两个插件自己的参数，默认 `br0` / `1053`，要改就写进 `state`：
