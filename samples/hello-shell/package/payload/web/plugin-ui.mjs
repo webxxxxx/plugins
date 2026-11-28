@@ -19,7 +19,8 @@
 //
 // The host's own API sits on the same origin as the page, so a plugin that has
 // to do something to itself — restart after a startup-config change — uses the
-// console's session cookie through `hostRequest` / `restartSelf` below. A
+// console's session cookie through `hostRequest` / `restartSelf` below; every
+// write those make carries the host's `X-Svcd-Csrf: 1` marker (`withCsrf`). A
 // capability hook is a short-lived process: it writes state and stops there,
 // because anything it started would be orphaned the moment it exits.
 
@@ -31,6 +32,26 @@ const FILES = '/api/v1/file';
 
 /** Content addresses only; reject anything else before it reaches a URL. */
 const CONTENT_ID = /^sha256:[0-9a-f]{64}$/;
+
+const WRITE_METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'];
+
+/**
+ * A cookie-authenticated write needs a same-origin `Origin` plus
+ * `X-Svcd-Csrf: 1` (`src/server/http/model.rs::csrf_ok`). The browser adds
+ * `Origin` to every non-GET request by itself, so only the marker header is
+ * ours; a custom header on a same-origin request costs no preflight, and the
+ * plugin page shares the console's origin, so its cookie is what authorises
+ * the write. Without this the host answers `403 forbidden`.
+ */
+function withCsrf(init) {
+  if (!WRITE_METHODS.includes(String(init.method ?? 'GET').toUpperCase())) return init;
+  if (typeof Headers !== 'undefined' && init.headers instanceof Headers) {
+    const headers = new Headers(init.headers);
+    headers.set('x-svcd-csrf', '1');
+    return { ...init, headers };
+  }
+  return { ...init, headers: { ...init.headers, 'x-svcd-csrf': '1' } };
+}
 
 export class PluginRpcError extends Error {
   constructor(code, message, data) {
@@ -60,7 +81,7 @@ function parse(raw) {
 }
 
 async function jsonRequest(url, init = {}) {
-  const response = await fetch(url, { credentials: 'same-origin', ...init });
+  const response = await fetch(url, withCsrf({ credentials: 'same-origin', ...init }));
   if (!response.ok) {
     const detail = await response.text().catch(() => '');
     throw new PluginRpcError(-32000, `HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
@@ -448,10 +469,10 @@ export function pluginUI(options = {}) {
   /** Drop a part session and its temp files. `kind` is 'blob' or 'file'. */
   async function abortUpload(kind, uploadId) {
     const base = kind === 'file' ? FILES : BLOBS;
-    const response = await fetch(`${base}/uploads/${uploadId}`, {
-      method: 'DELETE',
-      credentials: 'same-origin',
-    });
+    const response = await fetch(
+      `${base}/uploads/${uploadId}`,
+      withCsrf({ method: 'DELETE', credentials: 'same-origin' }),
+    );
     if (!response.ok && response.status !== 404) {
       throw new PluginRpcError(-32000, `abort failed: HTTP ${response.status}`);
     }

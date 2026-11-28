@@ -312,7 +312,7 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **能力要么走通道，要么挂短命钩子。** 一个能力只有一种投递方式：`ready: notify` 的插件有协议通道，能力由 `svcd_plugin_serve` 的 handler 回答，且**不许**声明 `hook`；`ready: exec` / `port` 的插件没有通道，因此每个能力都**必须**声明 `capabilities[].hook = {path, args?, env?, timeout?}`（包内相对路径，1..300 秒）。宿主每次 `tools/call` 起一次那个动作：`arguments` 写进 stdin 然后关掉，stdout 原文就是这次调用的文本结果（不解析 JSON，空输出就是空文本），stderr 进 `<id>-hooks.log`，超过契约内联上限算这次调用失败而不是截断。所以「一个常驻进程 + 偶尔被调一次」不必为了能力面再养一个通道 shell（`meow` / `wireguard` 就是这么改的）。
 
-**钩子只改状态，重启交宿主。** 钩子是短命进程：改完自己那份启动期配置（state、配置文件的受管键）就返回，需要按新配置重来一遍时回 `{"restart":true}`，由页面调 `ui.restartSelf()`（`sdk/web/plugin-ui.mjs`，内部是 `POST /api/v1/services/<id>/restart`，id 从 `/plugin-ui/<id>/` 自己取）让宿主停整组 → 跑 `start` → 重新 spawn。别在钩子里起进程：孩子会挂在钩子自己的进程组下，钩子一退就成了孤儿；更别杀进程组，那是宿主的活。
+**钩子只改状态，重启交宿主。** 钩子是短命进程：改完自己那份启动期配置（state、配置文件的受管键）就返回，需要按新配置重来一遍时回 `{"restart":true}`，由页面调 `ui.restartSelf()`（`sdk/web/plugin-ui.mjs`，内部是 `POST /api/v1/services/<id>/restart`，id 从 `/plugin-ui/<id>/` 自己取）让宿主停整组 → 跑 `start` → 重新 spawn。别在钩子里起进程：孩子会挂在钩子自己的进程组下，钩子一退就成了孤儿；更别杀进程组，那是宿主的活。页面打宿主 `/api/v1` 的**写**请求是 cookie 写，宿主只认同源 `Origin` 加静态标记 `X-Svcd-Csrf: 1`（`Origin` 浏览器自己带，标记得你带）：`hostRequest` / `restartSelf` 已经在 `withCsrf` 里带上了，自己手写 `fetch('/api/v1/…')` 时写 `credentials: 'same-origin'` 和 `headers: {'X-Svcd-Csrf': '1'}`，漏了就是 `403 cookie writes require Origin and X-Svcd-Csrf`。
 
 **`id` 是身份，`name` 是显示名。** `schema` 恒为 `1`（打包器盖章，源清单写别的值也会被覆盖），`id` 只能是 `[a-z0-9][a-z0-9_-]{0,63}`（不能是 `svc`）：安装目录、日志文件名、`<id>.<能力>` 工具名、`/plugin-ui/<id>/` 都用它。源清单省略 `id` 时取项目目录名；`name` 随便写，中文也行，缺省等于 `id`；命令与 API 只认 `id`，不按显示名解析。
 
@@ -352,6 +352,7 @@ SDK 没有 raw 实现。
 | 装上了但 `start` 超时 | 脚本插件没写 `"ready": "exec"`（缺省 `notify` 会等 ping） |
 | `ps` 里多一个 `sh` | 入口脚本没 `exec` 掉自己（自己写了看护循环），或周期任务用 `&` 起了常驻子 shell——看「一个进程、一个线程」那一节 |
 | 改了配置但进程还是老的 | 钩子只改状态，忘了让页面调 `ui.restartSelf()`（钩子不许自己重启服务） |
+| 页面报 `403 cookie writes require Origin and X-Svcd-Csrf` | 手写的 `/api/v1` 写请求漏了 `X-Svcd-Csrf: 1`（SDK 的 `hostRequest` / `restartSelf` 自带） |
 | `status` 报 `running` 但没在跑 | pidfile 里的 pid 被复用给别的进程了：认进程要 `kill -0` + `/proc/<pid>/cmdline` 对一下 |
 | MCP 里有这个工具，调用却报错 | manifest 与代码分支漂移 |
 | 包在目标机上装不上 | `platform` 与本机三元组不等 |
