@@ -964,6 +964,15 @@ pub fn stage_package(
     // `package/`, so there is nothing for a later build to leave behind.
     if let Some(overlay) = variant_overlay(root, device) {
         copy_tree(&overlay, &target)?;
+        // `variants/<unit>/SHA256SUMS` guards what is committed next to the
+        // binaries (`build.sh` checks it with `cd <unit> && sha256sum -c`); it
+        // describes the repository, not the package, so it must not ride into
+        // the package root as an unexplained extra file.
+        let sums = target.join("SHA256SUMS");
+        if overlay.join("SHA256SUMS").is_file() && sums.exists() {
+            fs::remove_file(&sums)
+                .map_err(|error| format!("drop {}: {}", sums.display(), error))?;
+        }
     }
     let copied = materialize_scripts(root, &target, platform)?;
     let mut view = match manifest {
@@ -1724,6 +1733,56 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+
+    /// `variants/<unit>/SHA256SUMS` guards the prebuilt files committed in that
+    /// unit; it is not payload, so it must not land in the package root next to
+    /// `manifest.json`. The unit's own files still have to arrive.
+    #[test]
+    fn a_units_checksum_manifest_does_not_ship() {
+        let root =
+            std::env::temp_dir().join(format!("plugin-tools-stage-sums-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("package/payload/bin")).unwrap();
+        fs::create_dir_all(root.join("variants/sr6110/payload/bin")).unwrap();
+        fs::write(
+            root.join("package/manifest.json"),
+            r#"{
+  "schema": 1,
+  "id": "demo",
+  "version": "1.0.0",
+  "exec": { "path": "payload/bin/demo", "ready": "notify" }
+}"#,
+        )
+        .unwrap();
+        fs::write(root.join("package/payload/bin/demo"), "#!/bin/sh\n").unwrap();
+        fs::write(root.join("variants/sr6110/payload/bin/demo.ko"), "ko").unwrap();
+        fs::write(
+            root.join("variants/sr6110/SHA256SUMS"),
+            "00  payload/bin/demo.ko\n",
+        )
+        .unwrap();
+
+        let staged = stage_package(
+            &root,
+            &root.join("stage"),
+            None,
+            "aarch64-unknown-linux-musl",
+            None,
+            Some("sr6110"),
+        )
+        .unwrap();
+        assert!(
+            staged.join("payload/bin/demo.ko").is_file(),
+            "the unit's own file still ships"
+        );
+        assert!(
+            !staged.join("SHA256SUMS").exists(),
+            "the unit's checksum manifest is not payload"
+        );
+        // The authored tree keeps it: the guard still runs on the next build.
+        assert!(root.join("variants/sr6110/SHA256SUMS").is_file());
+        let _ = fs::remove_dir_all(root);
+    }
 
     #[test]
     fn the_compiler_defaults_to_gcc_unless_cc_says_otherwise() {
