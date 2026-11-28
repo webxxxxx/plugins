@@ -133,7 +133,9 @@
 
   <script type="module">
     // 这个页面是壳：顶上是代理类型（off / tun / tproxy）和订阅管理，下面 iframe 嵌 meow 自带的 YACD。
-    // 选代理类型 → 调插件能力 mode → 写进 state 的 proxy-mode → 看护进程按新形态重启 meow。
+    // 选代理类型 → 调插件能力 mode（只写 state 的 proxy-mode，回 {restart:true}）→ 页面再调
+    // POST /api/v1/services/meow/restart，让宿主停整组、跑 lifecycle.start 按新形态重写受管键、
+    // 重新 exec meow。钩子是短命进程，它自己既不起进程也不杀进程。
     // 刚装好时 state 里没有这个键，插件按 off 走：不接管流量，先选 tun / tproxy 才接管。
     // 订阅管理不用 YACD 里的浮动按钮：顶部按钮弹一个 <dialog>，里面是 meow 自己那份
     // /ui/sub.html（还是同一套 /api/subscriptions 接口）。
@@ -287,10 +289,15 @@
       select.disabled = true;
       say(`切到 ${NAMES[wanted] || wanted}…`, 'down');
       try {
-        await ui.invoke('mode', { mode: wanted });
+        const result = JSON.parse(await ui.invoke('mode', { mode: wanted }));
+        if (result.restart) {
+          // 只落 state 不够：让宿主按新形态重跑 start → 重新 exec meow。
+          await ui.restartSelf();
+        }
       } catch (error) {
-        say(`切换失败：${error.message}`, 'bad');
-        select.value = last.mode || '';
+        // state 可能已经落盘了（只是没重启成功），所以别把选择器拨回去，说清楚就行。
+        say(`已保存，但没能生效：${error.message}。重开插件或刷新页面后应该就好了`, 'bad');
+        select.value = wanted;
         select.disabled = false;
         return;
       }

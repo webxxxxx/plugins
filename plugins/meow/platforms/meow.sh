@@ -22,16 +22,17 @@
 #          上开 tproxy 入口（需要 root + iptables；没有 nf_tables 的内核也能用）。
 #          页面上的「tproxy」就是它。
 #
-# 宿主监督的是 exec（exec.args = start）：start 一直不返回，直到看护进程退出；
-# stop 在进程退出之后跑，只做收尾（撤规则、删 pidfile）；status 按需探测。
-# 路径全部从脚本位置推导，数据落在 <插件目录>/data。
-# 清单里 exec.ready 是 exec：宿主 spawn 完就算启动，stdout 只进日志，没有协议通道
-# （#342）。页面 A 的代理类型选择器走能力钩子：宿主每次调用起一个短命进程
-# （meow.sh hook mode），arguments 从 stdin 读，它的 stdout 就是这次调用的结果。
-#
-# start 是「看护进程」而不是把 meow exec 掉：meow 是自己的子进程，孩子退出后前台
-# 循环按 config 里的新形态重启。钩子进程和看护进程之间只靠 <插件目录>/state 与
-# pidfile 交接：钩子只写 state、结束孩子就走，重启由看护循环做。
+# 宿主监督的 exec 就是 meow 本身（exec.args = run，脚本最后 exec 掉自己）：没有看护
+# shell，`ps` 里只有 meow 一个进程。宿主的三段生命周期各管一段：
+#   start    每次 spawn 之前跑一次、必须退出：迁移/播 geo 库/生成 config/按形态写受管键，
+#            再用 `meow -t` 校验；选中的形态起不来就先降成 off（插件照常起，页面才打得开）。
+#   started  就绪之后、Running 之前跑一次：router 形态等 tproxy 端口监听，再挂 iptables。
+#   stop     进程消失之后收尾：撤规则、删 pidfile；秒退（<10s）的崩溃顺手降成 off。
+# 清单里 exec.ready 是 exec：宿主 spawn 完就算启动，stdout 只进日志，没有协议通道（#342）。
+# 页面 A 的代理类型选择器走能力钩子（meow.sh hook mode）：宿主每次调用起一个短命进程，
+# arguments 从 stdin 读，它的 stdout 就是这次调用的结果。钩子只写 state 并回 restart=true，
+# 真正按新形态重建由页面调 POST /api/v1/services/meow/restart——宿主停整组、跑 start、
+# 重新 exec，钩子自己既不起进程也不杀进程。
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -43,6 +44,8 @@ PLUGIN_ROOT=$(CDPATH= cd -- "${SVCD_PLUGIN_DIR:-$HERE/../../..}" && pwd)
 # 保留它；meow 的 geo 库、pid、`-d` 指过来的缓存全在这里。
 DATA="$PLUGIN_ROOT/data"
 PIDFILE="$DATA/meow.pid"
+# 这一代进程是什么时候起来的：stop 用它判断「秒退」还是「跑了一阵才死」。
+STARTED_AT="$DATA/meow.started"
 CONFIG="$PLUGIN_ROOT/config"                     # meow 的配置：meow 就是用它启动的（宿主的 editconfig 改它）
 LEGACY_CONFIG="$PLUGIN_ROOT/meow.yaml"           # 1.2/1.3 的布局：meow 的配置曾放这里
 TEMPLATE="$ROOT/config.yaml"                     # 包里的出厂模板
@@ -885,73 +888,6 @@ firewall_state() {
     fi
 }
 
-# 起一个 meow 子进程，pidfile 记下它。router 形态还要等 tproxy 端口起来再挂规则
-# （规则先挂、进程没起，客户端会拿到 connection refused）。
-start_child() {
-    _mode=$1
-    if [ "$_mode" = router ] && [ ! -f "$FW" ]; then
-        echo "meow: 缺少规则脚本 $FW" >&2
-        return 1
-    fi
-    if [ "$_mode" = off ]; then
-        echo "meow: 代理类型是 off —— 只开 mixed-port，不接管系统流量（页面上选 tun / tproxy 才接管）" >&2
-    fi
-    echo "meow starting mode=$_mode (config=$CONFIG)" >&2
-    # stdin 接 /dev/null：meow 不读 stdin，别让它等着宿主那边的输入。
-    # -d 是 meow 的家目录：缓存、规则提供者的缓存都落在这里，所以指到插件自己的
-    # data/，不要指 payload（那是版本目录，升级时会被换掉）。
-    "$HERE/meow" -d "$DATA" -f "$CONFIG" --ext-ui "$ROOT/yacd" >&2 < /dev/null &
-    mon_pid=$!
-    echo "$mon_pid" > "$PIDFILE"
-    [ "$_mode" = router ] || return 0
-    # 厂商网络服务可能在别处把 ip_forward 刷回 0（meow-fw.sh up 里也会再设一次）。
-    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null \
-        || echo "meow: 无法打开 ip_forward" >&2
-
-    # 端口就绪之后再挂规则。
-    n=0
-    while [ "$n" -lt 60 ]; do
-        port_listening "$TPROXY_PORT" && break
-        if ! kill -0 "$mon_pid" 2>/dev/null; then
-            echo "meow: 进程在监听前退出（配置或端口有问题）" >&2
-            rm -f "$PIDFILE"
-            return 1
-        fi
-        sleep 1
-        n=$((n + 1))
-    done
-    if [ "$n" -ge 60 ]; then
-        echo "meow: 60s 内 :$TPROXY_PORT 没有监听" >&2
-        kill "$mon_pid" 2>/dev/null
-        wait "$mon_pid" 2>/dev/null
-        rm -f "$PIDFILE"
-        return 1
-    fi
-
-    if ! fw_call up; then
-        echo "meow: 装 nat 规则失败，停止 meow（不留半套规则）" >&2
-        fw_clear
-        kill "$mon_pid" 2>/dev/null
-        wait "$mon_pid" 2>/dev/null
-        rm -f "$PIDFILE"
-        return 1
-    fi
-
-    echo "meow router ready: lan=$LAN_IF tproxy=:$TPROXY_PORT dns=:${DNS_PORT:-off}" >&2
-    return 0
-}
-
-# 收掉子进程和它留下的规则。幂等：宿主跑 lifecycle stop 时这里可能已经收过一遍。
-cleanup_child() {
-    [ -n "${mon_pid:-}" ] || { rm -f "$PIDFILE"; return 0; }
-    kill "$mon_pid" 2>/dev/null
-    rm -f "$PIDFILE"
-    # 进程没了就别留规则：宁可直连，也别让 LAN 一直打到死端口。
-    fw_clear
-    mon_pid=''
-    return 0
-}
-
 # 选中的形态没起来就退回 off：宁可只留一个 mixed-port 的普通代理，也别让插件一直起不来
 # （页面打不开就什么也改不了）。只写 state，config 的受管键由下一轮 apply_settings 按 off
 # 重写；调用方负责 continue。已经是 off 就返回 1，让调用方按原样退出。
@@ -964,70 +900,10 @@ fall_back_to_off() {
     return 0
 }
 
-# 前台看护：孩子退出后，如果 state 里的 proxy-mode 变了就是页面上的主动切换，按新形态
-# 重来一次；没变就是真退出，把 rc 交给宿主（宿主据此重启或报错）。形态起不来时先退回 off。
-supervise() {
-    while :; do
-        MODE=$(mode_of) || return 1
-        if ! apply_settings "$MODE"; then
-            fall_back_to_off "$MODE" && continue
-            return 1
-        fi
-        if [ "$MODE" = router ]; then
-            load_router_params
-            if ! validate_router; then
-                fall_back_to_off "$MODE" && continue
-                return 1
-            fi
-        else
-            # pc/off 形态先做一次配置校验，失败就别起一个秒退进程。别把失败一律算成
-            # 配置问题：二进制在宿主机上根本跑不起来（glibc 比构建机老、架构不对）也是
-            # 这里失败，所以把 meow 自己的话带出来，一眼能分清是哪一种。
-            _check=$("$HERE/meow" -d "$DATA" -f "$CONFIG" -t 2>&1 < /dev/null) || {
-                case "$_check" in
-                    *GLIBC*|*"not found"*|*"No such file"*|*"cannot execute"*)
-                        echo "meow: 这个 meow 二进制在这台机器上跑不起来（不是配置问题）：" >&2
-                        echo "meow:   Linux 的 gnu 包要求宿主的 glibc 不比构建机老（本地是 Debian 12 / 2.36，CI 是 Ubuntu 22.04 / 2.35）；" >&2
-                        echo "meow:   老一点的发行版（Debian 12 / 很多路由器固件）请用 x86_64-unknown-linux-musl 包。" >&2
-                        ;;
-                    *)
-                        echo "meow: 配置校验没通过（meow -t）：" >&2
-                        ;;
-                esac
-                printf '%s\n' "$_check" | head -n 5 >&2
-                # glibc 老、架构不对这种，降成 off 也一样跑不起来：照样退回去再试，
-                # 让退回来的那一轮把真正的原因留在日志里。
-                fall_back_to_off "$MODE" && continue
-                return 1
-            }
-        fi
-        _started=$(date +%s)
-        if ! start_child "$MODE"; then
-            cleanup_child
-            fall_back_to_off "$MODE" && continue
-            return 1
-        fi
-        wait "$mon_pid"
-        _rc=$?
-        echo "meow exited rc=$_rc (mode=$MODE)" >&2
-        cleanup_child
-        _next=$(mode_of 2>/dev/null) || _next=''
-        if [ -n "$_next" ] && [ "$_next" != "$MODE" ]; then
-            echo "meow: proxy-mode $MODE → $_next，按新形态重启" >&2
-            continue
-        fi
-        # 秒退 = 根本没起来（TUN 没权限、端口被占、网卡不存在都在这一刻暴露），退回 off；
-        # 跑了一阵才死的算真退出，按原样把 rc 交给宿主，别把跑过的形态悄悄降级。
-        if [ "$_rc" -ne 0 ] && [ $(($(date +%s) - _started)) -lt 10 ]; then
-            fall_back_to_off "$MODE" && continue
-        fi
-        return "$_rc"
-    done
-}
-
 # ---- 能力：代理类型（页面 A 的顶部选择器） ----
-# 不带参数是读，带 mode 是写。写只改 config 的 proxy-mode 并结束孩子进程，
-# 重启由前台看护循环负责——所以一次调用里不会出现「配置已改、进程还没换」的状态。
+# 不带参数是读，带 mode 是写。写只落 state 里的 proxy-mode，并告诉页面要不要重启：
+# 受管键由下一次 lifecycle.start 按新形态重写，所以一次调用里不会出现「配置已改、
+# 进程还没换」——那中间的活归宿主的重启（停整组 → start → 重新 exec）。
 
 # meow 的面板密钥（subscription 常常自带一个 secret）。它就是 YACD 要的那串；页面把它
 # 传给 iframe，面板就不用每次手输。列表写法取第一个元素。
@@ -1057,7 +933,7 @@ report_mode() {
         "$(label_of "$_mode")" "$_mode" "$_running" "$_allowed" "$_secret" "$_ports"
 }
 
-# 写：把页面上的 off/tun/tproxy 落成 proxy-mode，持久化在 config 里。
+# 写：把页面上的 off/tun/tproxy 落成 proxy-mode，并回「要不要重启」。
 do_set_mode() {
     _want=$1
     _target=$(mode_of_label "$_want") || {
@@ -1070,17 +946,18 @@ do_set_mode() {
     fi
     _now=$(mode_of 2>/dev/null) || _now=''
     if [ "$_now" = "$_target" ] && running; then
-        report_mode
+        printf '{"mode":"%s","restart":false}\n' "$_want"
         return 0
     fi
-    # 只写我们自己的缓存；meow 的配置由看护循环按新形态重写受管键。
+    # 只落我们自己的 state；meow 的配置由下一次 lifecycle.start 按新形态重写受管键。
     set_mode_cache "$_target" || return 1
-    # 孩子活着就叫它退出：前台看护循环醒来会看到新的 proxy-mode，按新形态重启。
-    _pid=$(cat "$PIDFILE" 2>/dev/null || true)
-    if [ -n "$_pid" ]; then
-        kill "$_pid" 2>/dev/null || true
+    # 钩子是短命进程：不起进程、不杀进程，重启交给宿主。页面拿到 restart=true 后调
+    # POST /api/v1/services/meow/restart，宿主会停整组 → stop → start → 重新 exec。
+    if running; then
+        printf '{"mode":"%s","restart":true}\n' "$_want"
+    else
+        printf '{"mode":"%s","restart":false}\n' "$_want"
     fi
-    printf '{"mode":"%s","changing":true}\n' "$_want"
 }
 
 handle() {
@@ -1103,35 +980,127 @@ handle_mode() {
 # arguments 从 stdin 读（写完就关），我们的 stdout 原样成为这次调用的文本结果。
 # $1 是能力名，与通道那侧 handle <name> <arguments> 同形，所以直接交给 handle。
 do_hook() {
+    if [ ! -f "$SDK" ]; then
+        echo "meow: 缺少 $SDK（能力钩子要用它解析 arguments）" >&2
+        return 1
+    fi
     _args=$(cat)
     [ -n "$_args" ] || _args='{}'
     handle "${1:-}" "$_args"
 }
 
-# EXIT 收尾：先把 trap 清空，免得 cleanup_child 里的 kill/rm 再把这里叫一次。
-cleanup_on_exit() {
-    trap '' TERM INT HUP EXIT
-    cleanup_child
-}
-
 # ---- 生命周期 ----
 
-do_start() {
+# 每次 spawn exec 之前跑一次，必须退出。崩溃重试、页面切形态后的 restart 都会再跑，
+# 所以这里写的每一样东西都必须是幂等的。
+do_prepare() {
     prepare_config || return 1
-    if running; then
-        echo "already running (pid $(cat "$PIDFILE"))" >&2
+    MODE=$(mode_of) || return 1
+    # 选中的形态起不来就退回 off 再试一轮：插件得起来，页面才打得开。已经是 off 还不行
+    # 就是真错误（配置坏了、二进制跑不起来），交给宿主报启动失败。
+    while :; do
+        if ! apply_settings "$MODE"; then
+            fall_back_to_off "$MODE" && {
+                MODE=off
+                continue
+            }
+            return 1
+        fi
+        if [ "$MODE" = router ]; then
+            load_router_params
+            if ! validate_router; then
+                fall_back_to_off "$MODE" && {
+                    MODE=off
+                    continue
+                }
+                return 1
+            fi
+        else
+            # pc/off 形态先做一次配置校验，别起一个秒退进程。别把失败一律算成配置问题：
+            # 二进制在这台机器上根本跑不起来（glibc 比构建机老、架构不对）也是这里失败，
+            # 所以把 meow 自己的话带出来，一眼能分清是哪一种。
+            _check=$("$HERE/meow" -d "$DATA" -f "$CONFIG" -t 2>&1 < /dev/null) || {
+                case "$_check" in
+                    *GLIBC*|*"not found"*|*"No such file"*|*"cannot execute"*)
+                        echo "meow: 这个 meow 二进制在这台机器上跑不起来（不是配置问题）：" >&2
+                        echo "meow:   Linux 的 gnu 包要求宿主的 glibc 不比构建机老（本地是 Debian 12 / 2.36，CI 是 Ubuntu 22.04 / 2.35）；" >&2
+                        echo "meow:   老一点的发行版（Debian 12 / 很多路由器固件）请用 x86_64-unknown-linux-musl 包。" >&2
+                        ;;
+                    *)
+                        echo "meow: 配置校验没通过（meow -t）：" >&2
+                        ;;
+                esac
+                printf '%s\n' "$_check" | head -n 5 >&2
+                # glibc 老、架构不对这种，降成 off 也一样跑不起来：照样退回去再试，
+                # 让退回来的那一轮把真正的原因留在日志里。
+                fall_back_to_off "$MODE" && {
+                    MODE=off
+                    continue
+                }
+                return 1
+            }
+        fi
+        break
+    done
+    echo "meow prepared mode=$MODE (config=$CONFIG)" >&2
+    return 0
+}
+
+# 被监督进程：exec 掉自己，宿主看着的 pid 就是 meow。pidfile 先写——exec 不换 pid，
+# 所以里面记的就是 meow 的 pid（status / running / started 都靠它认人）。
+do_run() {
+    if [ ! -f "$CONFIG" ]; then
+        echo "meow: 缺少 $CONFIG（lifecycle.start 没跑成功？）" >&2
         return 1
     fi
-    rm -f "$PIDFILE"
-    if [ ! -f "$SDK" ]; then
-        echo "meow: 缺少 $SDK（能力钩子要用它解析 arguments）" >&2
+    echo $$ > "$PIDFILE"
+    date +%s > "$STARTED_AT"
+    # stdout/stderr 就是宿主的插件日志；meow 自己往 stderr 写，和以前一样。
+    # 宿主的进程组终止照旧收得走它——它就是被监督进程本身。
+    exec "$HERE/meow" -d "$DATA" -f "$CONFIG" --ext-ui "$ROOT/yacd"
+}
+
+# 就绪之后、Running 之前跑一次。router 形态要等 tproxy 端口起来再挂规则：规则先挂、
+# 端口没开，客户端会拿到 connection refused。非零即本次启动失败，宿主会停整组、跑 stop。
+do_started() {
+    _mode=$(mode_of) || return 1
+    [ "$_mode" = router ] || return 0
+    load_router_params
+    validate_router || return 1
+    # 宿主是 spawn 完就当就绪（ready: exec），脚本可能还没来得及 exec，先等进程立住。
+    n=0
+    while [ "$n" -lt 50 ] && ! running; do
+        sleep 0.1
+        n=$((n + 1))
+    done
+    if ! running; then
+        echo "meow: 起来之后 5 秒还没看到 meow 进程（exec 没成功？）" >&2
         return 1
     fi
-    trap 'cleanup_on_exit' EXIT
-    trap 'exit 0' TERM INT HUP
-    supervise
-    rc=$?
-    exit "$rc"
+    # 厂商网络服务可能在别处把 ip_forward 刷回 0（meow-fw.sh up 里也会再设一次）。
+    echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null \
+        || echo "meow: 无法打开 ip_forward" >&2
+    n=0
+    while [ "$n" -lt 60 ]; do
+        port_listening "$TPROXY_PORT" && break
+        if ! running; then
+            echo "meow: 进程在监听前退出（配置或端口有问题）" >&2
+            return 1
+        fi
+        sleep 1
+        n=$((n + 1))
+    done
+    if [ "$n" -ge 60 ]; then
+        echo "meow: 60s 内 :$TPROXY_PORT 没有监听" >&2
+        return 1
+    fi
+    if ! fw_call up; then
+        echo "meow: 装 nat 规则失败（stop 会把半套规则撤干净）" >&2
+        fw_clear
+        return 1
+    fi
+    echo "meow router ready: lan=$LAN_IF tproxy=:$TPROXY_PORT dns=:${DNS_PORT:-off}" >&2
+    return 0
 }
 
 # 宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL；Windows 直接强杀整棵树），stop
@@ -1147,7 +1116,25 @@ do_stop() {
     if running; then
         echo "meow: pid $(cat "$PIDFILE") 还在跑（宿主应该已经结束了它）" >&2
     fi
-    rm -f "$PIDFILE"
+    # 秒退 = 根本没起来（TUN 没权限、端口被占、网卡不存在都在这一刻暴露）：退回 off，
+    # 别让插件一直撞同一堵墙——页面打不开就什么也改不了。跑了一阵才死的算真退出，原样
+    # 交给宿主的退避重试。用户切形态走的是 restart（停止原因是 stop），这里不碰。
+    case "${SVCD_STOP_REASON:-}" in
+    crash)
+        _started_at=$(cat "$STARTED_AT" 2>/dev/null || true)
+        if [ -n "$_started_at" ] && [ $(($(date +%s) - _started_at)) -lt 10 ]; then
+            _mode=$(mode_of 2>/dev/null) || _mode=off
+            fall_back_to_off "$_mode" || true
+        fi
+        ;;
+    start-failed)
+        # started 钩子没过（router 等不到端口 / 装规则失败）：这个形态在这台机器上起不来，
+        # 退回 off 让插件至少能起。prepare 自己失败时这里多半已经是 off，无副作用。
+        _mode=$(mode_of 2>/dev/null) || _mode=off
+        fall_back_to_off "$_mode" || true
+        ;;
+    esac
+    rm -f "$PIDFILE" "$STARTED_AT"
     echo "stopped"
 }
 
@@ -1193,7 +1180,7 @@ do_fw() {
 }
 
 # 调试用：打印解析出来的形态与参数，不启动任何东西。
-# 会先把受管键写一遍（和 start 一样），所以看到的就是 meow 实际要用的配置。
+# 会先把受管键写一遍（和 prepare 一样），所以看到的就是 meow 实际要用的配置。
 do_mode() {
     prepare_config || return 1
     echo "meow  : $CONFIG"
@@ -1211,12 +1198,14 @@ do_mode() {
 }
 
 case "${1:-}" in
-    start)    do_start ;;
+    run)      do_run ;;
+    prepare)  do_prepare ;;
+    started)  do_started ;;
     stop)     do_stop ;;
     status)   do_status ;;
     hook)     shift; do_hook "$@" ;;
     mode)     do_mode ;;
     set-mode) shift; do_set_mode "${1:-}" ;;
     fw)       shift; do_fw "$@" ;;
-    *)        echo "usage: $0 start|stop|status|hook <capability>|mode|set-mode off|tun|tproxy|fw [up|down|status]" >&2; exit 2 ;;
+    *)        echo "usage: $0 run|prepare|started|stop|status|hook <capability>|mode|set-mode off|tun|tproxy|fw [up|down|status]" >&2; exit 2 ;;
 esac

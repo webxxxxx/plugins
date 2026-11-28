@@ -5,28 +5,44 @@
   "exec": {
     "path": "payload/bin/meow.sh",
     "args": [
-      "start"
+      "run"
     ],
     "ready": "exec"
   },
   "lifecycle": {
+    "start": {
+      "path": "payload/bin/meow.sh",
+      "args": [
+        "prepare"
+      ],
+      "timeout": 60
+    },
+    "started": {
+      "path": "payload/bin/meow.sh",
+      "args": [
+        "started"
+      ],
+      "timeout": 90
+    },
     "stop": {
       "path": "payload/bin/meow.sh",
       "args": [
         "stop"
-      ]
+      ],
+      "timeout": 20
     },
     "status": {
       "path": "payload/bin/meow.sh",
       "args": [
         "status"
-      ]
+      ],
+      "timeout": 10
     }
   },
   "capabilities": [
     {
       "name": "mode",
-      "desc": "读取或切换代理类型：off 不接管、tun 本机 TUN（proxy-mode: pc）、tproxy 网关（proxy-mode: router）。写进 config 的 proxy-mode，重启后仍然生效；Windows 上 tproxy 会被拒绝。",
+      "desc": "读取或切换代理类型：off 不接管、tun 本机 TUN（proxy-mode: pc）、tproxy 网关（proxy-mode: router）。切换只写 state，然后由页面调宿主的 restart 按新形态重建；Windows 上 tproxy 会被拒绝。",
       "inputSchema": {
         "type": "object",
         "properties": {

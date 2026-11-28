@@ -566,10 +566,11 @@ fi
 grep -qF '"mode":"off"' "$WORK/hook-read.out" ||
     fail "hook: 读状态没回缺省的 off（$(cat "$WORK/hook-read.out")）"
 
+# 写：只落 state。进程没在跑就不用重启——下一次 start 会按新形态准备。
 if ! hook_mode '{"mode":"tun"}' > "$WORK/hook-set.out" 2> "$WORK/hook-set.err"; then
     fail "hook: 切代理类型退出非零（$(cat "$WORK/hook-set.err")）"
 fi
-grep -qF '"changing":true' "$WORK/hook-set.out" || fail 'hook: 切代理类型没回执'
+grep -qF '"restart":false' "$WORK/hook-set.out" || fail 'hook: 没在跑的时候不该要重启'
 [ "$(state_of)" = pc ] || fail 'hook: 切完没落到 state'
 
 # 参数不认识就报错退出，state 一个字都不许动。
@@ -578,59 +579,104 @@ if hook_mode '{"mode":"bogus"}' >/dev/null 2>&1; then
 fi
 grep -qx 'proxy-mode: pc' "$_plugin/state" || fail 'hook: 被拒的调用改动了 state'
 
-# ---- 钩子与看护循环的交接：钩子只写 state，重启由前台看护循环做 ----
-# 只在 Linux 上跑：MSYS/Cygwin 的 fork + 信号模型撑不起「后台看护 + 前台 wait」，
-# 测出来的是仿真层的脾气，不是脚本的行为。CI 与 WSL 都走 Linux 这一支。
-if [ "$(uname -s)" != Linux ]; then
-    echo "skip: 看护循环的交接只在 Linux 上跑（当前 $(uname -s)）" >&2
-else
-fixture "$WORK/handoff"
+# ---- prepare：每次 spawn 之前把配置按形态准备好 ----
+# 没有看护循环了，宿主在 spawn exec 之前跑一次 lifecycle.start（meow.sh prepare）。
+fixture "$WORK/prepare"
 MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
-SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" start > "$WORK/handoff.out" 2> "$WORK/handoff.err" &
-SUPERVISOR=$!
-n=0
-while [ "$n" -lt 100 ] && [ ! -s "$_plugin/data/meow.pid" ]; do
-    sleep 0.1
-    n=$((n + 1))
-done
-[ -s "$_plugin/data/meow.pid" ] || fail 'handoff: 看护进程没把孩子拉起来'
+if ! SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" prepare > "$WORK/prepare.out" 2> "$WORK/prepare.err"; then
+    fail "prepare: 缺省形态就退出了（$(cat "$WORK/prepare.err")）"
+fi
+[ "$(state_of)" = off ] || fail 'prepare: 缺省没落成 off'
+grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'prepare: off 形态不该有 tproxy-port'
 
-hook_mode '{"mode":"tun"}' >/dev/null 2>&1 || fail 'handoff: 钩子切换失败'
-n=0
-while [ "$n" -lt 100 ] && ! grep -q 'proxy-mode off → pc' "$WORK/handoff.err"; do
-    sleep 0.1
-    n=$((n + 1))
-done
-grep -q 'proxy-mode off → pc' "$WORK/handoff.err" ||
-    fail "handoff: 看护循环没按新形态重启（$(cat "$WORK/handoff.err")）"
+# 页面上切到 tun 之后，下一次 prepare 就该按 pc 写受管键（Linux 的「tun」是
+# tproxy-port + routing-mark，tun 段保持关着）。
+hook_mode '{"mode":"tun"}' >/dev/null 2>&1
+SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" prepare > "$WORK/prepare-pc.out" 2> "$WORK/prepare-pc.err" ||
+    fail "prepare: pc 形态没准备好（$(cat "$WORK/prepare-pc.err")）"
+grep -qx 'tproxy-port: 7893' "$_plugin/config" || fail 'prepare: pc 形态的 tproxy-port 没写进去'
+grep -qx 'routing-mark: 9527' "$_plugin/config" || fail 'prepare: pc 形态的 routing-mark 没写进去'
 
-kill -TERM "$SUPERVISOR" 2>/dev/null || true
-wait "$SUPERVISOR" 2>/dev/null || true
-[ -f "$_plugin/data/meow.pid" ] && fail 'handoff: 退出后还留着 pidfile'
-
-# ---- 选中的形态起不来：自动降成 off，别让插件一直起不来 ----
-# pc 形态（Linux 上是 tproxy-port + nft）在这台机器上起不来时，宿主重启撞的还是同一堵墙：
-# 插件一直起不来，页面也就永远打不开。所以先把代理类型降成 off，起一个普通的 mixed-port，
-# 修好之后在页面上重新选 tun。
-fixture "$WORK/fallback"
+# 选中的形态在这台机器上起不来：降成 off 继续，别让插件起不来（页面就打不开了）。
+fixture "$WORK/prepare-fallback"
 MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
 mkdir -p "$_plugin/data"
 : > "$_plugin/data/fail-pc"
 printf 'proxy-mode: pc\n' > "$_plugin/state"
-SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" start > "$WORK/fallback.out" 2> "$WORK/fallback.err" &
-SUPERVISOR=$!
+if ! SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" prepare > "$WORK/pf.out" 2> "$WORK/pf.err"; then
+    fail "prepare: pc 起不来时该降成 off 而不是失败（$(cat "$WORK/pf.err")）"
+fi
+grep -q '降成 off' "$WORK/pf.err" || fail "prepare: 降级没写进日志（$(cat "$WORK/pf.err")）"
+[ "$(state_of)" = off ] || fail "prepare: state 没降成 off（$(state_of)）"
+grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'prepare: 降成 off 之后 tproxy-port 还在'
+
+# ---- stop：按「为什么结束」决定要不要降级 ----
+# 秒退的崩溃说明这个形态在这台机器上起不来，降成 off 让插件至少能起；
+# 用户切形态走的是 restart（停止原因是 stop），不许把它当成崩溃。
+fixture "$WORK/stop-crash"
+MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
+mkdir -p "$_plugin/data"
+printf 'proxy-mode: pc\n' > "$_plugin/state"
+printf '%s\n' "$(($(date +%s) - 2))" > "$_plugin/data/meow.started"
+SVCD_PLUGIN_DIR="$_plugin" SVCD_STOP_REASON=crash sh "$MEOW_SH" stop >/dev/null 2>&1 ||
+    fail 'stop: 退出非零'
+[ "$(state_of)" = off ] || fail 'stop: 秒退的崩溃没降成 off'
+[ -f "$_plugin/data/meow.started" ] && fail 'stop: 没清掉启动时间戳'
+
+fixture "$WORK/stop-switch"
+MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
+mkdir -p "$_plugin/data"
+printf 'proxy-mode: pc\n' > "$_plugin/state"
+printf '%s\n' "$(($(date +%s) - 2))" > "$_plugin/data/meow.started"
+SVCD_PLUGIN_DIR="$_plugin" SVCD_STOP_REASON=stop sh "$MEOW_SH" stop >/dev/null 2>&1 ||
+    fail 'stop: 退出非零'
+[ "$(state_of)" = pc ] || fail 'stop: 切形态被当成崩溃降级了'
+
+# ---- 一个进程：run 把 shell exec 掉 ----
+# 只在 Linux 上跑：认进程靠 /proc/<pid>/cmdline。
+if [ "$(uname -s)" != Linux ]; then
+    echo "skip: exec 的验证只在 Linux 上跑（当前 $(uname -s)）" >&2
+else
+fixture "$WORK/exec"
+MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
+SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" run > "$WORK/exec.out" 2> "$WORK/exec.err" &
+RUNNER=$!
 n=0
-while [ "$n" -lt 100 ] && ! grep -q '降成 off' "$WORK/fallback.err"; do
+while [ "$n" -lt 50 ] && [ ! -s "$_plugin/data/meow.pid" ]; do
     sleep 0.1
     n=$((n + 1))
 done
-kill -TERM "$SUPERVISOR" 2>/dev/null || true
-wait "$SUPERVISOR" 2>/dev/null || true
-grep -q '降成 off' "$WORK/fallback.err" ||
-    fail "fallback: 降级没写进日志（$(cat "$WORK/fallback.err")）"
-[ "$(state_of)" = off ] || fail "fallback: state 没降成 off（$(state_of)）"
-grep -qx 'tproxy-port:.*' "$_plugin/config" && fail 'fallback: 降成 off 之后 tproxy-port 还在'
-[ -f "$_plugin/data/meow.pid" ] && fail 'fallback: 退出后还留着 pidfile'
+PID=$(cat "$_plugin/data/meow.pid" 2>/dev/null || true)
+[ -n "$PID" ] || fail "exec: 没写 pidfile（$(cat "$WORK/exec.err")）"
+# exec 换掉了 shell：pid 没变，但过一会儿命令行里只剩 meow 本体，没有 meow.sh。
+n=0
+while [ "$n" -lt 50 ] && grep -q 'meow\.sh' "/proc/$PID/cmdline" 2>/dev/null; do
+    sleep 0.1
+    n=$((n + 1))
+done
+if grep -q 'meow\.sh' "/proc/$PID/cmdline" 2>/dev/null; then
+    fail 'exec: 命令行里还是 meow.sh，shell 没被 exec 掉'
+fi
+grep -qF "$_bin/meow" "/proc/$PID/cmdline" 2>/dev/null ||
+    fail "exec: 命令行里没有 meow 本体（$(tr '\0' ' ' < "/proc/$PID/cmdline")）"
+kill -TERM "$PID" 2>/dev/null || true
+wait "$RUNNER" 2>/dev/null || true
+
+# 进程活着的时候切形态，钩子要回 restart:true（页面据此调宿主的 restart）。
+fixture "$WORK/exec-mode"
+MEOW_SH="$_plugin/1.3.0/payload/bin/meow.sh"
+SVCD_PLUGIN_DIR="$_plugin" sh "$MEOW_SH" run >/dev/null 2>&1 &
+RUNNER=$!
+n=0
+while [ "$n" -lt 50 ] && [ ! -s "$_plugin/data/meow.pid" ]; do
+    sleep 0.1
+    n=$((n + 1))
+done
+hook_mode '{"mode":"tun"}' > "$WORK/exec-mode.out" 2>&1 || fail 'exec-mode: 钩子失败'
+grep -qF '"restart":true' "$WORK/exec-mode.out" ||
+    fail "exec-mode: 进程在跑却说不用重启（$(cat "$WORK/exec-mode.out")）"
+kill "$(cat "$_plugin/data/meow.pid")" 2>/dev/null || true
+wait "$RUNNER" 2>/dev/null || true
 fi
 
 # ---- 包里的 YACD 外壳：service worker 把它预缓存住了，改了文件就得改 revision ----

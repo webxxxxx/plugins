@@ -135,19 +135,29 @@ package/
 - 默认只做 `DIRECT` 直出；在配置里加 `proxies` 并把 `rules` 的 `MATCH`
   改到代理组后即可用面板切换。
 
-清单里 `exec.ready` 是 `exec`：宿主 spawn 完就算启动，stdout 只进日志，**没有协议通道**。
+清单里 `exec.ready` 是 `exec`，`exec.args` 是 `run`——脚本最后 `exec` 掉自己，所以**被监督的
+pid 就是 meow 本身**，`ps` 里只有一个进程（不再有看护 shell）。三段生命周期各管一段：
+
+- `lifecycle.start`（`prepare`，每次 spawn 之前跑一次、必须退出）：迁移、播 geo 库、生成
+  config、按形态写受管键，再跑 `meow -t` 校验；选中的形态起不来就先降成 off，别让插件起不来
+  （页面打不开就什么也改不了）。
+- `lifecycle.started`（就绪之后、Running 之前跑一次）：router 形态等 tproxy 端口监听、再挂
+  iptables；失败即本次启动失败，宿主会停整组、跑 `stop`。
+- `lifecycle.stop`（进程消失之后）：撤规则、删 pidfile；秒退（<10s）的崩溃顺手降成 off。
+
 页面顶部的代理类型是一个能力（`mode`），挂的是短命钩子（`capabilities[].hook`，svcd #342）：
 每次调用由宿主起一次 `meow.sh hook mode`，`arguments` 从 stdin 读、stdout 就是这次调用的
-文本结果。所以「一个常驻进程 + 偶尔被调一次」就够了，不必再养一个通道 shell。Windows 上
-pwsh 不能 `exec`，那边仍是 `ready: notify` + 协议 1 通道（见 `platforms/windows.json`）。
+文本结果。钩子**只写 state** 并回 `{"restart":true}`，页面再调 SDK 的 `ui.restartSelf()`
+（内部是 `POST /api/v1/services/meow/restart`），由宿主停整组 → 跑 `start` 按新形态重写
+受管键 → 重新 `exec` meow。钩子既不起进程也不杀进程，所以一次切换中间不会出现
+「配置已改、进程还没换」。
 
-宿主的 `exec` 就是那个**看护进程**（`exec.args` 是 `start`）：meow 是自己的子进程。
-`pc` / `off` 形态起进程就返回；`router` 形态还要等 tproxy 端口监听、挂好 iptables 规则。
-启动前会跑 `meow -t` 校验配置，失败就返回非零而不是秒退。孩子自己退出时看护循环跟着退出
-（宿主据此重启或报错）；页面切了代理类型，钩子只写 `state`、结束孩子就走，看护循环读到新的
-`proxy-mode` 后按新形态重启。`stop` 在进程退出之后跑：
-宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL；Windows 直接强杀整棵树），`stop`
-只收尾——先撤 TProxy 规则，再删掉强杀留下的 pidfile，它不杀进程；`status` 输出一行 JSON。
+Windows 上 pwsh 不能 `exec`，那边仍是 `ready: notify` + 协议 1 通道 + `meow.ps1` 自己的看护
+循环，2 个进程是它的地板（`platforms/windows.json`）。
+
+`stop` 在进程退出之后跑：宿主负责终止（Unix 进程组 SIGTERM → 10 秒 → SIGKILL；Windows 直接
+强杀整棵树），`stop` 只收尾——先撤 TProxy 规则，再删掉强杀留下的 pidfile，它不杀进程；
+`status` 输出一行 JSON。
 
 ## 配置
 
