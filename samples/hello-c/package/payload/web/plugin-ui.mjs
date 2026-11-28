@@ -16,6 +16,12 @@
 //
 // Auth is a path-scoped cookie plus an Origin check, both handled by the
 // browser: this file never touches a token.
+//
+// The host's own API sits on the same origin as the page, so a plugin that has
+// to do something to itself — restart after a startup-config change — uses the
+// console's session cookie through `hostRequest` / `restartSelf` below. A
+// capability hook is a short-lived process: it writes state and stops there,
+// because anything it started would be orphaned the moment it exits.
 
 const RPC = 'rpc';
 const EVENTS = 'events';
@@ -37,6 +43,12 @@ export class PluginRpcError extends Error {
 
 function baseHref() {
   return globalThis.location?.href ?? 'http://localhost/';
+}
+
+/** The plugin id from `/plugin-ui/<id>/...`; empty when the page is elsewhere. */
+function pagePluginId() {
+  const match = globalThis.location?.pathname?.match(/^\/plugin-ui\/([^/]+)\//);
+  return match ? decodeURIComponent(match[1]) : '';
 }
 
 function parse(raw) {
@@ -162,6 +174,42 @@ export function pluginUI(options = {}) {
       return JSON.parse(await http.text(path, init));
     },
   };
+
+  /**
+   * Call the host's own API (`/api/v1/...`).
+   *
+   * The page is served from `/plugin-ui/<id>/<token>/`, which is the console's
+   * own origin, so the console's session cookie travels with the request
+   * (`credentials: 'same-origin'`). A failure throws the same `PluginRpcError`
+   * `invoke` throws, so a page has one error path rather than two.
+   */
+  async function hostRequest(path, init = {}) {
+    const target = String(path).startsWith('/api/')
+      ? String(path)
+      : `/api/v1/${String(path).replace(/^\/+/, '')}`;
+    return jsonRequest(target, init);
+  }
+
+  /**
+   * Restart this plugin (`POST /api/v1/services/<id>/restart`), synchronously.
+   *
+   * A capability hook writes state and stops there: it is a short-lived process,
+   * so a child it started would be orphaned when it exits, and it must not signal
+   * the process group it does not own. Changing a plugin's own startup
+   * configuration therefore ends with the host running stop → start → spawn
+   * again, and the page is what asks for it — pass the id only when the page is
+   * not served under `/plugin-ui/<id>/`.
+   */
+  async function restartSelf(id) {
+    const owner = id || pagePluginId();
+    if (!owner) {
+      throw new PluginRpcError(
+        -32000,
+        'restartSelf: cannot tell the plugin id (the page is not under /plugin-ui/<id>/)'
+      );
+    }
+    return hostRequest(`services/${encodeURIComponent(owner)}/restart`, { method: 'POST' });
+  }
 
   /**
    * Subscribe over SSE.
@@ -447,6 +495,8 @@ export function pluginUI(options = {}) {
     invoke,
     invokeResult,
     http,
+    hostRequest,
+    restartSelf,
     subscribe,
     subscribeWebSocket,
     uploadBlob,
