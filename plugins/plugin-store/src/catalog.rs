@@ -24,9 +24,38 @@ pub struct Entry {
     pub device: Option<String>,
 }
 
+/// One store row: a plugin at one version on one platform, with every artifact
+/// that machine could install for it.
+///
+/// A device-restricted package (`<id>-<version>-<platform>-<device>.spk`)
+/// shares its `id`, its version and therefore its one install slot with the
+/// portable package of the same platform. The host installs exactly one of
+/// them, so the store must show one row with variants — two rows under the same
+/// name cannot say which one is installed, and both end up offering "upgrade".
+#[derive(Debug, Clone)]
+pub struct Row {
+    pub name: String,
+    pub platform: String,
+    pub version: String,
+    /// Universal first, then device builds ordered by id: a caller that knows
+    /// nothing else starts from the build any device of the platform can run.
+    pub variants: Vec<Entry>,
+}
+
+impl Row {
+    fn from_entry(entry: Entry) -> Row {
+        Row {
+            name: entry.name.clone(),
+            platform: entry.platform.clone(),
+            version: entry.version.clone(),
+            variants: vec![entry],
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Page {
-    pub items: Vec<Entry>,
+    pub items: Vec<Row>,
     pub total: usize,
     pub page: usize,
     pub pages: usize,
@@ -421,9 +450,10 @@ fn numeric_core(version: &str) -> Option<Vec<u64>> {
 }
 
 /// Filter by platform and (when the asset name carries one) device, search,
-/// and cut one 50-row page. A device-suffixed asset is only visible on that
-/// exact host device; no suffix means universal for the platform. page is
-/// 1-based and clamped to the last page; an empty result reports page 1.
+/// fold the artifacts of one install slot into one row, and cut a 50-row page.
+/// A device-suffixed asset is only visible on that exact host device; no suffix
+/// means universal for the platform. page is 1-based and clamped to the last
+/// page; an empty result reports page 1.
 pub fn select(
     entries: &[Entry],
     target: &str,
@@ -433,7 +463,7 @@ pub fn select(
     page: usize,
 ) -> Page {
     let query = query.trim().to_ascii_lowercase();
-    let mut matched: Vec<Entry> = entries
+    let matched = entries
         .iter()
         .filter(|entry| {
             if scope == "all" {
@@ -451,16 +481,40 @@ pub fn select(
             }
         })
         .filter(|entry| query.is_empty() || entry.name.to_ascii_lowercase().contains(&query))
-        .cloned()
-        .collect();
+        .cloned();
 
-    let total = matched.len();
+    // Fold variants into their row before paging: one `id` at one version on
+    // one platform is one install slot, so it must be one row. Grouping by
+    // version too keeps two catalog entries that differ only in version apart
+    // (the release workflow only writes the newest, but the parser must not
+    // depend on that).
+    let mut rows: Vec<Row> = Vec::new();
+    let mut slots: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    for entry in matched {
+        let key = (
+            entry.name.clone(),
+            entry.platform.clone(),
+            entry.version.clone(),
+        );
+        match slots.get(&key) {
+            Some(at) => rows[*at].variants.push(entry),
+            None => {
+                slots.insert(key, rows.len());
+                rows.push(Row::from_entry(entry));
+            }
+        }
+    }
+    for row in rows.iter_mut() {
+        // `None` (universal) sorts first.
+        row.variants.sort_by(|left, right| left.device.cmp(&right.device));
+    }
+
+    let total = rows.len();
     let pages = total.div_ceil(PAGE_SIZE);
     let page = page.max(1).min(pages.max(1));
     let start = (page - 1) * PAGE_SIZE;
     let items = if start < total {
-        matched
-            .drain(start..(start + PAGE_SIZE).min(total))
+        rows.drain(start..(start + PAGE_SIZE).min(total))
             .collect()
     } else {
         Vec::new()
@@ -626,7 +680,7 @@ mod tests {
         assert!(page
             .items
             .iter()
-            .all(|entry| entry.platform.ends_with("gnu")));
+            .all(|row| row.platform.ends_with("gnu")));
 
         let page = select(
             &entries,
@@ -708,11 +762,11 @@ mod tests {
             1,
         );
         assert_eq!(page.total, 2);
-        assert!(page.items.iter().any(|entry| entry.name == "universal"));
-        assert!(page
-            .items
+        assert!(page.items.iter().any(|row| row.name == "universal"));
+        assert!(page.items.iter().any(|row| row
+            .variants
             .iter()
-            .any(|entry| entry.device.as_deref() == Some("sr6110")));
+            .any(|entry| entry.device.as_deref() == Some("sr6110"))));
 
         let page = select(
             &entries,
@@ -728,6 +782,64 @@ mod tests {
         let page = select(&entries, "x86_64-unknown-linux-gnu", None, "device", "", 1);
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].name, "universal");
+    }
+
+    #[test]
+    fn a_universal_and_a_device_build_are_one_row() {
+        // The real shape of a variant release: same id, same version, same
+        // platform — one install slot, so one row with two variants.
+        let sample = r#"
+| 插件 | 版本 | 平台 | 大小 | 下载地址 |
+| --- | --- | --- | ---: | --- |
+| wireguard | 1.2.4 | aarch64-unknown-linux-musl | 4.1 MiB | [wireguard.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.4/wireguard-1.2.4-aarch64-unknown-linux-musl.spk) |
+| wireguard | 1.2.4 | aarch64-unknown-linux-musl | 566 KiB | [wireguard.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.4/wireguard-1.2.4-aarch64-unknown-linux-musl-sr6110.spk) |
+| meow | 1.3.12 | aarch64-unknown-linux-musl | 11.8 MiB | [meow.spk](https://github.com/webxxxxx/plugins/releases/download/meow-v1.3.12/meow-1.3.12-aarch64-unknown-linux-musl.spk) |
+"#;
+        let entries = parse(sample).unwrap();
+        assert_eq!(entries.len(), 3);
+
+        let page = select(
+            &entries,
+            "aarch64-unknown-linux-musl",
+            Some("sr6110"),
+            "device",
+            "",
+            1,
+        );
+        assert_eq!(page.items.len(), 2, "one row per plugin, not per artifact");
+        assert_eq!(page.total, 2);
+        let wireguard = page
+            .items
+            .iter()
+            .find(|row| row.name == "wireguard")
+            .expect("wireguard row");
+        assert_eq!(wireguard.version, "1.2.4");
+        let devices: Vec<Option<&str>> = wireguard
+            .variants
+            .iter()
+            .map(|entry| entry.device.as_deref())
+            .collect();
+        // Universal first: a caller that ignores variants installs the build
+        // every device of the platform can run.
+        assert_eq!(devices, vec![None, Some("sr6110")]);
+
+        // Another device sees only the universal artifact, still one row.
+        let page = select(
+            &entries,
+            "aarch64-unknown-linux-musl",
+            Some("other"),
+            "device",
+            "",
+            1,
+        );
+        assert_eq!(page.total, 2);
+        let wireguard = page
+            .items
+            .iter()
+            .find(|row| row.name == "wireguard")
+            .expect("wireguard row");
+        assert_eq!(wireguard.variants.len(), 1);
+        assert_eq!(wireguard.variants[0].device, None);
     }
 
     #[test]

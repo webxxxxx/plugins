@@ -75,6 +75,11 @@ jobs:
       - name: plugin-store page checks
         run: node plugins/plugin-store/tests/disk-plan.mjs
 
+      # 一个安装槽两个包（通用包 / 设备专属包）在商店里是一行两个变体；这一条钉住
+      # 「默认选哪个变体」的顺序：已装 > 操作员的选择 > 本机设备 > 通用。
+      - name: plugin-store 变体选择
+        run: node plugins/plugin-store/tests/variants.mjs
+
       # 插件页面对宿主 `/api/v1` 的写请求是 cookie 写，缺 `X-Svcd-Csrf: 1`
       # 就 403（表现为“已保存，但插件没重启”）。用打桩的 fetch 钉住 SDK 里
       # 每一条写路径，读请求保持原样。

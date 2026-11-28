@@ -255,10 +255,25 @@ impl PluginStore {
             Err(_) => return ToolOutcome::error("状态锁不可用"),
         };
         let page = catalog::select(&state.entries, target, device, scope, &query, page);
+        // One row per install slot: `variants` are the artifacts that share an
+        // id, a version and a platform (a device-restricted build next to the
+        // portable one). The page picks the variant that matches what is
+        // installed; `name` / `version` / `platform` are the row's own facts.
         let items: Vec<Value> = page
             .items
             .iter()
-            .map(|entry| entry_json(entry, &self.download_dir))
+            .map(|row| {
+                json!({
+                    "name": row.name,
+                    "version": row.version,
+                    "platform": row.platform,
+                    "variants": row
+                        .variants
+                        .iter()
+                        .map(|entry| entry_json(entry, &self.download_dir))
+                        .collect::<Vec<Value>>(),
+                })
+            })
             .collect();
         let stale = state
             .fetched_at

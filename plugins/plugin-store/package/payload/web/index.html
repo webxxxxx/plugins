@@ -97,6 +97,7 @@
   .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; background: var(--bg); color: var(--muted); font-size: 11px; margin-left: 6px; white-space: nowrap; }
   .badge.cached, .badge.installed { color: var(--ok); background: var(--ok-bg); }
   .badge.self { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  select.variant { margin-left: 6px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
   .cell-action { text-align: right; white-space: nowrap; }
   .empty { padding: 42px 20px; text-align: center; color: var(--muted); }
   .empty strong { display: block; color: var(--ink); margin-bottom: 6px; }
@@ -268,9 +269,17 @@
   };
 
   const state = { page: 1, query: '', data: null, job: null, installed: new Map(), loading: false, pending: false, handoffJob: null, selfId: null };
+  // The variant (device id, '' for the portable build) the operator picked for
+  // a row, per plugin. The installed variant wins over this once the host
+  // reports one; this only remembers a deliberate switch.
+  const variantChoice = new Map();
   const INSTALLED_TTL_MS = 30000;
   let installedFetchedAt = 0;
   let installedRequest = null;
+  // Which variant each installed plugin is: `devices` on its service row
+  // (the package manifest's `compat.devices`). A device-restricted build keeps
+  // its id and version, so an empty list here is the portable package.
+  let installedDevices = new Map();
   // Where each plugin is installed (`installDir` on its service row). The
   // pre-flight needs this plugin's own directory: that is where the download
   // lands, so that is the volume the package has to fit on first.
@@ -370,12 +379,19 @@
         const body = await response.json();
         const installed = new Map();
         const dirs = new Map();
+        const devices = new Map();
         for (const service of body.services || []) {
           if (!service || service.kind !== 'plugin' || !service.id) continue;
           installed.set(service.id, service.version || '');
           if (service.installDir) dirs.set(service.id, service.installDir);
+          // `devices` is the installed package's `compat.devices` (#350): the
+          // one thing that tells a portable build from a device-restricted one.
+          if (Array.isArray(service.devices) && service.devices.length) {
+            devices.set(service.id, service.devices[0]);
+          }
         }
         installedDirs = dirs;
+        installedDevices = devices;
         installedFetchedAt = Date.now();
         return installed;
       } catch (_) {
@@ -488,7 +504,7 @@
       tr.appendChild(td);
       rows.appendChild(tr);
     } else {
-      for (const entry of data.items) rows.appendChild(renderRow(entry));
+      for (const row of data.items) rows.appendChild(renderRow(row));
     }
 
     if (data.total === 0) {
@@ -501,15 +517,46 @@
 
   }
 
-  function renderRow(entry) {
+  // One row is one install slot: a plugin at one version on one platform, plus
+  // every artifact this machine could put in that slot. A device-restricted
+  // build (`<id>-<version>-<platform>-<device>.spk`) shares its id, its version
+  // and therefore its slot with the portable package — the host installs one of
+  // them, so the store shows one row with variants (#350).
+  function variantsOf(row) {
+    return row.variants && row.variants.length ? row.variants : [row];
+  }
+
+  // The variant to offer first, in order of how much we know: the installed one
+  // (the host reports `devices`, so this is a fact), the one the operator
+  // picked, the build for this machine's own device, then the portable one.
+  // `null` / `undefined` entries mean "no opinion" and are skipped.
+  function pickVariant(row, preferences) {
+    const variants = variantsOf(row);
+    for (const device of preferences) {
+      if (device === null || device === undefined) continue;
+      const found = variants.find((entry) => (entry.device || '') === device);
+      if (found) return found;
+    }
+    return variants[0];
+  }
+
+  function renderRow(row) {
     const tr = document.createElement('tr');
+    const variants = variantsOf(row);
+    const installedVersion = state.installed.get(row.name);
+    const isInstalled = installedVersion !== undefined;
+    // Not installed: no opinion. Installed: `''` is the portable package,
+    // a device id is that device's build (`installedDevices` has no entry).
+    const installedDevice = isInstalled ? installedDevices.get(row.name) || '' : null;
+    const remembered = variantChoice.has(row.name) ? variantChoice.get(row.name) : null;
+    const entry = pickVariant(row, [installedDevice, remembered, HOST.device, '']);
 
     const nameCell = document.createElement('td');
     const name = document.createElement('span');
     name.className = 'name';
-    name.textContent = entry.name;
+    name.textContent = row.name;
     nameCell.appendChild(name);
-    const isSelf = Boolean(state.selfId) && entry.name === state.selfId;
+    const isSelf = Boolean(state.selfId) && row.name === state.selfId;
     if (isSelf) {
       const badge = document.createElement('span');
       badge.className = 'badge self';
@@ -517,8 +564,6 @@
       badge.title = '插件商店自己：升级会替换正在运行的版本并重启它';
       nameCell.appendChild(badge);
     }
-    const installedVersion = state.installed.get(entry.name);
-    const isInstalled = installedVersion !== undefined;
     // An unknown installed version is treated as current: without a version
     // there is no honest way to offer an upgrade. A known but older version
     // is the only case that gets the upgrade action.
@@ -549,7 +594,25 @@
     const platformCell = document.createElement('td');
     platformCell.className = 'mono muted';
     platformCell.textContent = entry.platform;
-    if (entry.device) {
+    if (variants.length > 1) {
+      // The selector is the row's variant; switching it switches which package
+      // the action installs. Same slot either way.
+      const select = document.createElement('select');
+      select.className = 'variant';
+      select.title = '同一个安装槽的两个包：通用包跑用户态后端，设备包带内核模块';
+      for (const variant of variants) {
+        const option = document.createElement('option');
+        option.value = variant.device || '';
+        option.textContent = variant.device ? variant.device + ' 专用' : '通用';
+        option.selected = (variant.device || '') === (entry.device || '');
+        select.appendChild(option);
+      }
+      select.onchange = () => {
+        variantChoice.set(row.name, select.value);
+        render();
+      };
+      platformCell.appendChild(select);
+    } else if (entry.device) {
       const badge = document.createElement('span');
       badge.className = 'badge';
       badge.textContent = entry.device;
@@ -571,15 +634,18 @@
       (state.job.device || '') === (entry.device || '');
     button.textContent = confirming ? '确认升级' : active ? '处理中…' : upToDate ? '已安装' : canUpgrade ? '升级' : (entry.cached ? '安装' : '下载安装');
     button.disabled = upToDate || Boolean(state.job && !state.job.done);
+    const variantLabel = entry.device ? entry.device + ' 专用包' : '通用包';
     if (upToDate) {
       button.title = installedVersion && installedVersion !== entry.version
         ? '已安装版本 ' + installedVersion + '，不低于目录版本'
         : '已安装该版本';
     } else if (canUpgrade) {
       button.title = (isSelf ? '升级会重启插件商店，页面随后自动刷新：' : '') +
-        '从 ' + installedVersion + ' 升级到 ' + entry.version;
+        '从 ' + installedVersion + ' 升级到 ' + entry.version + '（' + variantLabel + '）';
     } else if (isSelf) {
       button.title = '安装插件商店会重启它，页面随后自动刷新';
+    } else {
+      button.title = '安装 ' + entry.version + '（' + variantLabel + '）';
     }
     button.onclick = () => startInstall(entry);
     actionCell.appendChild(button);
@@ -1022,6 +1088,21 @@
   // running — the failure we just saw is then about the retry, not about the
   // install (#21). The host's own service list answers that, so ask it before
   // reporting a failure.
+  // Remember what the host now holds: the version drives the upgrade decision,
+  // and `devices[0]` says which variant of a shared install slot it is (no
+  // `devices` means the portable package).
+  function recordInstalled(service, name) {
+    if (!service || !service.id) return;
+    const version = service.version || '';
+    const device = Array.isArray(service.devices) && service.devices.length ? service.devices[0] : '';
+    for (const key of [service.id, name]) {
+      if (!key) continue;
+      state.installed.set(key, version);
+      if (device) installedDevices.set(key, device);
+      else installedDevices.delete(key);
+    }
+  }
+
   async function alreadyInstalled(job) {
     try {
       const response = await fetch('/api/v1/services', { credentials: 'same-origin' });
@@ -1121,8 +1202,7 @@
         return;
       }
 
-      state.installed.set(job.name, installed.version || '');
-      state.installed.set(installed.id, installed.version || '');
+      recordInstalled(installed, job.name);
       installedFetchedAt = Date.now();
       if (installed.state !== 'running') {
         const startResponse = await fetch(
@@ -1156,8 +1236,7 @@
           await restartSelf(landed);
           return;
         }
-        state.installed.set(landed.id, landed.version);
-        state.installed.set(job.name, landed.version);
+        recordInstalled(landed, job.name);
         try {
           await call('install_result', {
             ok: true,
