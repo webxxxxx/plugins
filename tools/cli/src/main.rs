@@ -1,7 +1,7 @@
 //! CLI entry for `plugin-tools`. See `lib.rs` for the four verbs.
 
 use plugin_tools::{
-    build_from_recipe, check_overlay_names, devkey, host_triple, instantiate, languages_for,
+    build_from_recipe, check_overlay_names, check_variant_dirs, devkey, host_triple, instantiate, languages_for,
     merged_manifest, overlays, pack, parse_manifest, parse_meta, pascal, plugin_id_of, read_base,
     read_recipe, stage_package, sync, valid_name, vendor_sdk, write_json, write_project, Package,
     Project, Repo, TempStage, FAMILIES, PLATFORMS,
@@ -823,6 +823,7 @@ fn pack_plugin(args: &[String]) -> Result<Packed, String> {
         );
     }
     check_overlay_names(&root)?;
+    check_variant_dirs(&root)?;
     if flag(args, "--platform").is_none() {
         warn_unused_overlays(&root, &platforms);
     }
@@ -883,7 +884,11 @@ fn pack_plugin(args: &[String]) -> Result<Packed, String> {
         // its own scripts, or any platform the caller wants as a tarball-ready
         // tree — bundles a staged copy.
         let temp;
-        let package_dir = if merged.is_some() || stage_root.is_some() || has_scripts {
+        // A unit that brings its own payload overlay has to be staged even when
+        // nothing else moves: `package/` alone is the wrong tree for it.
+        let unit_overlay = plugin_tools::variant_overlay(&root, unit.device.as_deref()).is_some();
+        let package_dir = if merged.is_some() || stage_root.is_some() || has_scripts || unit_overlay
+        {
             let stage = match &stage_root {
                 Some(dir) => dir.clone(),
                 None => {
@@ -891,7 +896,14 @@ fn pack_plugin(args: &[String]) -> Result<Packed, String> {
                     temp.path().to_path_buf()
                 }
             };
-            let staged = stage_package(&root, &stage, merged.as_ref(), platform, exec.as_deref())?;
+            let staged = stage_package(
+                &root,
+                &stage,
+                merged.as_ref(),
+                platform,
+                exec.as_deref(),
+                unit.device.as_deref(),
+            )?;
             println!("stage: {}", staged.display());
             staged
         } else {

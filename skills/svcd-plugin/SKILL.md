@@ -289,7 +289,17 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 
 **源码留在 `package/` 外面。** `package/` 是打包根，打包器不过滤任何文件：放进去的 `src/`、`Cargo.toml`、`.gitkeep` 都会进 `.spk`。构建产物由 `build.json` 的 `artifact` 复制进 `payload/bin/`；同一目录里上一个平台留下的同名产物（`demo` ↔ `demo.exe`）会在构建前被清掉，否则两种架构会一起进包。
 
-**`vendor/` 放源码，打包前编译。** 和 `meow`、`sshd` 一样：`vendor/<依赖>/` 存上游源码，`build.sh` 在打包时编译，产物落在 `out/` 或 `payload/bin/`。提交二进制会让它跟源码一起腐烂。唯一的例外是设备内核模块：它对着一棵 CI 里没有的厂商内核树编，只能放 `vendor/prebuilt/<三元组>/`，并且同目录必须有 `SHA256SUMS`。`tools/check-vendor.py` 会拦住其余 ELF/`.a`。
+**`vendor/` 放源码，打包前编译。** 和 `meow`、`sshd` 一样：`vendor/<依赖>/` 存上游源码，`build.sh` 在打包时编译，产物落在 `out/` 或 `payload/bin/`。提交二进制会让它跟源码一起腐烂。唯一的例外是设备内核模块：它对着一棵 CI 里没有的厂商内核树编，只能预编译，并且只能用 `SHA256SUMS` 校验着放（见下面「单元专属的文件」）。`tools/check-vendor.py` 会拦住其余 ELF/`.a`。
+
+**单元专属的文件放 `variants/<unit>/`，不要放 `package/`。** 一个包里只该有它那个单元（平台 + 设备）的东西：内核模块只对一个固件代次有效，`gotatun` 只属于通用包。`package/` 是所有包共用的，把这类文件放进去就只能靠 `build.sh` 记得在下一个包之前删掉——漏一次就进错包（打包器看到 `.ko` 还会要求声明 `compat`）。`variants/<unit>/` 和 `package/` 同形（`payload/bin/…`），打包时只按单元盖上去：
+
+| 目录 | 谁拿到 |
+| --- | --- |
+| `package/` | 所有包 |
+| `variants/universal/` | 只给通用包（没有 `--device` 的那个） |
+| `variants/<device>/` | 只给那个设备变体的包（`.plugin.json` 的 `variants[].device`） |
+
+目录名必须是声明过的 device 或 `universal`，写错 `plugin-tools build` 直接报错。里面有预编译件时，`variants/<unit>/SHA256SUMS` 必须能校验它——`tools/check-vendor.py` 会拦。构建产物写进这两处也要在插件自己的 `.gitignore` 里忽略。
 
 **平台差异写进 `platforms/`，不要为它加启动壳。** `.spk` 是按平台产出的（打包器盖 `platform`），而 manifest 的 `exec` / `lifecycle` / `interpreter` 各只有一个；脚本入口又必须挑解释器：POSIX 用 `sh`、Windows 用 `powershell`。需要按平台换入口时，`package/manifest.json` 只留平台无关的字段，入口写进与 `package/` 同级的 `platforms/<家族>.json`（`unix` / `windows`，一个家族一份；`template` 就生成这两份）：同名顶层键整段替换，`null` 删除，`id` / `version` 不许改。同家族里个别三元组真不一样时再加 `platforms/<三元组>.json` 当例外层，它压在家族之上；除此之外 `platforms/` 里只认 7 个三元组和这两个家族名，别的名字直接报错。`platforms/` 下还可以直接放入口脚本，构建时按扩展名分家族（`.sh` → unix，`.ps1`/`.cmd`/`.bat` → windows）复制进 `payload/bin/`，别的平台那份不进包；`platforms/lib/` 是同一件事的库版本，SDK 副本放那里、构建时按同样规则进 `payload/lib/`，所以 Linux 包里不会带 `SvcdPlugin.ps1`。`plugin-tools build` 按平台合并后再交给 `plugin bundle`，副本里缺了清单指的文件会立刻报错（没有 `platforms/` 的插件也查：Windows 上 `rust` / `c` 的产物是 `<name>.exe`，构建会把 `exec.path` 改成实际产物名写进副本，签名 job 从 tar 重打包时没有 `--exec` 可传）。发布流水线因此要从 `--stage dist/stage` 打 tar —— 签名 job 会重新 bundle 那个目录，平台清单必须在那之前就进包。
 
@@ -345,7 +355,8 @@ SDK 没有 raw 实现。
 | Windows 上启动 `exit=9009` | `interpreter.name` 写了 `python3`（那是 0 字节存根，用 `python` 或 `py`） |
 | Debian 上装不上 | 给 `sh` 写了 `interpreter.version`（dash 的 `--version` 会报错） |
 | 包里出现源码 | 源码或占位文件放进了 `package/` |
-| `vendor/` 里提交了二进制 | `tools/check-vendor.py` 会报错：源码放 `vendor/`、打包时编译；只有内核模块进 `vendor/prebuilt/<三元组>/` |
+| `vendor/` 里提交了二进制 | `tools/check-vendor.py` 会报错：源码放 `vendor/`、打包时编译；预编译件只能放 `vendor/prebuilt/<三元组>/` 或 `variants/<unit>/`，并带 SHA256SUMS |
+| 一个包里有别的单元的文件 | 放进了 `package/`：单元专属（设备内核模块、某个后端）的放 `variants/<unit>/`，见「单元专属的文件」 |
 | 本机打包报找不到 `cc` / `<triple>-gcc` | 构建脚本没走 `tools/cross-env.sh`，或目标工具链没装（`tools/cross/install.sh <triple>`） |
 | 装不上，提示重打包 | 包不是 `schema: 1` 或没有 `id`——用新版 `plugin-tools build` 重打 |
 | 目录名变成中文/乱码 | 把显示名写进了 `id`；中文只能放 `name` |

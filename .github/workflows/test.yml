@@ -50,7 +50,7 @@ jobs:
         run: cargo test --locked
 
       # Cheap repo-wide guardrails: payload scripts parse and are LF, vendor/
-      # only commits source (prebuilt kernel modules live under vendor/prebuilt),
+      # only commits source (prebuilt kernel modules live under variants/<unit>/, with a SHA256SUMS),
       # and the release matrix builder has its own tests instead of running
       # first at tag time.
       - name: Repo guardrails

@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "wireguard",
   "name": "WireGuard 隧道",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "desc": "WireGuard 隧道：内核模块或 gotatun 用户态实现随包，多 peer 管理页面与二维码",
   "protocol": 1,
   "interpreter": {

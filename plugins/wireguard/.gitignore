@@ -4,3 +4,10 @@
 # 构建产物：由 build.json 在构建时从 vendor/ 复制进 payload，不进仓库
 /package/payload/bin/*
 !/package/payload/bin/*.sh
+
+# 变体专属的文件（`variants/<unit>/` 只进那个单元自己的包）。构建产物不进仓库，
+# 例外是 sr6110 的内核模块：它要对着厂商内核树编，只能预编译进包，靠
+# variants/sr6110/SHA256SUMS 校验。
+/variants/*/payload/bin/*
+!/variants/*/payload/bin/*.sh
+!/variants/sr6110/payload/bin/wireguard.ko

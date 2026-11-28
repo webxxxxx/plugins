@@ -37,7 +37,7 @@ fixture() {
     _bin="$_plugin/payload/bin"
     mkdir -p "$_bin" "$_plugin/payload/lib" "$_plugin/data"
     cp "$REPO/plugins/wireguard/package/payload/bin/wireguardd.sh" "$_bin/"
-    cp "$REPO/plugins/wireguard/package/payload/bin/wg-lan-fix.sh" "$_bin/"
+    cp "$REPO/plugins/wireguard/variants/sr6110/payload/bin/wg-lan-fix.sh" "$_bin/"
     cp "$REPO/plugins/wireguard/package/payload/lib/wireguard-lib.sh" "$_plugin/payload/lib/"
     cp "$REPO/plugins/wireguard/package/payload/lib/svcd-plugin.sh" "$_plugin/payload/lib/"
     printf '#!/bin/sh\nexit 0\n' > "$_bin/wg-tool"

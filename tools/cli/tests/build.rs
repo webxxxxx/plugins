@@ -224,6 +224,78 @@ fn a_capability_hook_in_the_package_lets_the_build_through() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A device variant carries a payload overlay of its own (`variants/<unit>/`),
+/// and no other unit's package gets those files.
+#[test]
+fn a_variant_payload_overlay_only_reaches_its_own_package() {
+    let root = project("variant-overlay", &MANIFEST);
+    std::fs::write(
+        root.join(".plugin.json"),
+        r#"{
+  "name": "demo",
+  "language": "shell",
+  "platforms": ["x86_64-unknown-linux-gnu"],
+  "variants": [{ "device": "sr6110", "platforms": ["x86_64-unknown-linux-gnu"] }]
+}"#,
+    )
+    .unwrap();
+    // 通用包专属：只有 device 为空的那个包该有它。
+    std::fs::create_dir_all(root.join("variants/universal/payload/bin")).unwrap();
+    std::fs::write(root.join("variants/universal/payload/bin/portable"), "portable\n").unwrap();
+    // 设备包专属：内核模块这类只对一个固件代次有效的东西。
+    std::fs::create_dir_all(root.join("variants/sr6110/payload/bin")).unwrap();
+    std::fs::write(root.join("variants/sr6110/payload/bin/only-6110.ko"), "ko\n").unwrap();
+
+    for (tag, device, present, absent) in [
+        ("universal", None, "portable", "only-6110.ko"),
+        ("device", Some("sr6110"), "only-6110.ko", "portable"),
+    ] {
+        let stage = root.join(format!("dist/{tag}"));
+        let mut args = vec![
+            "build",
+            "--platform",
+            "x86_64-unknown-linux-gnu",
+            "--stage",
+            stage.to_str().unwrap(),
+        ];
+        if let Some(device) = device {
+            args.push("--device");
+            args.push(device);
+        }
+        let (output, _calls) = run(&root, &args);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let bin = stage.join("package/payload/bin");
+        assert!(
+            bin.join(present).is_file(),
+            "{tag}: {} is missing from the package: {}",
+            present,
+            stderr(&output)
+        );
+        assert!(
+            !bin.join(absent).exists(),
+            "{tag}: {} leaked into the wrong package",
+            absent
+        );
+    }
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_variant_dir_for_an_undeclared_device_is_refused() {
+    let root = project("variant-typo", &MANIFEST);
+    std::fs::create_dir_all(root.join("variants/sr6111/payload/bin")).unwrap();
+    std::fs::write(root.join("variants/sr6111/payload/bin/x"), "x\n").unwrap();
+    let (output, calls) = run(&root, &["build", "--platform", "x86_64-unknown-linux-gnu"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("variants/sr6111"),
+        "the error should name the directory: {}",
+        stderr(&output)
+    );
+    assert!(calls.is_empty(), "the host must not run: {calls:?}");
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn a_declared_icon_lets_the_build_through() {    let root = project(
         "icons-ok",

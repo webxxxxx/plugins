@@ -882,12 +882,75 @@ fn value_is_payload_path(value: &str) -> bool {
 /// declared one (Windows adds `.exe`). It is written into the staged manifest so
 /// the tarball describes the artifact inside it: the release pipeline bundles the
 /// tarball later, without the `--exec` this build passes to the packer.
+/// The overlay name a device-less package uses. The universal build for a
+/// triple is not "no variant" — it is a unit of its own, with its own files.
+pub const UNIVERSAL_UNIT: &str = "universal";
+
+/// Overlay key for one build unit: its device id, or [`UNIVERSAL_UNIT`].
+pub fn unit_key(device: Option<&str>) -> &str {
+    match device {
+        Some(device) if !device.trim().is_empty() => device,
+        _ => UNIVERSAL_UNIT,
+    }
+}
+
+/// `<project>/variants/<unit>/` — a tree shaped like `package/` that only one
+/// build unit receives.
+///
+/// Some files belong to one package and no other. A kernel module matches one
+/// firmware generation, and the portable build for the same triple must not
+/// carry it; the opposite happens too (`gotatun` only rides in the universal
+/// package). Left in `package/` they would ride along — or wait for a recipe to
+/// remember to delete them before the next unit builds. Kept here the split is
+/// structural: the stage copies the overlay for its own unit and nothing else.
+pub fn variant_overlay(root: &Path, device: Option<&str>) -> Option<PathBuf> {
+    let dir = root.join("variants").join(unit_key(device));
+    if dir.is_dir() {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+/// Every `variants/<unit>/` must be `universal` or a device the project
+/// declares. A typo would otherwise ship a package silently missing the files
+/// only that unit needs.
+pub fn check_variant_dirs(root: &Path) -> Result<(), String> {
+    let dir = root.join("variants");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let mut known: Vec<String> = read_project(root)?
+        .variants
+        .iter()
+        .map(|variant| variant.device.trim().to_string())
+        .collect();
+    known.sort();
+    known.push(UNIVERSAL_UNIT.to_string());
+    let mut names = Vec::new();
+    for entry in fs::read_dir(&dir).map_err(|error| format!("read {}: {}", dir.display(), error))? {
+        let entry = entry.map_err(|error| format!("read {}: {}", dir.display(), error))?;
+        if entry.path().is_dir() {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    names.sort();
+    if let Some(unknown) = names.iter().find(|name| !known.contains(name)) {
+        return Err(format!(
+            "variants/{unknown}: not a unit of this project; expected {} (a device id from .plugin.json, or universal for the device-less package)",
+            known.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 pub fn stage_package(
     root: &Path,
     stage_root: &Path,
     manifest: Option<&Value>,
     platform: &str,
     exec: Option<&str>,
+    device: Option<&str>,
 ) -> Result<PathBuf, String> {
     let source = root.join("package");
     let target = stage_root.join("package");
@@ -896,6 +959,12 @@ pub fn stage_package(
             .map_err(|error| format!("clear {}: {}", target.display(), error))?;
     }
     copy_tree(&source, &target)?;
+    // Files that belong to this unit only (a device kernel module, a backend
+    // that one package uses). The other units never see them: they are not in
+    // `package/`, so there is nothing for a later build to leave behind.
+    if let Some(overlay) = variant_overlay(root, device) {
+        copy_tree(&overlay, &target)?;
+    }
     let copied = materialize_scripts(root, &target, platform)?;
     let mut view = match manifest {
         Some(merged) => merged.clone(),
@@ -1610,6 +1679,7 @@ mod tests {
             None,
             "x86_64-pc-windows-msvc",
             Some("payload/bin/demo.exe"),
+            None,
         )
         .unwrap();
         let bytes = fs::read(staged.join("manifest.json")).unwrap();

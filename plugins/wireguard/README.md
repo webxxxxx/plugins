@@ -24,11 +24,11 @@ macOS / Windows 还没做：它们要换网络层（`ifconfig`/`route`/`pf`、`n
 ## 产物
 
 ```
-wireguard-1.2.2-x86_64-unknown-linux-musl.spk
-wireguard-1.2.2-aarch64-unknown-linux-musl.spk
-wireguard-1.2.2-armv7-unknown-linux-musleabihf.spk
-wireguard-1.2.2-x86_64-unknown-linux-gnu.spk
-wireguard-1.2.2-aarch64-unknown-linux-musl-sr6110.spk   ← compat.devices: ["sr6110"]
+wireguard-1.2.3-x86_64-unknown-linux-musl.spk
+wireguard-1.2.3-aarch64-unknown-linux-musl.spk
+wireguard-1.2.3-armv7-unknown-linux-musleabihf.spk
+wireguard-1.2.3-x86_64-unknown-linux-gnu.spk
+wireguard-1.2.3-aarch64-unknown-linux-musl-sr6110.spk   ← compat.devices: ["sr6110"]
 ```
 
 设备后缀来自该包 manifest 的 `compat.devices[0]`。通用包没有 `compat`，任何设备都能装；
@@ -42,21 +42,27 @@ build.json                构建配方（artifact: out/{platform}/wg-tool）
 build.sh                  打包前编译：从 vendor/ 源码编 wg 和 gotatun；sr6110 只拷预编译 ko
 package/
 ├── manifest.json         平台无关的清单（没有 compat，变体由构建注入）
-└── payload/
-    ├── bin/
-    │   ├── wireguard.sh  生命周期：prepare / up / down / status
-    │   ├── wireguardd.sh 被监督进程：启动时建隧道 + 前台看守；能力钩子也是它（hook 子命令）
-    │   ├── wg-lan-fix.sh 内核后端的 LAN 自愈（sr6110 专用）：看守每 30 秒叫一次 `--once`
-    │   ├── wg-tool       构建产物（wg）
-    │   └── wireguard.ko  或 gotatun：构建产物，按包选一个
-    ├── lib/
-    │   ├── svcd-plugin.sh    协议壳（sdk/shell 副本）
-    │   └── wireguard-lib.sh  设置/密钥/peer/后端判定
-    └── web/                  管理页面（静态，无构建步骤）
+├── payload/
+│   ├── bin/
+│   │   ├── wireguard.sh  生命周期：prepare / up / down / status
+│   │   ├── wireguardd.sh 被监督进程：启动时建隧道 + 前台看守；能力钩子也是它（hook 子命令）
+│   │   └── wg-tool       构建产物（wg，两个包都要）
+│   ├── lib/
+│   │   ├── svcd-plugin.sh    协议壳（sdk/shell 副本）
+│   │   └── wireguard-lib.sh  设置/密钥/peer/后端判定
+│   └── web/                  管理页面（静态，无构建步骤）
+variants/
+├── sr6110/payload/bin/
+│   ├── wireguard.ko    SR6110 内核模块：唯一预编译件（要对着厂商内核树编），带 SHA256SUMS
+│   └── wg-lan-fix.sh   内核后端的 LAN 自愈（每 30 秒一拍 `--once`）
+└── universal/payload/bin/gotatun   通用包的用户态引擎（构建产物）
 vendor/gotatun-0.9.2/     gotatun 源码（MPL-2.0），打包前编译
 vendor/wireguard-tools/   wg 源码（GPL-2.0），打包前编译
-vendor/prebuilt/…/wireguard.ko  SR6110 内核模块：唯一预编译件（要对着厂商内核树编）
 ```
+
+`payload/` 是**所有包共用**的那一半；`variants/<unit>/` 只进那个单元的包：内核模块和
+LAN 自愈只给 `sr6110` 的包，`gotatun` 只给通用包——放错地方打包器会直接拒绝，不用
+靠 `build.sh` 记得删。
 
 ## 运行方式
 
@@ -111,7 +117,7 @@ vendor/prebuilt/…/wireguard.ko  SR6110 内核模块：唯一预编译件（要
 通用包直接装（`compat` 为空，任何设备可装）：
 
 ```sh
-plugin install wireguard-1.2.2-aarch64-unknown-linux-musl.spk
+plugin install wireguard-1.2.3-aarch64-unknown-linux-musl.spk
 plugin start wireguard
 ```
 
@@ -119,7 +125,7 @@ SR6110 用变体包，并且要先写设备兼容标识（只做一次）：
 
 ```sh
 svc compat init --device sr6110
-plugin install wireguard-1.2.2-aarch64-unknown-linux-musl-sr6110.spk
+plugin install wireguard-1.2.3-aarch64-unknown-linux-musl-sr6110.spk
 plugin start wireguard
 ```
 
@@ -137,7 +143,7 @@ peer、扫码。
 # 只打本机三元组的通用包（需要该三元组的 C/Rust 工具链）
 plugin-tools build --platform x86_64-unknown-linux-musl
 
-# 只打 sr6110 变体（aarch64 musl；ko 直接拷 vendor/prebuilt）
+# 只打 sr6110 变体（aarch64 musl；ko 与 LAN 自愈来自 variants/sr6110/）
 plugin-tools build --device sr6110 --platform aarch64-unknown-linux-musl
 
 # 一次打出全部 5 个包

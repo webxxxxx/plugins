@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-"""Guardrail: what gets committed under `vendor/` is source.
+"""Guardrail: what gets committed under `vendor/` (and `variants/`) is source.
 
 The repo builds vendored code at package time (meow, sshd, wireguard): a
 committed binary silently pins one build and rots away from the source beside
-it. Kernel modules are the one exception — they need the vendor kernel tree,
-so they live under `vendor/prebuilt/<triple>/` with a SHA256SUMS next to them.
+it. Two places are allowed to hold a prebuilt binary, and both must carry a
+SHA256SUMS next to it:
+
+- `vendor/prebuilt/<triple>/` — a kernel module that needs the vendor kernel
+  tree, which CI does not have;
+- `plugins/<plugin>/variants/<unit>/` — a file only one package may carry
+  (a device's kernel module, a backend only the universal package ships). The
+  unit directory is staged into that package alone.
 
 Only files git tracks are inspected: a local build leaves `.o`/`.a` inside
 `vendor/` (sshd's does), and those are not what ships or what anyone reviews.
@@ -63,9 +69,20 @@ def format_of(path: Path) -> str | None:
     return None
 
 
+def tracked_variant_files() -> list[Path]:
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z", "--", "plugins/*/variants/*"],
+        capture_output=True,
+        check=True,
+    )
+    names = [name for name in result.stdout.decode("utf-8", "replace").split("\0") if name]
+    return [ROOT / name for name in names]
+
+
 def main() -> int:
     try:
         files = tracked_vendor_files()
+        variant_files = tracked_variant_files()
     except (OSError, subprocess.CalledProcessError) as error:
         print(f"check-vendor: 读不到 git 跟踪的文件（{error}）", file=sys.stderr)
         return 1
@@ -86,7 +103,8 @@ def main() -> int:
         if kind:
             problems.append(
                 f"{rel.as_posix()}: vendor/ 里提交了 {kind} 二进制；"
-                "源码放 vendor/，预编译件只能放 vendor/prebuilt/<triple>/ 并带 SHA256SUMS"
+                "源码放 vendor/，预编译件只能放 vendor/prebuilt/<triple>/ 或 "
+                "plugins/<插件>/variants/<unit>/ 并带 SHA256SUMS"
             )
 
     for directory in sorted(prebuilt_dirs):
@@ -94,11 +112,34 @@ def main() -> int:
             rel = directory.relative_to(ROOT).as_posix()
             problems.append(f"{rel}: 缺 SHA256SUMS（预编译件必须可校验）")
 
+    # `plugins/<plugin>/variants/<unit>/` 只进那个单元自己的包：里面允许有预编译件
+    # （设备内核模块），但和 vendor/prebuilt 一样必须能校验。
+    variant_dirs: set[Path] = set()
+    for path in variant_files:
+        rel = path.relative_to(ROOT)
+        if not format_of(path):
+            continue
+        parts = rel.parts
+        if len(parts) < 5 or parts[0] != "plugins" or parts[2] != "variants":
+            problems.append(
+                f"{rel.as_posix()}: 变体文件要在 plugins/<插件>/variants/<unit>/ 下"
+            )
+            continue
+        variant_dirs.add(ROOT.joinpath(*parts[:4]))
+
+    for directory in sorted(variant_dirs):
+        if not (directory / "SHA256SUMS").is_file():
+            rel = directory.relative_to(ROOT).as_posix()
+            problems.append(f"{rel}: 缺 SHA256SUMS（变体里的预编译件必须可校验）")
+
     if problems:
         for problem in problems:
             print(f"::error::{problem}")
         return 1
-    print(f"check-vendor: 检查了 {len(files)} 个跟踪文件，源码/预编译件分界正常")
+    print(
+        f"check-vendor: 检查了 {len(files)} 个 vendor 文件、{len(variant_files)} 个变体文件，"
+        "源码/预编译件分界正常"
+    )
     return 0
 
 

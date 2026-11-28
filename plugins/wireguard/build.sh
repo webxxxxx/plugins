@@ -79,6 +79,7 @@ build_wg() {
 
 build_gotatun() {
     need cargo "构建 gotatun"
+    mkdir -p "$HERE/variants/universal/payload/bin"
     # --locked：Cargo.lock 进仓库，不许解析出新版本；--target-dir 放到 out/ 里，
     # vendor/ 保持原始源码。
     cargo build --locked --release --bin gotatun --target "$PLATFORM" \
@@ -86,27 +87,29 @@ build_gotatun() {
         --target-dir "$HERE/out/cargo" >/dev/null ||
         die "gotatun 编译失败（target $PLATFORM，CC=$target_cc）"
     cp -f "$HERE/out/cargo/$PLATFORM/release/gotatun" \
-        "$HERE/package/payload/bin/gotatun"
-    chmod 755 "$HERE/package/payload/bin/gotatun"
+        "$HERE/variants/universal/payload/bin/gotatun"
+    chmod 755 "$HERE/variants/universal/payload/bin/gotatun"
 }
 
-mkdir -p "$OUT" "$HERE/package/payload/bin"
-# 先清掉另一个后端的文件：package/ 是所有包共用的，上个包留下的 gotatun /
-# wireguard.ko 会被打进下一个包（打包器看到 .ko 还会要求声明 compat）。
+mkdir -p "$OUT"
+# 包内文件属于哪个包，写在目录上：`variants/<unit>/` 只进那个单元自己的包（打包器
+# 在 stage 时按 unit 盖上去），`package/` 才是所有包共用的。所以这里只往两处写：
+#   variants/sr6110/payload/bin/wireguard.ko   仓库里就有，构建只校验
+#   variants/universal/payload/bin/gotatun     这次编出来的用户态引擎
+#
+# 旧布局把这两份后端文件直接写在共用的 package/payload/bin/ 下（构建产物，不进
+# 仓库）。本地树上如果还留着，会被打进每个包——清掉。
 rm -f "$HERE/package/payload/bin/wireguard.ko" "$HERE/package/payload/bin/gotatun"
 
 build_wg
 
 if [ "$BACKEND" = kernel ]; then
-    KO="$VENDOR/prebuilt/aarch64-unknown-linux-musl/wireguard.ko"
-    [ -f "$KO" ] || die "缺少 $KO"
-    if [ -f "$VENDOR/prebuilt/aarch64-unknown-linux-musl/SHA256SUMS" ] &&
-        command -v sha256sum >/dev/null 2>&1; then
-        ( cd "$VENDOR/prebuilt/aarch64-unknown-linux-musl" && sha256sum -c --quiet SHA256SUMS ) ||
+    KO="$HERE/variants/sr6110/payload/bin/wireguard.ko"
+    [ -f "$KO" ] || die "缺少设备专属的内核模块 $KO"
+    if [ -f "$HERE/variants/sr6110/SHA256SUMS" ] && command -v sha256sum >/dev/null 2>&1; then
+        ( cd "$HERE/variants/sr6110" && sha256sum -c --quiet SHA256SUMS ) ||
             die "wireguard.ko 校验失败（$KO）"
     fi
-    cp -f "$KO" "$HERE/package/payload/bin/wireguard.ko"
-    chmod 644 "$HERE/package/payload/bin/wireguard.ko"
 else
     build_gotatun
 fi
