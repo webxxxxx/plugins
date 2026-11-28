@@ -58,7 +58,9 @@ settings_defaults() {
     WG_KEEPALIVE=25
     # auto：包里有 wireguard.ko 就用内核模块（sr6110），否则用 gotatun。
     WG_IMPL=auto
-    # auto：只有内核后端跑 LAN 自愈循环；on/off 可强制。
+    # 自愈只属于内核后端（带 wireguard.ko 的包）：厂商固件会把 rp_filter / 策略路由
+    # 刷回去，所以要周期性修一遍。auto/on 都是开，off 关；gotatun 的用户态隧道没有
+    # 这个坑，守护循环只在 kernel 分支里叫 wg-lan-fix.sh，这个开关对它不起作用。
     WG_LAN_FIX=auto
 }
 

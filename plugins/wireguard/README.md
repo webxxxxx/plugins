@@ -76,7 +76,7 @@ vendor/prebuilt/…/wireguard.ko  SR6110 内核模块：唯一预编译件（要
 |---|---|
 | `data/wg/server.key` / `server.pub` | 服务端身份；`server.pub` 显示在管理页，也写进每个客户端配置 |
 | `data/peers.tsv` | peer 列表（含客户端私钥，0600）；每行 `id 名称 隧道地址 公钥 私钥 创建时间` |
-| `data/settings` | 管理页面保存的隧道设置（0600，shell 可 source 的 `KEY=value`），含 `WG_IMPL` / `WG_LAN_FIX` |
+| `data/settings` | 管理页面保存的隧道设置（0600，shell 可 source 的 `KEY=value`），含 `WG_IMPL` / `WG_LAN_FIX`（后者只对内核后端的 LAN 自愈有效，`gotatun` 的隧道没有网桥那个坑，不做自愈） |
 | `data/gotatun.pid` | 用户态后端的进程号；`stop` 时校验命令行后再杀（防 pid 复用） |
 | `data/wireguardd.pid` | 看守（被监督进程）的进程号；能力钩子是另一个进程，靠它回 `status.guardian`（同样校验命令行） |
 

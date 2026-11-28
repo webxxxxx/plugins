@@ -183,7 +183,7 @@ do_up() {
 
     apply_peers
 
-    # 厂商网络服务可能在本脚本之后把它刷回 0，自愈循环会继续保证。
+    # 厂商固件会把它刷回 0：内核后端的自愈每 30 秒再保证一次（用户态隧道没这个坑）。
     echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
 
     rules_add
@@ -196,7 +196,7 @@ do_down() {
 
     rules_del
 
-    # 自愈循环加的 ip rule / 策略路由
+    # up 与 LAN 自愈（内核后端）加的 ip rule / 策略路由
     for old in $(rules_for_table); do
         ip rule del from "$old" lookup "$WG_TABLE" 2>/dev/null || true
     done

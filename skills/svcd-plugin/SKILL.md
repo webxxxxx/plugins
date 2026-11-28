@@ -114,6 +114,32 @@ plugin-tools template wireguard --platforms x86_64-unknown-linux-musl,x86_64-pc-
   --lang script --desc "wireguard plugin" --ui web --dir plugins
 ```
 
+## 一个进程、一个线程
+
+路由器上的预算很紧，插件的默认形态是 **一个进程**（Rust 通道插件的线程数由 SDK 决定，见下）。四条规矩把这件事做实：
+
+**被监督的进程就是你的本体。** 别写「看护脚本 + 本体」两层：脚本干完准备活就 `exec` 掉自己（`exec "$HERE/meow" …`），于是 `ps` 里只有本体，`SVCD_LAST_EXIT` 是它自己的退出码，宿主按进程组停服收的也还是它。`exec` 不换 pid，所以 `exec` 之前写进 pidfile 的那个 pid 就是本体，`status` 与就绪探测都靠它认人。
+
+**原本让看护循环干的活，宿主的生命周期各有位置。**
+
+| 你要做的事 | 写在哪 |
+| --- | --- |
+| 迁移、播种数据、生成配置、校验（每次启动都做，必须幂等） | `lifecycle.start`——每次 spawn `exec` 之前跑一次、必须退出，非零或超时即本次启动失败 |
+| 起来之后才能做的动作（等端口、挂路由/防火墙、注册到别处） | `lifecycle.started`——就绪之后、Running 之前跑一次，失败即启动失败（宿主停整组、跑 `stop`） |
+| 收尾（撤规则、删 pidfile、按停止原因降级） | `lifecycle.stop`——进程消失之后跑，拿 `SVCD_STOP_REASON` / `SVCD_LAST_EXIT` |
+| 周期任务（自愈、心跳、看孩子死没死） | 你自己的主循环里，别再起常驻子 shell |
+
+**周期任务用「一拍」入口，不要 `&`。** 每 N 秒要做一次的脚本给一个 `--once`（跑一拍就退），由主循环驱动（`wireguardd.sh` 的看守每 30 秒叫一次 `wg-lan-fix.sh --once`）；不带参数手跑时才进循环。稳定态因此永远只有一个进程，也不会留下「父进程没了、子 shell 还在转」的孤儿。
+
+**能力钩子只改状态。** 钩子是短命进程：改完 state / 配置受管键就返回，要按新配置重来一遍就回 `{"restart":true}`，由页面调 `ui.restartSelf()` 让宿主停整组 → `start` → 重新 spawn。钩子里起进程会变孤儿，杀进程组又是抢宿主的活。
+
+线程方面先看你有没有通道：
+
+- **`ready: notify`（通道插件，Rust）**：`svcd_serve` 自己开 1 条读线程、`WORKER_THREADS = 4` 条工作线程（`QUEUE_DEPTH = 64` 的有界队列），协议 3 还有一条写线程。handler 跑在工作线程里、`Plugin` 被 `Mutex` 串行化——别在 handler 里再起线程或做十几秒的阻塞活：那会占住一个工作线程、把队列顶满，然后整条协议开始延迟。
+- **`ready: exec`（没有通道）**：不跑 `svcd_serve`，进程里就一条主线程。阻塞的等待放进 lifecycle 钩子（各有自己的 timeout），别放进主循环——主循环卡住，宿主只能按超时杀你。
+
+怎么验：`ls /proc/<pid>/task | wc -l` 看线程数（`exec` 插件应该是 1），`ps -e -o pid,ppid,args | grep <id>` 看进程数（稳定态只有本体那一个）。
+
 ## 契约速查
 
 | 项 | 值 |
@@ -311,6 +337,9 @@ SDK 没有 raw 实现。
 | 症状 | 原因 |
 |---|---|
 | 装上了但 `start` 超时 | 脚本插件没写 `"ready": "exec"`（缺省 `notify` 会等 ping） |
+| `ps` 里多一个 `sh` | 入口脚本没 `exec` 掉自己（自己写了看护循环），或周期任务用 `&` 起了常驻子 shell——看「一个进程、一个线程」那一节 |
+| 改了配置但进程还是老的 | 钩子只改状态，忘了让页面调 `ui.restartSelf()`（钩子不许自己重启服务） |
+| `status` 报 `running` 但没在跑 | pidfile 里的 pid 被复用给别的进程了：认进程要 `kill -0` + `/proc/<pid>/cmdline` 对一下 |
 | MCP 里有这个工具，调用却报错 | manifest 与代码分支漂移 |
 | 包在目标机上装不上 | `platform` 与本机三元组不等 |
 | Windows 上启动 `exit=9009` | `interpreter.name` 写了 `python3`（那是 0 字节存根，用 `python` 或 `py`） |
