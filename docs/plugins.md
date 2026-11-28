@@ -4,7 +4,7 @@
 >
 > 安装前先信任发布公钥：[docs/signing.pub](signing.pub)。
 
-最后更新：2026-11-27 · 共 34 个包
+最后更新：2026-11-28 · 共 34 个包
 
 | 插件 | 版本 | 平台 | 大小 | 下载地址 |
 | --- | --- | --- | ---: | --- |
@@ -37,8 +37,8 @@
 | sshfs | 1.2.0 | x86_64-unknown-linux-gnu | 1.5 MiB | [sshfs-1.2.0-x86_64-unknown-linux-gnu.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.6/sshfs-1.2.0-x86_64-unknown-linux-gnu.spk) |
 | sshfs | 1.2.0 | x86_64-unknown-linux-musl | 1.8 MiB | [sshfs-1.2.0-x86_64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.6/sshfs-1.2.0-x86_64-unknown-linux-musl.spk) |
 | webbind | 1.0.0 | aarch64-unknown-linux-musl | 0.0 MiB | [webbind-1.0.0-aarch64-unknown-linux-musl-sr6110.spk](https://github.com/webxxxxx/plugins/releases/download/v0.2.6/webbind-1.0.0-aarch64-unknown-linux-musl-sr6110.spk) |
-| wireguard | 1.2.1 | aarch64-unknown-linux-musl | 3.1 MiB | [wireguard-1.2.1-aarch64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.1/wireguard-1.2.1-aarch64-unknown-linux-musl.spk) |
-| wireguard | 1.2.1 | aarch64-unknown-linux-musl | 0.5 MiB | [wireguard-1.2.1-aarch64-unknown-linux-musl-sr6110.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.1/wireguard-1.2.1-aarch64-unknown-linux-musl-sr6110.spk) |
-| wireguard | 1.2.1 | armv7-unknown-linux-musleabihf | 3.0 MiB | [wireguard-1.2.1-armv7-unknown-linux-musleabihf.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.1/wireguard-1.2.1-armv7-unknown-linux-musleabihf.spk) |
-| wireguard | 1.2.1 | x86_64-unknown-linux-gnu | 4.0 MiB | [wireguard-1.2.1-x86_64-unknown-linux-gnu.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.1/wireguard-1.2.1-x86_64-unknown-linux-gnu.spk) |
-| wireguard | 1.2.1 | x86_64-unknown-linux-musl | 3.1 MiB | [wireguard-1.2.1-x86_64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.1/wireguard-1.2.1-x86_64-unknown-linux-musl.spk) |
+| wireguard | 1.2.2 | aarch64-unknown-linux-musl | 3.1 MiB | [wireguard-1.2.2-aarch64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.2/wireguard-1.2.2-aarch64-unknown-linux-musl.spk) |
+| wireguard | 1.2.2 | aarch64-unknown-linux-musl | 0.5 MiB | [wireguard-1.2.2-aarch64-unknown-linux-musl-sr6110.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.2/wireguard-1.2.2-aarch64-unknown-linux-musl-sr6110.spk) |
+| wireguard | 1.2.2 | armv7-unknown-linux-musleabihf | 3.0 MiB | [wireguard-1.2.2-armv7-unknown-linux-musleabihf.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.2/wireguard-1.2.2-armv7-unknown-linux-musleabihf.spk) |
+| wireguard | 1.2.2 | x86_64-unknown-linux-gnu | 4.0 MiB | [wireguard-1.2.2-x86_64-unknown-linux-gnu.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.2/wireguard-1.2.2-x86_64-unknown-linux-gnu.spk) |
+| wireguard | 1.2.2 | x86_64-unknown-linux-musl | 3.1 MiB | [wireguard-1.2.2-x86_64-unknown-linux-musl.spk](https://github.com/webxxxxx/plugins/releases/download/wireguard-v1.2.2/wireguard-1.2.2-x86_64-unknown-linux-musl.spk) |
