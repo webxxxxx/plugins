@@ -2,7 +2,7 @@
   "schema": 1,
   "id": "wireguard",
   "name": "WireGuard 隧道",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "desc": "WireGuard 隧道：内核模块或 gotatun 用户态实现随包，多 peer 管理页面与二维码",
   "protocol": 1,
   "interpreter": {
@@ -60,7 +60,7 @@
     },
     {
       "name": "save_settings",
-      "desc": "保存隧道设置；涉及接口/端口/网段的改动会重建 wg0",
+      "desc": "保存隧道设置；涉及接口/端口/网段/地址/MTU 的改动会重建 wg0（回 restart=true，由页面调宿主重启这个插件）",
       "inputSchema": {
         "type": "object",
         "properties": {

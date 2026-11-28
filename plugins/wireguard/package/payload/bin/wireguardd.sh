@@ -4,8 +4,9 @@
 # 它同时做两件事：
 #   1. 启动时把隧道拉起来（wireguard.sh up）——必须是本进程的子进程，宿主
 #      停服按进程组 SIGTERM 才能把 gotatun 一起收走；
-#   2. 在前台看守：内核后端跑 wg-lan-fix.sh 自愈循环，用户态后端看 gotatun
-#      是否还活着，死了就重建。
+#   2. 在前台看守：内核后端每 30 秒做一拍 LAN 自愈（wg-lan-fix.sh --once，跑完
+#      就退），用户态后端看 gotatun 还活着没有，死了就重建。
+# 稳定态就这一个进程（内核后端；用户态后端多一个 gotatun，那是 VPN 引擎本身）。
 #
 # 没有协议通道（清单里 exec.ready 是 exec）：管理页面的 state / save_settings /
 # add_peer / remove_peer / peer_config 是能力钩子，宿主每次调用起一次本脚本
@@ -202,7 +203,6 @@ save_settings() {
     old_net=$WG_NET
     old_addr=$WG_ADDR
     old_mtu=$WG_MTU
-    old_table=$WG_TABLE
 
     WG_LAN_IF=$(svcd_field "$1" lan_interface)
     WG_PORT=$(svcd_raw_field "$1" port)
@@ -249,14 +249,9 @@ save_settings() {
     [ "$old_mtu" = "$WG_MTU" ] || restart=1
 
     cp "$SETTINGS" "$SETTINGS.bak" 2>/dev/null || true
-    if [ "$restart" = 1 ]; then
-        "$HERE/wireguard.sh" stop >/dev/null 2>&1 || true
-    fi
     if ! write_settings; then
         [ -f "$SETTINGS.bak" ] && mv "$SETTINGS.bak" "$SETTINGS"
         load_settings || true
-        # 隧道已经拆了；重建归看守进程（它按恢复后的设置自己 up），这里不能起进程：
-        # 钩子起的 gotatun 会挂在钩子自己的进程组下，钩子一退就成了孤儿。
         return 1
     fi
     if ! load_settings; then
@@ -264,28 +259,13 @@ save_settings() {
         load_settings || true
         return 1
     fi
-
-    if [ "$restart" = 1 ] || [ "$old_lan" != "$WG_LAN_IF" ] || [ "$old_table" != "$WG_TABLE" ]; then
-        pkill -f "$HERE/wg-lan-fix.sh" 2>/dev/null || true
-    fi
     rm -f "$SETTINGS.bak"
-    # 重建不在钩子里做：钩子是短命进程，它起的 gotatun 会挂在钩子自己的进程组下，
-    # 钩子一退就成了孤儿，宿主按进程组停服也收不走。上面已经把隧道拆了，重建交给
-    # 看守进程（guard 每 5 秒看一眼接口 / gotatun），这里只等接口回来。
-    _restarted=false
-    if [ "$restart" = 1 ]; then
-        n=0
-        while [ "$n" -lt 20 ]; do
-            if ip link show "$WG_IF" >/dev/null 2>&1; then
-                _restarted=true
-                break
-            fi
-            sleep 1
-            n=$((n + 1))
-        done
-    fi
-    printf '{"ok":true,"restarted":%s,"rebuilding":%s}' "$_restarted" \
-        "$([ "$restart" = 1 ] && [ "$_restarted" = false ] && echo true || echo false)"
+    # 涉及接口 / 端口 / 网段 / 地址 / MTU 的改动要重建隧道：钩子只把设置落盘，回
+    # restart=true，由页面调宿主的 POST /api/v1/services/wireguard/restart。
+    # 钩子是短命进程：它起的 gotatun 会挂在钩子自己的进程组下，钩子一退就成了孤儿；
+    # 让它去杀进程组又是在抢宿主的活。所以重建一律交给宿主的 restart（停整组 → stop
+    # 撤干净 → start → 重新起看守）。
+    printf '{"ok":true,"restart":%s}' "$([ "$restart" = 1 ] && echo true || echo false)"
 }
 
 add_peer() {
@@ -365,9 +345,10 @@ peer_config_text() {
 
 # 看守：两个后端只有“怎么保活”不同。
 #   kernel    -> 周期跑 wg-lan-fix.sh（厂商固件会刷回 rp_filter / 策略路由）
-# 前台看守：内核后端维护 wg-lan-fix 的自愈循环，用户态后端看 gotatun 还活着没有。
-# 它就是这个进程的主体——以前跑在后台子 shell 里，前台被协议通道占着。
+# 前台看守：内核后端每 30 秒做一拍 LAN 自愈（wg-lan-fix.sh --once，跑完就退，
+# 不留常驻子 shell），用户态后端看 gotatun 还活着没有。它就是这个进程的主体。
 guard() {
+    _last_fix=0
     while :; do
         # save_settings 在钩子里跑，拆隧道时顺手删了 pidfile（stop 的收尾规矩）；
         # 这里补回来，否则 status.guardian 会一直报 false。存在就不写，省一次闪存写。
@@ -375,10 +356,16 @@ guard() {
         case "$(wg_impl)" in
         kernel)
             if ip link show "$WG_IF" >/dev/null 2>&1; then
-                [ "$WG_LAN_FIX" = off ] || "$HERE/wg-lan-fix.sh" >&2 || true
+                # 厂商固件会把 rp_filter / 策略路由刷回去，所以每 30 秒自愈一拍。
+                _now=$(date +%s)
+                if [ "$WG_LAN_FIX" != off ] && [ $((${_now} - _last_fix)) -ge 30 ]; then
+                    "$HERE/wg-lan-fix.sh" --once >&2 || true
+                    _last_fix=$_now
+                fi
             else
                 # 接口被删 / 模块被卸载：重建。失败时隔久一点再试，别刷屏。
                 WG_SKIP_WAIT=1 "$HERE/wireguard.sh" up >&2 || sleep 25
+                _last_fix=0
             fi
             ;;
         userspace)

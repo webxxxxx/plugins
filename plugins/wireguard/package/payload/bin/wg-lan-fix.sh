@@ -1,7 +1,9 @@
 #!/bin/sh
-# wg-lan-fix.sh — WireGuard 客户端访问路由器 LAN 网段的自愈循环
+# wg-lan-fix.sh — WireGuard 客户端访问路由器 LAN 网段的自愈
 #
-# 由 wireguardd.sh 看守并以子进程运行；设置来自管理页面写出的 data/settings。
+# 看守（wireguardd.sh）每 30 秒叫一次 `wg-lan-fix.sh --once`，跑完这一拍就退：
+# 插件稳定态只有一个进程，不再有一个常驻的自愈子 shell。不带参数手跑时它自己按
+# 30 秒一拍转下去（调试用）。设置来自管理页面写出的 data/settings。
 #
 # 厂商固件的三个坑：
 #   1) CPU 产生的帧经网桥转发（wg0 -> br0）会被数据通路丢弃，
@@ -90,19 +92,20 @@ detect_port() {
 }
 
 trap 'exit 0' TERM INT
-log "自愈循环启动（lan=$WG_LAN_IF table=$WG_TABLE）"
+
+# 一拍自愈：调用方决定节奏（wireguardd.sh 的看守每 30 秒叫一次 `--once`），
+# 这里不自己睡。返回 1 表示 wg0 不见了，调用方该重新把隧道拉起来。
 LAST=""
-while true; do
-    # 隧道被删掉（或内核模块被卸载）时退出；wireguardd 的看守会在 wg0 回来后重启。
+pass() {
+    # 隧道被删掉（或内核模块被卸载）时返回 1；看守会在 wg0 回来后重建。
     if ! ip link show "$WG_IF" >/dev/null 2>&1; then
-        log "$WG_IF 不见了，退出等待宿主重启"
-        exit 1
+        log "$WG_IF 不见了"
+        return 1
     fi
 
     PORT=$(detect_port)
     if [ -z "$PORT" ]; then
-        sleep 30 & wait $!
-        continue
+        return 0
     fi
     [ "$PORT" = "$LAST" ] || {
         log "LAN 口 -> $PORT"
@@ -143,6 +146,18 @@ while true; do
         *INCOMPLETE* | *FAILED*) arping -c 1 -w 1 -I "$WG_LAN_IF" "$ip" >/dev/null 2>&1 ;;
         esac
     done
+    return 0
+}
 
-    sleep 30 & wait $!
-done
+case "${1:-}" in
+# 看守用这个：一拍就走，不再多养一个常驻进程（插件稳定态就一个进程）。
+--once) pass ;;
+*)
+    # 手跑（调试）：沿用老样子，自己按 30 秒一拍转下去。
+    log "自愈循环启动（lan=$WG_LAN_IF table=$WG_TABLE）"
+    while :; do
+        pass || exit 1
+        sleep 30 & wait $!
+    done
+    ;;
+esac

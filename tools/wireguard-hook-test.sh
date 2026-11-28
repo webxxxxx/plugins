@@ -37,6 +37,7 @@ fixture() {
     _bin="$_plugin/payload/bin"
     mkdir -p "$_bin" "$_plugin/payload/lib" "$_plugin/data"
     cp "$REPO/plugins/wireguard/package/payload/bin/wireguardd.sh" "$_bin/"
+    cp "$REPO/plugins/wireguard/package/payload/bin/wg-lan-fix.sh" "$_bin/"
     cp "$REPO/plugins/wireguard/package/payload/lib/wireguard-lib.sh" "$_plugin/payload/lib/"
     cp "$REPO/plugins/wireguard/package/payload/lib/svcd-plugin.sh" "$_plugin/payload/lib/"
     printf '#!/bin/sh\nexit 0\n' > "$_bin/wg-tool"
@@ -69,7 +70,6 @@ grep -q 'unknown tool' "$WORK/nope.out" ||
     fail "nope: 失败原因没写到 stdout（$(cat "$WORK/nope.out")）"
 
 # ---- save_settings：十个参数从 stdin 读出来、落盘、回执 ----
-# 设置先写成和这次要保存的一样，就不会触发重建（那种要等看守进程，另算）。
 fixture "$WORK/save"
 cat > "$_plugin/data/settings" <<'SET'
 WG_LAN_IF=br0
@@ -85,6 +85,7 @@ WG_KEEPALIVE=25
 WG_IMPL=auto
 WG_LAN_FIX=auto
 SET
+# 只改连接地址（不动接口/端口/网段/地址/MTU）：落盘就行，不用重启插件。
 if ! out=$(hook save_settings '{"lan_interface":"br0","port":51820,"network":"10.99.0.0/24","address":"10.99.0.1","mtu":1420,"table":200,"endpoint":"vpn2.example.com","dns":"223.5.5.5","allowed_ips":"0.0.0.0/0,::/0","keepalive":25}' 2> "$WORK/save.err"); then
     fail "save_settings: 退出非零（$(cat "$WORK/save.err")）"
 fi
@@ -92,8 +93,34 @@ case "$out" in
 *'"ok":true'*) ;;
 *) fail "save_settings: 没回 ok（$out）" ;;
 esac
+case "$out" in
+*'"restart":false'*) ;;
+*) fail "save_settings: 不该要重启（$out）" ;;
+esac
 grep -qx 'WG_ENDPOINT=vpn2.example.com' "$_plugin/data/settings" ||
     fail "save_settings: 新设置没落盘（$(grep WG_ENDPOINT "$_plugin/data/settings")）"
+
+# 改监听端口：隧道要重建。钩子只把设置落盘并回 restart=true —— 它自己不起进程、
+# 也不杀进程组，重建由页面调宿主的 restart 做。
+if ! out=$(hook save_settings '{"lan_interface":"br0","port":51821,"network":"10.99.0.0/24","address":"10.99.0.1","mtu":1420,"table":200,"endpoint":"vpn2.example.com","dns":"223.5.5.5","allowed_ips":"0.0.0.0/0,::/0","keepalive":25}' 2> "$WORK/save-port.err"); then
+    fail "save_settings: 改端口时退出非零（$(cat "$WORK/save-port.err")）"
+fi
+case "$out" in
+*'"restart":true'*) ;;
+*) fail "save_settings: 改端口没要重启（$out）" ;;
+esac
+grep -qx 'WG_PORT=51821' "$_plugin/data/settings" ||
+    fail 'save_settings: 新端口没落盘'
+
+# ---- wg-lan-fix.sh：看守用 --once（一拍就走，不另养一个常驻进程）----
+fixture "$WORK/lan-fix"
+SVCD_PLUGIN_DIR="$_plugin" sh "$_bin/wg-lan-fix.sh" --once > "$WORK/once.out" 2> "$WORK/once.err" || true
+if grep -q '自愈循环启动' "$WORK/once.err"; then
+    fail 'lan-fix: --once 不该进循环'
+fi
+# 手跑（调试）还是循环：日志能证明它走的是循环那个分支。
+SVCD_PLUGIN_DIR="$_plugin" sh "$_bin/wg-lan-fix.sh" > /dev/null 2> "$WORK/loop.err" || true
+grep -q '自愈循环启动' "$WORK/loop.err" || fail 'lan-fix: 手跑模式没进循环'
 
 # ---- guardian：pidfile 里那个 pid 必须是自己的进程 ----
 # 活的、但命令行不是 wireguardd.sh 的进程（pid 被复用给别的进程）：不能认。

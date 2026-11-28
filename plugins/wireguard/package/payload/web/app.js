@@ -283,11 +283,16 @@ $('settings-form').addEventListener('submit', async (event) => {
   if (!body) return;
   setBusy(true);
   try {
-    const result = await call('save_settings', body, 90000);
+    const result = await call('save_settings', body, 30000);
     settingsDirty = false;
-    if (result?.restarted) toast('已保存，隧道已重建');
-    else if (result?.rebuilding) toast('已保存，看守进程正在按新设置重建隧道');
-    else toast('已保存');
+    if (result?.restart) {
+      // 接口 / 端口 / 网段变了：钩子只把设置落盘，重建由宿主重启这个插件来做
+      // （停整组 → stop 撤干净 → start → 重新起看守）。
+      toast('已保存，正在重启插件重建隧道…');
+      await ui.restartSelf();
+    } else {
+      toast('已保存');
+    }
     await refresh();
   } catch (error) {
     toast(`保存失败：${error.message}`, 'error');
