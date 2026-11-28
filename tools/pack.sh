@@ -45,16 +45,7 @@ USAGE
 NAME=meow
 PLATFORMS=
 DEVICE=
-# 读 .plugin.json（platforms/variants 展开）用；Windows 上常常只有 python，
-# 而 python3 可能只是个跑不起来的 shim —— 要求能真的执行才算数。
-PY=
-for candidate in python3 python; do
-    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c '' >/dev/null 2>&1; then
-        PY=$candidate
-        break
-    fi
-done
-want_some=   # all / linux / musl：按 .plugin.json 展开成三元组
+want_some=   # all / linux / musl：按 .plugin.json 展开成三元组（plugin-tools units 算）
 while [ $# -gt 0 ]; do
     case "$1" in
     -h|--help) usage; exit 0 ;;
@@ -73,55 +64,6 @@ done
 
 [ -f "$REPO/plugins/$NAME/package/manifest.json" ] || die "没有这个插件：plugins/$NAME"
 
-# ---- all / linux / musl：平台的唯一来源是插件的 .plugin.json ----
-# 顶层 platforms 出通用包，variants[].platforms 出 <platform>:<device> 变体包。
-json_list() {
-    # $1 = .plugin.json, $2 = list|variants
-    "$PY" - "$1" "$2" <<'PY'
-import json, sys
-meta = json.load(open(sys.argv[1], encoding="utf-8"))
-if sys.argv[2] == "list":
-    platforms = (meta.get("ci") or {}).get("platforms") or meta.get("platforms") or []
-    for platform in platforms:
-        print(platform)
-else:
-    for variant in meta.get("variants") or []:
-        for platform in variant.get("platforms") or []:
-            print(f"{platform}:{variant['device']}")
-PY
-}
-
-if [ -n "$want_some" ]; then
-    [ -f "$REPO/plugins/$NAME/.plugin.json" ] ||
-        die "plugins/$NAME 没有 .plugin.json，$want_some 展开不了；直接把三元组列出来"
-    command -v "$PY" >/dev/null 2>&1 ||
-        die "$want_some 展开需要 python3（读 .plugin.json 的 platforms/variants）"
-    entries=$(json_list "$REPO/plugins/$NAME/.plugin.json" list | tr -d '\r')
-    entries="$entries
-$(json_list "$REPO/plugins/$NAME/.plugin.json" variants | tr -d '\r')"
-    [ -n "$(printf '%s' "$entries" | tr -d ' \n')" ] ||
-        die "plugins/$NAME/.plugin.json 里没读到平台清单（all/linux/musl 靠它展开）"
-    for entry in $entries; do
-        platform=${entry%%:*}
-        device=
-        [ "$platform" = "$entry" ] || device=${entry#*:}
-        case "$want_some:$platform" in
-        all:*-apple-darwin*)
-            echo "pack: 跳过 $platform（darwin 要有 Xcode，只有 mac 上能编）" >&2
-            continue
-            ;;
-        linux:*-linux-*) ;;
-        musl:*-musl*) ;;
-        all:*) ;;
-        *) continue ;;
-        esac
-        if [ -n "$device" ]; then
-            PLATFORMS="$PLATFORMS $platform:$device"
-        else
-            PLATFORMS="$PLATFORMS $platform"
-        fi
-    done
-fi
 [ -n "$(printf '%s' "$PLATFORMS" | tr -d ' ')" ] || PLATFORMS="x86_64-pc-windows-msvc x86_64-unknown-linux-gnu"
 
 # -d 只能配单个平台：变体本来就只属于某一个三元组。
@@ -167,12 +109,56 @@ if [ -z "${SVCD_PLUGIN_BIN:-}" ]; then
     export SVCD_PLUGIN_BIN
 fi
 
-# ---- 逐平台打包 ----
+# ---- 单元清单：只有一个来源，plugin-tools units ----
+# 「哪些包」由插件的 .plugin.json 决定（ci.platforms / platforms + variants），产物名也
+# 由它拼——以前这段在这里用内联 python 摊一遍、再用 sed 从清单里抠版本手拼产物名，
+# 和 `plugin-tools build` 各有一份实现。这里只留「这台机器编得了哪些」的本地知识：
+# all/linux/musl 的过滤与 darwin 跳过。
+units_of() {
+    "$TOOLS" units --dir "$REPO/plugins/$NAME" "$@"
+}
+
+if [ -n "$want_some" ]; then
+    entries=$(units_of | awk -F '\t' -v want="$want_some" '
+        {
+            if (want == "all") {
+                if ($1 ~ /apple-darwin/) {
+                    print "pack: 跳过 " $1 "（darwin 要有 Xcode，只有 mac 上能编）" > "/dev/stderr"
+                    next
+                }
+            } else if (want == "linux") {
+                if ($1 !~ /-linux-/) next
+            } else if (want == "musl") {
+                if ($1 !~ /-musl/) next
+            }
+            print $1 ":" $2 ":" $3
+        }') || die "读不到 $NAME 的单元清单"
+    [ -n "$entries" ] || die "$NAME 展开后没有可打的单元"
+else
+    entries=
+    for spec in $PLATFORMS; do
+        platform=${spec%%:*}
+        device=
+        [ "$platform" = "$spec" ] || device=${spec#*:}
+        if [ -n "$device" ]; then
+            line=$(units_of --platform "$platform" --device "$device") ||
+                die "读不到 $NAME $platform ($device) 的单元"
+        else
+            line=$(units_of --platform "$platform") || die "读不到 $NAME $platform 的单元"
+        fi
+        [ -n "$line" ] || die "$NAME $platform 没有产物名"
+        entries="$entries
+$(printf '%s\n' "$line" | awk -F '\t' '{ print $1 ":" $2 ":" $3; exit }')"
+    done
+fi
+
+# ---- 逐单元打包 ----
 mkdir -p "$OUT_DIR"
-for entry in $PLATFORMS; do
+for entry in $entries; do
     platform=${entry%%:*}
-    device=
-    [ "$platform" = "$entry" ] || device=${entry#*:}
+    rest=${entry#*:}
+    device=${rest%%:*}
+    artifact=${rest#*:}
     label=$platform
     [ -n "$device" ] && label="$platform ($device)"
     echo "pack: $NAME $label" >&2
@@ -182,12 +168,8 @@ for entry in $PLATFORMS; do
     [ -n "$device" ] && set -- "$@" --device "$device"
     SVCD_CROSS_IMAGE=$platform_image SVCD_DOCKER=1 "$TOOLS" build "$@" ||
         die "$NAME $label 打包失败"
-    # 按清单里的版本取那一个：dist/ 里可能躺着以前版本的包，别拷错了。
-    version=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$REPO/plugins/$NAME/package/manifest.json" | head -n 1)
-    suffix=
-    [ -n "$device" ] && suffix="-$device"
-    produced=$REPO/plugins/$NAME/dist/$NAME-$version-$platform$suffix.spk
+    # 产物名来自 units：dist/ 里可能躺着以前版本的包，按名字取就不会拷错。
+    produced=$REPO/plugins/$NAME/dist/$artifact
     [ -f "$produced" ] || die "$NAME $label 没产出 $produced"
     cp "$produced" "$OUT_DIR/"
     echo "pack: → dist/$(basename "$produced")" >&2

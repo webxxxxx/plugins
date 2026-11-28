@@ -78,6 +78,13 @@ jobs:
       - name: Build plugin-tools
         run: cargo build --locked --manifest-path tools/cli/Cargo.toml
 
+      # `.plugin.json` 的单元清单有两份实现：CI 矩阵（任何构建之前就要算出来）和
+      # `plugin-tools units`（build / pack.sh 实际用的那份）。用测试钉住两边一致。
+      - name: 单元清单与 CI 矩阵一致
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ( cd tools/ci && python3 -m unittest -q test_units )
+
       # `.plugin.json` is the project's own identity record (it drives the
       # release matrix and the per-plugin workflow); it has to name the same
       # plugin the manifest does.

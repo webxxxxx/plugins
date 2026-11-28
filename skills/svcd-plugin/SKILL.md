@@ -72,6 +72,8 @@ plugin start <id>
 
 完成判据：`plugin-tools build` 打印 `packed … (unsigned)`，且随后 `verify` 输出 `ok: true`（`"schema": 1`、`"id"` 是 ASCII；`"displayName"` 就是清单里的 `name`，应当是你的中文名）。
 
+想知道这个项目会产出哪些包：`plugin-tools units`（一行一个单元：三元组、设备、产物名；`--json` 还带 `variants/<unit>/` 的 overlay）。`build`、`tools/pack.sh`、CI 矩阵读的都是它，别自己拼 `<id>-<version>-<platform>[-<device>].spk`。
+
 未签名包要求宿主 `svcd.conf` 里 `allow_insecure_install = on`（改完重启 svcd）。发布走 CI，用发布钥签名。
 
 ## 支持的语言
@@ -292,7 +294,6 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 **`vendor/` 放源码，打包前编译。** 和 `meow`、`sshd` 一样：`vendor/<依赖>/` 存上游源码，`build.sh` 在打包时编译，产物落在 `out/` 或 `payload/bin/`。提交二进制会让它跟源码一起腐烂。唯一的例外是设备内核模块：它对着一棵 CI 里没有的厂商内核树编，只能预编译，并且只能用 `SHA256SUMS` 校验着放（见下面「单元专属的文件」）。`tools/check-vendor.py` 会拦住其余 ELF/`.a`。
 
 **单元专属的文件放 `variants/<unit>/`，不要放 `package/`。** 一个包里只该有它那个单元（平台 + 设备）的东西：内核模块只对一个固件代次有效，`gotatun` 只属于通用包。`package/` 是所有包共用的，把这类文件放进去就只能靠 `build.sh` 记得在下一个包之前删掉——漏一次就进错包（打包器看到 `.ko` 还会要求声明 `compat`）。`variants/<unit>/` 和 `package/` 同形（`payload/bin/…`），打包时只按单元盖上去：
-
 | 目录 | 谁拿到 |
 | --- | --- |
 | `package/` | 所有包 |

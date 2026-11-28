@@ -296,6 +296,36 @@ fn a_variant_dir_for_an_undeclared_device_is_refused() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// `ci.platforms` narrows what a release builds; `units` is where every consumer
+/// reads it from, so it has to report the narrowed list.
+#[test]
+fn ci_platforms_narrows_the_unit_list() {
+    let root = project("ci-platforms", &MANIFEST);
+    std::fs::write(
+        root.join(".plugin.json"),
+        r#"{
+  "name": "demo",
+  "language": "shell",
+  "platforms": ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl"],
+  "ci": { "platforms": ["x86_64-unknown-linux-gnu"] }
+}"#,
+    )
+    .unwrap();
+    let (output, _calls) = run(&root, &["units"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let listed = String::from_utf8_lossy(&output.stdout).to_string();
+    assert!(listed.contains("x86_64-unknown-linux-gnu"), "{listed}");
+    assert!(
+        !listed.contains("aarch64-unknown-linux-musl"),
+        "ci.platforms must narrow the list:\n{listed}"
+    );
+    assert!(
+        listed.contains("demo-1.0.0-x86_64-unknown-linux-gnu.spk"),
+        "the artifact name comes from units:\n{listed}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn a_declared_icon_lets_the_build_through() {    let root = project(
         "icons-ok",

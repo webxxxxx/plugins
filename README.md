@@ -249,11 +249,17 @@ curl -fsS "$QINIU_DOMAIN/index.json" | jq -r '.packages[] | "\(.plugin) \(.versi
 
 每个插件的 `.plugin.json` 可以写 `ci.platforms` 覆盖发布矩阵；不写就按 `platforms` 全量构建。meow 的 Linux musl 目标用 musl cross 工具链编译 BoringSSL。
 
+这个字段只有**一份**实现：`plugin-tools` 读它（`build` 与 `units`），`tools/pack.sh` 与
+`tools/ci/matrix.py` 都不再自己解析 `.plugin.json`——`pack.sh` 直接调
+`plugin-tools units`（平台、设备、产物名一次给全），CI 矩阵跑在任何构建之前、只能自己算，
+所以 `tools/ci/test_units.py` 会把它和 `units` 的输出比一遍，两边漂了就红。
+
 ## 两条命令
 
 ```bash
 plugin-tools template wireguard                 # 先选平台（1-7，可多选），再选语言
 cd plugins/wireguard && plugin-tools build      # 构建 + 打包（默认未签名）
+plugin-tools units                              # 这个项目会产出哪些包（一行一个，带产物名）
 ```
 
 **先选平台，再选语言**：能选哪些语言由平台集合决定，菜单里只出现能干活的那些。

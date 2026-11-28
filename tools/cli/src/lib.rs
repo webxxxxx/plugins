@@ -1066,19 +1066,25 @@ pub struct Package<'a> {
 /// because the display name may be Chinese and must not reach a file name. A
 /// device-restricted package appends the first compat id
 /// (`<id>-<version>-<platform>-<device>.spk`), matching `plugin bundle`.
+/// The file name one package lands in. The console shows the manifest's display
+/// name; a `.spk` name is the id, so nothing Chinese or space-bearing reaches a
+/// file name. A device-restricted package appends the device
+/// (`<id>-<version>-<platform>-<device>.spk`), matching `plugin bundle`.
+pub fn artifact_name(id: &str, version: &str, platform: &str, device: Option<&str>) -> String {
+    match device {
+        Some(device) => format!("{id}-{version}-{platform}-{device}.spk"),
+        None => format!("{id}-{version}-{platform}.spk"),
+    }
+}
+
 fn spk_path(root: &Path, package: &Package, out: Option<&Path>) -> PathBuf {
     out.map(Path::to_path_buf).unwrap_or_else(|| {
-        let name = match package.device {
-            Some(device) => format!(
-                "{}-{}-{}-{}.spk",
-                package.id, package.version, package.platform, device
-            ),
-            None => format!(
-                "{}-{}-{}.spk",
-                package.id, package.version, package.platform
-            ),
-        };
-        root.join("dist").join(name)
+        root.join("dist").join(artifact_name(
+            package.id,
+            package.version,
+            package.platform,
+            package.device,
+        ))
     })
 }
 
@@ -1380,6 +1386,19 @@ pub struct Project {
     /// takes the portable build.
     #[serde(default)]
     pub variants: Vec<Variant>,
+    /// What a release builds, when that is narrower than what a local build may
+    /// target (`ci.platforms` in `.plugin.json`). Absent means "same as
+    /// `platforms`". Every consumer — `build`, `units`, `pack.sh`, the CI
+    /// matrix — reads it from here, so the three cannot disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci: Option<Ci>,
+}
+
+/// The release half of `.plugin.json`: which platforms a release builds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ci {
+    #[serde(default)]
+    pub platforms: Vec<String>,
 }
 
 /// A device-restricted build of one or more platforms.
@@ -1405,6 +1424,17 @@ pub struct BuildUnit {
     pub device: Option<String>,
 }
 
+impl Project {
+    /// The triples this project builds for: `ci.platforms` when the release set
+    /// is narrower than `platforms`, else `platforms`.
+    pub fn declared_platforms(&self) -> &[String] {
+        match &self.ci {
+            Some(ci) if !ci.platforms.is_empty() => &ci.platforms,
+            _ => &self.platforms,
+        }
+    }
+}
+
 pub fn write_project(project: &Path, meta: &Project) -> Result<(), String> {
     let path = project.join(".plugin.json");
     let text = serde_json::to_string_pretty(meta).map_err(|error| error.to_string())?;
@@ -1412,14 +1442,14 @@ pub fn write_project(project: &Path, meta: &Project) -> Result<(), String> {
 }
 
 /// Read `.plugin.json` when it exists; a plugin without one declares nothing.
-pub fn read_project(project: &Path) -> Result<Project, String> {
-    let path = project.join(".plugin.json");
+pub fn read_project(project: &Path) -> Result<Project, String> {    let path = project.join(".plugin.json");
     if !path.exists() {
         return Ok(Project {
             name: String::new(),
             language: String::new(),
             platforms: Vec::new(),
             variants: Vec::new(),
+            ci: None,
         });
     }
     let bytes = fs::read(&path).map_err(|error| format!("read {}: {}", path.display(), error))?;
@@ -1432,7 +1462,7 @@ pub fn resolve_platforms(project: &Path, explicit: Option<&str>) -> Result<Vec<S
     if let Some(platform) = explicit {
         return Ok(vec![platform.to_string()]);
     }
-    let declared = read_project(project)?.platforms;
+    let declared = read_project(project)?.declared_platforms().to_vec();
     if declared.is_empty() {
         return Ok(PLATFORMS.iter().map(|value| value.to_string()).collect());
     }

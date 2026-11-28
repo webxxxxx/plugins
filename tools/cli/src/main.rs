@@ -35,6 +35,7 @@ fn main() {
     let result = match verb {
         "template" => template(&args[1..]),
         "build" => build(&args[1..]),
+        "units" => units(&args[1..]),
         "dev" => dev(&args[1..]),
         "devkey" => devkey()
             .map(|path| println!("{}", path.display()))
@@ -59,7 +60,7 @@ fn main() {
 
 fn usage() {
     eprintln!(
-        "usage: plugin-tools <template|build|devkey|sync|check> [options]
+        "usage: plugin-tools <template|build|units|devkey|sync|check> [options]
 
   template <name>   从 templates/<lang> 创建项目（先选平台，再选语言）
       --platforms <ids>   逗号分隔的目标三元组（非交互时必填）
@@ -119,6 +120,17 @@ fn usage() {
   --platform 一起用；副本里缺了清单指的文件会直接报错，不留到安装期。
 
   dev [options]     打包 + 安装 + 启动（首装不自启，这里代做）
+  units [options]   这个项目会产出哪些包，一行一个（构建、pack.sh、CI 矩阵都读它）
+      --dir <path>        插件目录（默认从 cwd 向上找）
+      --platform <t>      只问这一个三元组（任意三元组，和 build 一样）
+      --device <id>       配 --platform 用：问这个设备变体那一行
+      --json              {{plugin, platform, device, artifact, overlay}} 数组
+                          overlay 是这个单元专属载荷目录名（variants/<unit>/），没有则 null
+
+  每行三列（Tab 分隔）：三元组、设备（通用包为空）、产物名。产物名与 build 写出的
+  完全一致，所以调用方不必自己拼 <id>-<version>-<platform>[-<device>].spk。
+  平台的来源是 .plugin.json 的 ci.platforms，没有就 platforms，再没有就全部 7 个。
+
   devkey            生成机器级开发钥（~/.svcd-dev）
   sync [options]    刷新各插件里 vendored 的 SDK 副本（只刷新已有的，不新增）
       --template-repo <p>  模板仓库（同 template，可给本地目录或 git 地址）
@@ -148,6 +160,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--out",
     "--stage",
     "--no-verify",
+    "--json",
     "--help",
     "-h",
 ];
@@ -492,6 +505,7 @@ fn template(args: &[String]) -> Result<(), String> {
             language: language.clone(),
             platforms: platforms.clone(),
             variants: Vec::new(),
+            ci: None,
         },
     )?;
 
@@ -704,6 +718,71 @@ struct Packed {
     spks: Vec<PathBuf>,
     id: String,
     signed: bool,
+}
+
+/// One row per package this project produces, and nothing else.
+///
+/// The unit list is what `build` iterates over, what `pack.sh` walks, and what
+/// the CI matrix is supposed to contain. It used to be re-derived in shell and in
+/// Python, so "what we build" could drift from "what we expect to build"; this
+/// verb is the one answer the three read.
+fn units(args: &[String]) -> Result<(), String> {
+    let root = find_plugin_root(flag(args, "--dir"))?;
+    let base = read_base(&root)?;
+    let meta = parse_meta(&base)?;
+    let id = plugin_id_of(&root, meta.id.as_deref())?;
+    plugin_tools::check_variant_dirs(&root)?;
+    // `--platform` names one unit explicitly (any triple, as `build` allows);
+    // without it the declared set applies, variants included.
+    let units = match flag(args, "--platform") {
+        Some(platform) => vec![plugin_tools::BuildUnit {
+            platform: platform.to_string(),
+            device: flag(args, "--device").map(str::to_string),
+        }],
+        None => plugin_tools::resolve_units(&root, None, None)?,
+    };
+    let mut rows = Vec::new();
+    for unit in &units {
+        let artifact = plugin_tools::artifact_name(
+            &id,
+            &meta.version,
+            &unit.platform,
+            unit.device.as_deref(),
+        );
+        let overlay = plugin_tools::variant_overlay(&root, unit.device.as_deref())
+            .and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            });
+        rows.push((unit, artifact, overlay));
+    }
+    if has(args, "--json") {
+        let json: Vec<_> = rows
+            .iter()
+            .map(|(unit, artifact, overlay)| {
+                serde_json::json!({
+                    "plugin": id,
+                    "platform": unit.platform,
+                    "device": unit.device,
+                    "artifact": artifact,
+                    "overlay": overlay,
+                })
+            })
+            .collect();
+        let text = serde_json::to_string_pretty(&json)
+            .map_err(|error| format!("render units: {error}"))?;
+        println!("{text}");
+    } else {
+        for (unit, artifact, _) in &rows {
+            println!(
+                "{}\t{}\t{}",
+                unit.platform,
+                unit.device.as_deref().unwrap_or(""),
+                artifact
+            );
+        }
+    }
+    Ok(())
 }
 
 fn build(args: &[String]) -> Result<(), String> {
