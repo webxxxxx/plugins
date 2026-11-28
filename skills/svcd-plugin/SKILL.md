@@ -294,6 +294,8 @@ await ui.downloadFile(big.id, { filename: 'x.iso' });
 **`vendor/` 放源码，打包前编译。** 和 `meow`、`sshd` 一样：`vendor/<依赖>/` 存上游源码，`build.sh` 在打包时编译，产物落在 `out/` 或 `payload/bin/`。提交二进制会让它跟源码一起腐烂。唯一的例外是设备内核模块：它对着一棵 CI 里没有的厂商内核树编，只能预编译，并且只能用 `SHA256SUMS` 校验着放（见下面「单元专属的文件」）。`tools/check-vendor.py` 会拦住其余 ELF/`.a`。
 
 **单元专属的文件放 `variants/<unit>/`，不要放 `package/`。** 一个包里只该有它那个单元（平台 + 设备）的东西：内核模块只对一个固件代次有效，`gotatun` 只属于通用包。`package/` 是所有包共用的，把这类文件放进去就只能靠 `build.sh` 记得在下一个包之前删掉——漏一次就进错包（打包器看到 `.ko` 还会要求声明 `compat`）。`variants/<unit>/` 和 `package/` 同形（`payload/bin/…`），打包时只按单元盖上去：
+
+**入口脚本在 git 里要带可执行位（100755）。** 包里的文件模式来自源文件，发布流水线只会再收紧（签名时 `umask 077`），不会补上。`exec.path` 由宿主按声明的 `interpreter` 跑，缺位也能活；但脚本之间直接调（`"$HERE/wireguard.sh" up`）没有位就是 `Permission denied`——wireguard 1.2.2 在设备上就是这么挂的。两件事一起做：脚本里调兄弟脚本写成 `sh "$HERE/x.sh"`，同时 `git update-index --chmod=+x` 补上位；`tools/check-shell.py` 会检查 `payload/bin/*.sh` 与 `variants/*/payload/bin/*.sh` 在索引里是不是 100755。
 | 目录 | 谁拿到 |
 | --- | --- |
 | `package/` | 所有包 |
@@ -358,6 +360,7 @@ SDK 没有 raw 实现。
 | 包里出现源码 | 源码或占位文件放进了 `package/` |
 | `vendor/` 里提交了二进制 | `tools/check-vendor.py` 会报错：源码放 `vendor/`、打包时编译；预编译件只能放 `vendor/prebuilt/<三元组>/` 或 `variants/<unit>/`，并带 SHA256SUMS |
 | 一个包里有别的单元的文件 | 放进了 `package/`：单元专属（设备内核模块、某个后端）的放 `variants/<unit>/`，见「单元专属的文件」 |
+| 设备日志里 `.../payload/bin/x.sh: Permission denied` | 入口脚本在 git 里没有可执行位（100644）；`git update-index --chmod=+x`，并且脚本之间改成 `sh "$HERE/x.sh"` 调用 |
 | 本机打包报找不到 `cc` / `<triple>-gcc` | 构建脚本没走 `tools/cross-env.sh`，或目标工具链没装（`tools/cross/install.sh <triple>`） |
 | 装不上，提示重打包 | 包不是 `schema: 1` 或没有 `id`——用新版 `plugin-tools build` 重打 |
 | 目录名变成中文/乱码 | 把显示名写进了 `id`；中文只能放 `name` |

@@ -359,19 +359,21 @@ guard() {
                 # 厂商固件会把 rp_filter / 策略路由刷回去，所以每 30 秒自愈一拍。
                 _now=$(date +%s)
                 if [ "$WG_LAN_FIX" != off ] && [ $((${_now} - _last_fix)) -ge 30 ]; then
-                    "$HERE/wg-lan-fix.sh" --once >&2 || true
+                    # 用 sh 调：包里的模式来自源文件（流水线的 umask 只会再收紧），
+                    # 脚本之间直接执行 `"$HERE/x.sh"` 在没有可执行位时就是 EACCES。
+                    sh "$HERE/wg-lan-fix.sh" --once >&2 || true
                     _last_fix=$_now
                 fi
             else
                 # 接口被删 / 模块被卸载：重建。失败时隔久一点再试，别刷屏。
-                WG_SKIP_WAIT=1 "$HERE/wireguard.sh" up >&2 || sleep 25
+                WG_SKIP_WAIT=1 sh "$HERE/wireguard.sh" up >&2 || sleep 25
                 _last_fix=0
             fi
             ;;
         userspace)
             if ! gotatun_alive; then
                 log "gotatun 不在了，重建隧道"
-                WG_SKIP_WAIT=1 "$HERE/wireguard.sh" up >&2 || sleep 25
+                WG_SKIP_WAIT=1 sh "$HERE/wireguard.sh" up >&2 || sleep 25
             fi
             ;;
         esac
@@ -404,7 +406,8 @@ hook_call() {
 # 被监督进程。先建隧道再起看守：反过来的话看守会和这里的 up 并发建接口。
 run() {
     echo $$ > "$GUARDIAN_PID"
-    "$HERE/wireguard.sh" up >&2 || log "隧道启动失败，看守会重试；管理页面也可保存设置触发重建"
+    sh "$HERE/wireguard.sh" up >&2 ||
+        log "隧道启动失败，看守会重试；管理页面也可保存设置触发重建"
     guard
 }
 

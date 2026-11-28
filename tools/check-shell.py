@@ -53,12 +53,58 @@ def checker_for(path: Path) -> str | None:
     return shutil.which("dash") or shutil.which("sh")
 
 
+def tracked_modes() -> dict[str, str]:
+    """Index modes, not worktree ones: on Windows every file looks 644."""
+    result = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-s", "--", "*.sh"],
+        capture_output=True,
+        check=True,
+    )
+    modes: dict[str, str] = {}
+    for line in result.stdout.decode("utf-8", "replace").splitlines():
+        meta, _, path = line.partition("\t")
+        if not path:
+            continue
+        modes[path] = meta.split()[0]
+    return modes
+
+
+def payload_entries() -> list[str]:
+    """Tracked scripts that a package ships under `payload/bin/`.
+
+    A package's file modes come from the source tree, and the release pipeline
+    only ever tightens them (`umask 077` while signing). These scripts are the
+    ones another script may run directly (`"$HERE/wireguard.sh" up`), so the
+    executable bit has to be in git — a Windows checkout cannot supply it.
+    """
+    found = []
+    for path in ROOT.rglob("*.sh"):
+        parts = path.relative_to(ROOT).parts
+        if not parts or parts[0] != "plugins":
+            continue
+        if any(part in SKIP_DIRS for part in parts):
+            continue
+        if len(parts) >= 2 and parts[-2] == "bin" and "payload" in parts:
+            found.append(path.relative_to(ROOT).as_posix())
+    return sorted(found)
+
+
 def main() -> int:
     if not (shutil.which("dash") or shutil.which("sh")):
         print("check-shell: 找不到 dash/sh，无法做语法检查", file=sys.stderr)
         return 1
 
     problems: list[str] = []
+    modes = tracked_modes()
+    for rel in payload_entries():
+        mode = modes.get(rel)
+        if mode is None:  # untracked scratch file: not what ships
+            continue
+        if mode != "100755":
+            problems.append(
+                f"{rel}: 在 git 里不是可执行（{mode}）；包里的模式来自源文件，"
+                f"脚本之间直接调用会 EACCES——git update-index --chmod=+x {rel}"
+            )
     for path in scripts():
         rel = path.relative_to(ROOT).as_posix()
         data = path.read_bytes()

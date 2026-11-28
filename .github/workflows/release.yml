@@ -418,7 +418,9 @@ jobs:
             [ -f "$archive" ] || continue
             dir=$(basename "$(dirname "$archive")")
             tmp=$(mktemp -d)
-            tar -xzf "$archive" -C "$tmp"
+            # `umask 077` 收紧了这张签名钥周围的一切；`-p` 让归档里的模式说了算，
+            # 否则 644 的脚本会被掩成 600，装上去直接 EACCES（wireguard 1.2.2 就这样）。
+            tar -xzpf "$archive" -C "$tmp"
             manifest="$tmp/package/manifest.json"
             # `id` is the identity and names the artifact; `name` is the display
             # name (any UTF-8) and must never reach a file name.
