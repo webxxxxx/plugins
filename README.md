@@ -73,7 +73,9 @@ cd tools/cli && cargo build --release
 `{"device": "sr6110", "platforms": ["aarch64-unknown-linux-musl"]}`）：每个平台照旧出一个通用包，
 变体再额外出一个，`compat.devices` 由构建写进那一份清单，产物名带 `-<device>`。`build --device
 <id>` 只打变体；`build --platform <t>` 不带 `--device` 仍只打通用包。recipe 里能拿到 `{device}`
-和 `SVCD_DEVICE`，用来挑该拷哪个二进制。
+和 `SVCD_DEVICE`，用来挑该拷哪个二进制。两个包共用 `id` 和版本号，宿主上只有一个安装槽：目录里
+它们仍是两行产物，但商店把同一 `id`+版本的折成一行、行内选变体（默认取宿主报的已装变体，
+`GET /api/v1/services` 的 `devices` 就是清单的 `compat.devices`）。
 
 **不产出旧 schema 的包**：还在报 `schema_max: 3` 的老宿主装不上新产物，这是有意的——
 先升级宿主，再用同一条线（main）的 `plugin-tools` 重打包。
