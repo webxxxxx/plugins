@@ -1,57 +1,101 @@
-# meow（mihomo 兼容）配置模板。
-#
-# 这个文件是 meow 自己的配置：订阅、代理组、规则都写在这里。第一次启动时会被复制成
-# <插件目录>/meow.yaml，之后就是那一份在跑；本文件只是出厂模板（改了不会自动生效，
-# 想恢复出厂配置就 plugin editconfig meow --reset 之后再重启）。
-#
-# 插件的开关不在这里：proxy-mode / mixed-port / tproxy-port / routing-mark /
-# lan-interface 都在 <插件目录>/config 里，由插件在启动时写进这份配置的受管键
-# （mixed-port、tun、dns、tproxy-port），所以 meow 重写配置也不会把它们弄丢。
-# 页面顶部的代理类型改的就是 proxy-mode，只动那几个受管键；订阅、代理组、规则原样保留。
-# 刚装好时是 off（不接管系统流量）：没有订阅、没有可用出口时，tun / tproxy 会把整机流量
-# 导进一个转不出去的内核，表现就是断网。页面上选了 tun / tproxy 才会接管，选择记在 state。
-
-mixed-port: 7890
+port: null
+socks-port: null
+mixed-port: null                                   # 网关不需要 LAN 侧 HTTP/SOCKS；要开请配 authentication
 allow-lan: true
 bind-address: 0.0.0.0
 mode: rule
-log-level: info
-ipv6: true
-
-# 面板：http://127.0.0.1:9090/ui/ ；secret 为空表示本机免密。
-external-controller: 127.0.0.1:9090
-secret: ""
+log-level: warning
+ipv6: false                                        # 规则只有 v4 REDIRECT；true 会返回 AAAA 导致绕过
+external-controller: '0.0.0.0:9090'
 external-ui: yacd
-
+external-ui-name: null
+external-ui-url: null
+secret: ''
 dns:
   enable: true
-  listen: 127.0.0.1:5353
-  # Windows 的 TUN 捕获要求 fake-ip，插件在 pc 形态会自动写上这两行：
-  # enhanced-mode: fake-ip
-  # fake-ip-range: 198.18.0.1/16
+  listen: "0.0.0.0:1053"                            # 必须配 meow-fw.sh 的 DNS_PORT
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter-mode: null
+  store-fake-ip: null
+  default-nameserver:
+  - 223.5.5.5
+  - 119.29.29.29                              # 用来解析 fallback 里的 https://dns.google 这类域名
   nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
-
-# 地理数据库放数据目录，别改安装目录。包里带了一份精简的 Country.mmdb，第一次启动
-# 会放进数据目录，省得设备先去 GitHub 下 7 MB 的库；缺别的库时 meow 会自行下载。
-# 路径用单引号：@DATA@ 在 Windows 上会替换成 C:\ProgramData\...，双引号标量会把
-# \P、\s 当成转义而报 "found unknown escape character"。
+  - 223.5.5.5
+  - 119.29.29.29
+  proxy-server-nameserver: null
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+    - "webx.xin"
+    - "*.webx.xin"
+  use-system-hosts: null
+  use-hosts: null
+  nameserver-policy:
+    "rule-set:cn_domains": [223.5.5.5, 119.29.29.29]   # 用本地的 cn_domains 规则集，不依赖 geosite.dat
+  fallback-filter: 
+    geoip: true
+    geoip-code: CN
+    ipcidr:
+      - 240.0.0.0/4
+    domain:
+      - '+.google.com'
+      - '+.youtube.com'
+      - '+.chatgpt.com'
+      - '+.x.com'
+  fallback:
+    - https://dns.google/dns-query
+    - https://1.1.1.1/dns-query
+    - tls://8.8.8.8:853
+rule-providers:
+  cn_domains:
+    type: file
+    # 包里那份表是古典写法（DOMAIN-SUFFIX,… / DOMAIN,…）。写成 domain 会把每条当成一个
+    # 字面域名塞进 trie，规则集静默变空；换成纯域名表之后这里要跟着改回 domain。
+    behavior: classical
+    format: null
+    url: null
+    path: '@DATA@/cn_domains.yaml'
+    interval: null
+    proxy: null
+    payload: null
+sub-rules:
+  cn-direct:
+  - RULE-SET,cn_domains,DIRECT
+strict: null
+tproxy-port: null
+# tproxy-sni 已废弃，改用上面的 sniffer
+routing-mark: 9527
+tcp-connect-timeout: null
+sniffer:
+  enable: true
+  override-destination: false
+  sniff:
+    TLS: { ports: [443] }
+    HTTP: { ports: [80] }
+listeners:
+- name: tproxy-tcp
+  type: tproxy
+  port: 7893                                     # 与 sr.conf 的 MEOW_TPROXY_PORT 一致
+  listen: "0.0.0.0"
+  firewall: false
+  max-connections: 4096                       # 默认 256 会被几个家庭设备打满
+  cipher: null
+  password: null
+  udp: null
+  simple-obfs: null
+  shadow-tls: null
+  res-tls: null
+  jls-config: null
+  kcp-tun: null
+  mux-option: null
+authentication: null
+skip-auth-prefixes: null
 geodata:
   mmdb-path: '@DATA@/Country.mmdb'
   asn-path: '@DATA@/GeoLite2-ASN.mmdb'
   geosite-path: '@DATA@/geosite.dat'
 
-# 包里那份 cn_domains.yaml 是 mihomo 的古典写法（DOMAIN-SUFFIX,… / DOMAIN,… /
-# DOMAIN-WILDCARD,…），所以 behavior 必须是 classical。写成 domain 的后果很安静：meow 把每条
-# 当成一个域名塞进 trie，"DOMAIN-SUFFIX,00cdn.com" 变成一条永远匹配不到的字面域名，日志一声
-# 不响，规则集等于空的。老版本写下的 domain 会在启动时就地改过来。
-rule-providers:
-  cn_domains:
-    type: file
-    behavior: classical
-    path: cn_domains.yaml
-
-rules:
-  - RULE-SET,cn_domains,DIRECT
-  - MATCH,DIRECT
+tun: null
+max-connections: 4096
