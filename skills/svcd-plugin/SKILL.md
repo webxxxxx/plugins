@@ -359,7 +359,7 @@ SDK 没有 raw 实现。
 | Windows 上启动 `exit=9009` | `interpreter.name` 写了 `python3`（那是 0 字节存根，用 `python` 或 `py`） |
 | Debian 上装不上 | 给 `sh` 写了 `interpreter.version`（dash 的 `--version` 会报错） |
 | 包里出现源码 | 源码或占位文件放进了 `package/` |
-| `vendor/` 里提交了二进制 | `tools/check-vendor.py` 会报错：源码放 `vendor/`、打包时编译；预编译件只能放 `vendor/prebuilt/<三元组>/` 或 `variants/<unit>/`，并带 SHA256SUMS |
+| `vendor/` 里提交了二进制 | `tools/check-vendor.py` 会报错：源码放 `vendor/`、打包时编译；预编译件只能放 `vendor/prebuilt/<三元组>/` 或 `variants/<unit>/`，并带 SHA256SUMS（里面的文件名相对 SHA256SUMS 所在目录，`build.sh` 就是 `cd <unit> && sha256sum -c`；工具会按同样方式校验每个名字和哈希） |
 | 一个包里有别的单元的文件 | 放进了 `package/`：单元专属（设备内核模块、某个后端）的放 `variants/<unit>/`，见「单元专属的文件」 |
 | 设备日志里 `.../payload/bin/x.sh: Permission denied` | 入口脚本在 git 里没有可执行位（100644）；`git update-index --chmod=+x`，并且脚本之间改成 `sh "$HERE/x.sh"` 调用 |
 | 本机打包报找不到 `cc` / `<triple>-gcc` | 构建脚本没走 `tools/cross-env.sh`，或目标工具链没装（`tools/cross/install.sh <triple>`） |

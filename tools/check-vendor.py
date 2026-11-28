@@ -21,6 +21,7 @@ Run from anywhere: `python3 tools/check-vendor.py`.
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -79,6 +80,44 @@ def tracked_variant_files() -> list[Path]:
     return [ROOT / name for name in names]
 
 
+def sums_entries(sums: Path) -> list[tuple[str, str]]:
+    """`sha256sum` format: `<hex>  <name>`, with the name relative to `sums`."""
+    entries: list[tuple[str, str]] = []
+    for line in sums.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        digest, _, name = line.partition(" ")
+        entries.append((digest.strip().lower(), name.strip().lstrip("*")))
+    return entries
+
+
+def verify_sums(directory: Path, binaries: list[Path], problems: list[str]) -> None:
+    """A `SHA256SUMS` has to resolve from the directory that holds it.
+
+    `build.sh` checks it exactly that way (`cd <unit> && sha256sum -c`), so a
+    name that only resolves from somewhere else — the bare file name a
+    `vendor/prebuilt/<triple>/` manifest used to carry — would fail the release
+    job at its last step instead of here. Every binary in the directory also has
+    to be listed: an unlisted prebuilt file is one nobody can verify.
+    """
+    sums = directory / "SHA256SUMS"
+    label = sums.relative_to(ROOT).as_posix()
+    listed: set[str] = set()
+    for digest, name in sums_entries(sums):
+        listed.add(name)
+        target = directory / name
+        if not name or not target.is_file():
+            problems.append(f"{label}: {name or '（空名字）'} 不存在（名字相对 SHA256SUMS 所在目录）")
+            continue
+        if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            problems.append(f"{label}: {name} 的 SHA256 与文件内容不符")
+    for binary in binaries:
+        name = binary.relative_to(directory).as_posix()
+        if name not in listed:
+            problems.append(f"{label}: {name} 没写进 SHA256SUMS（预编译件必须可校验）")
+
+
 def main() -> int:
     try:
         files = tracked_vendor_files()
@@ -89,6 +128,7 @@ def main() -> int:
 
     problems: list[str] = []
     prebuilt_dirs: set[Path] = set()
+    prebuilt_binaries: dict[Path, list[Path]] = {}
     for path in files:
         rel = path.relative_to(ROOT)
         vendor = next((parent for parent in rel.parents if parent.name == "vendor"), None)
@@ -97,7 +137,10 @@ def main() -> int:
         inside = rel.relative_to(vendor)
         if inside.parts[:1] == ("prebuilt",):
             if len(inside.parts) >= 3:
-                prebuilt_dirs.add(ROOT / vendor / "prebuilt" / inside.parts[1])
+                directory = ROOT / vendor / "prebuilt" / inside.parts[1]
+                prebuilt_dirs.add(directory)
+                if format_of(path):
+                    prebuilt_binaries.setdefault(directory, []).append(path)
             continue
         kind = format_of(path)
         if kind:
@@ -111,10 +154,13 @@ def main() -> int:
         if not (directory / "SHA256SUMS").is_file():
             rel = directory.relative_to(ROOT).as_posix()
             problems.append(f"{rel}: 缺 SHA256SUMS（预编译件必须可校验）")
+            continue
+        verify_sums(directory, prebuilt_binaries.get(directory, []), problems)
 
     # `plugins/<plugin>/variants/<unit>/` 只进那个单元自己的包：里面允许有预编译件
     # （设备内核模块），但和 vendor/prebuilt 一样必须能校验。
     variant_dirs: set[Path] = set()
+    variant_binaries: dict[Path, list[Path]] = {}
     for path in variant_files:
         rel = path.relative_to(ROOT)
         if not format_of(path):
@@ -125,12 +171,16 @@ def main() -> int:
                 f"{rel.as_posix()}: 变体文件要在 plugins/<插件>/variants/<unit>/ 下"
             )
             continue
-        variant_dirs.add(ROOT.joinpath(*parts[:4]))
+        directory = ROOT.joinpath(*parts[:4])
+        variant_dirs.add(directory)
+        variant_binaries.setdefault(directory, []).append(path)
 
     for directory in sorted(variant_dirs):
         if not (directory / "SHA256SUMS").is_file():
             rel = directory.relative_to(ROOT).as_posix()
             problems.append(f"{rel}: 缺 SHA256SUMS（变体里的预编译件必须可校验）")
+            continue
+        verify_sums(directory, variant_binaries.get(directory, []), problems)
 
     if problems:
         for problem in problems:

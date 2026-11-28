@@ -23,3 +23,8 @@
 *.tar.xz  binary
 plugins/*/vendor/prebuilt/* binary
 plugins/*/vendor/prebuilt/*/SHA256SUMS -binary text eol=lf
+
+# 变体单元的 SHA256SUMS 与内核模块。清单里的名字是给 `cd <unit> && sha256sum -c`
+# 用的：CRLF 会给名字尾巴添一个 \r，Windows 检出就校验不过。
+plugins/*/variants/*/SHA256SUMS text eol=lf
+*.py   text eol=lf

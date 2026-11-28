@@ -4,7 +4,8 @@
 #   DEVICE 为空      -> 通用包：gotatun（用户态）+ wg，两个都从 vendor/ 源码编
 #   DEVICE=sr6110    -> SR6110 变体：内核模块 wireguard.ko 是唯一预编译件
 #                       （要对着厂商 5.4.196 内核树编，CI 里没有那棵树），
-#                       放在 vendor/prebuilt/；wg 仍然从源码编
+#                       仓库里就有 variants/sr6110/payload/bin/wireguard.ko，
+#                       这里只校验；wg 仍然从源码编
 #
 # 交叉工具链走仓库里那张唯一的表 tools/cross-env.sh（别在这里另拼 CC/AR）。
 # 有 docker 的机器可以 SVCD_DOCKER=1，把编译丢进 rust-cross 镜像，宿主什么都不用装。
